@@ -320,6 +320,7 @@ def configure_local_capability(capability: str) -> dict[str, Any]:
     if recommendation is None:
         raise HTTPException(status_code=400, detail=_missing_capability_message(capability))
     next_configs = _upsert_model_config(configs, recommendation)
+    next_configs = _prefer_model_for_capability(next_configs, capability, recommendation.get("id", ""))
     if capability == "llm":
         vision_config = _recommended_vision_config(ollama_models)
         if vision_config:
@@ -337,6 +338,7 @@ def install_local_capability(capability: str) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="当前只有 SAM 分层支持内置安装")
     if _embedded_mobile_sam_ready():
         configs = _upsert_model_config(store.load_model_configs(), _embedded_mobile_sam_config())
+        configs = _prefer_model_for_capability(configs, capability, MOBILE_SAM_MODEL_ID)
         store.save_model_configs(configs)
         task = _create_capability_task(capability, title="内置 MobileSAM 已可用")
         _set_capability_task(
@@ -851,6 +853,20 @@ def _upsert_model_config(configs: list[dict[str, Any]], config: dict[str, Any]) 
     return [item for item in configs if item.get("id") != config.get("id")] + [config]
 
 
+def _prefer_model_for_capability(
+    configs: list[dict[str, Any]],
+    capability: str,
+    preferred_id: str,
+) -> list[dict[str, Any]]:
+    next_configs: list[dict[str, Any]] = []
+    for config in configs:
+        updated = dict(config)
+        if capability in set(updated.get("capabilities", [])):
+            updated["enabled"] = updated.get("id") == preferred_id
+        next_configs.append(updated)
+    return next_configs
+
+
 def _create_capability_task(capability: str, title: str) -> dict[str, Any]:
     task = {
         "id": new_id("model_task"),
@@ -920,6 +936,10 @@ def _run_embedded_sam_install_task(task_id: str) -> None:
             if not _pip_install(["git+https://github.com/ChaoningZhang/MobileSAM.git"]):
                 if not _pip_install(["https://github.com/ChaoningZhang/MobileSAM/archive/refs/heads/master.zip"]):
                     raise RuntimeError("MobileSAM 安装失败，请检查网络或 GitHub 访问。")
+        if not _python_module_available("timm"):
+            _set_capability_task(task_id, stage="install_mobile_sam", progress=56, message="安装 MobileSAM 依赖 timm")
+            if not _pip_install(["timm"]):
+                raise RuntimeError("timm 安装失败，请检查网络或 Python 环境。")
 
         _set_capability_task(task_id, stage="download_weights", progress=68, message="下载 MobileSAM 权重")
         _download_mobile_sam_weights()
@@ -929,6 +949,7 @@ def _run_embedded_sam_install_task(task_id: str) -> None:
             raise RuntimeError("MobileSAM 验证失败，请重试安装。")
 
         configs = _upsert_model_config(store.load_model_configs(), _embedded_mobile_sam_config())
+        configs = _prefer_model_for_capability(configs, "segmentation", MOBILE_SAM_MODEL_ID)
         store.save_model_configs(configs)
         _set_capability_task(
             task_id,
@@ -984,6 +1005,7 @@ def _embedded_mobile_sam_ready() -> bool:
     return (
         _python_module_available("torch")
         and _python_module_available("mobile_sam")
+        and _python_module_available("timm")
         and _valid_mobile_sam_weight(_embedded_mobile_sam_weight_path())
     )
 
@@ -1136,14 +1158,16 @@ def _missing_capability_message(capability: str) -> str:
 
 
 def _find_enabled_model(capability: str) -> dict[str, Any] | None:
-    return next(
-        (
-            config
-            for config in store.load_model_configs()
-            if config.get("enabled", True) and capability in set(config.get("capabilities", []))
-        ),
-        None,
-    )
+    matching = [
+        config
+        for config in store.load_model_configs()
+        if config.get("enabled", True) and capability in set(config.get("capabilities", []))
+    ]
+    if capability == "segmentation":
+        embedded = next((config for config in matching if config.get("provider") == MOBILE_SAM_PROVIDER), None)
+        if embedded:
+            return embedded
+    return matching[0] if matching else None
 
 
 def _segmentation_state(

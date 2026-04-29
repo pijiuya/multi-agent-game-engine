@@ -430,6 +430,80 @@ def test_api_http_sam_provider(monkeypatch):
     assert len(payload["world"]["map"]["regions"][0]["points"]) > 4
 
 
+def test_api_prefers_embedded_sam_over_http(monkeypatch):
+    client = TestClient(app)
+
+    client.patch(
+        "/api/map",
+        json={
+            "width": 640,
+            "height": 360,
+            "background_image": "/api/assets/test-map.png",
+        },
+    )
+    client.patch(
+        "/api/models",
+        json={
+            "models": [
+                {
+                    "id": "model_http_sam",
+                    "name": "HTTP SAM",
+                    "kind": "remote",
+                    "provider": "sam-http",
+                    "base_url": "http://sam.test/segment",
+                    "model": "sam2",
+                    "enabled": True,
+                    "capabilities": ["segmentation"],
+                },
+                {
+                    "id": "model_local_sam_embedded",
+                    "name": "内置 MobileSAM",
+                    "kind": "local",
+                    "provider": "embedded-mobile-sam",
+                    "base_url": "",
+                    "model": "vit_t",
+                    "enabled": True,
+                    "capabilities": ["segmentation"],
+                },
+            ]
+        },
+    )
+
+    def fail_http_provider(config, world_map):
+        raise AssertionError("HTTP SAM should not be used when embedded MobileSAM is enabled")
+
+    def fake_embedded_provider(config, world_map):
+        assert config["id"] == "model_local_sam_embedded"
+        return [
+            api_main.MapRegion(
+                id="region_preferred_embedded",
+                name="内置优先区域",
+                function="social",
+                source="model_local_sam_embedded",
+                points=[
+                    api_main.Point(0, 0),
+                    api_main.Point(120, 0),
+                    api_main.Point(120, 80),
+                    api_main.Point(0, 80),
+                ],
+                confidence=0.95,
+                notes="优先使用内置 MobileSAM",
+                tags=["优先"],
+            )
+        ]
+
+    monkeypatch.setattr(api_main, "_call_http_sam_provider", fail_http_provider)
+    monkeypatch.setattr(api_main, "_call_embedded_mobile_sam_provider", fake_embedded_provider)
+
+    segmented = client.post("/api/map/segment")
+
+    assert segmented.status_code == 200
+    payload = segmented.json()
+    assert payload["segmentation"]["mode"] == "embedded"
+    assert payload["segmentation"]["provider_id"] == "model_local_sam_embedded"
+    assert payload["world"]["map"]["regions"][0]["name"] == "内置优先区域"
+
+
 def default_model_configs():
     return [
         {

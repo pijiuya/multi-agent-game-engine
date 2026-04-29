@@ -1182,7 +1182,11 @@ function mapPrompt(prompt: string, width: number, height: number, ratio: MapRati
 }
 
 function enabledModelForCapability(models: ModelConfig[], capability: ModelConfig["capabilities"][number]) {
-  return models.find((model) => model.enabled && model.capabilities.includes(capability)) ?? null;
+  const matching = models.filter((model) => model.enabled && model.capabilities.includes(capability));
+  if (capability === "segmentation") {
+    return matching.find((model) => model.provider === "embedded-mobile-sam") ?? matching[0] ?? null;
+  }
+  return matching[0] ?? null;
 }
 
 function mergeCapabilityStatus(statuses: ModelCapabilityStatus[], next: ModelCapabilityStatus): ModelCapabilityStatus[] {

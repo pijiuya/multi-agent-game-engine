@@ -318,7 +318,7 @@ function ProviderCard({ provider, segmentation }: { provider: ModelConfig | null
       <small>
         {samProviderLabel(provider.provider)} / {provider.model || "未指定模型"}
       </small>
-      <small>{provider.baseUrl || "本地 mock provider"}</small>
+      <small>{provider.provider === "embedded-mobile-sam" ? "内置推理，无需服务地址" : provider.baseUrl || "本地模型"}</small>
       {segmentation.mode === "mock" || segmentation.mode === "local_mock" ? <small>当前结果来自测试 Mock SAM</small> : null}
     </div>
   );
@@ -418,7 +418,11 @@ function mapStatusText(world: WorldSnapshot, provider: ModelConfig | null, segme
 }
 
 function enabledModelForCapability(models: ModelConfig[], capability: ModelConfig["capabilities"][number]) {
-  return models.find((model) => model.enabled && model.capabilities.includes(capability)) ?? null;
+  const matching = models.filter((model) => model.enabled && model.capabilities.includes(capability));
+  if (capability === "segmentation") {
+    return matching.find((model) => model.provider === "embedded-mobile-sam") ?? matching[0] ?? null;
+  }
+  return matching[0] ?? null;
 }
 
 function samProviderLabel(provider: string) {
