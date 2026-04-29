@@ -259,6 +259,17 @@ export async function regenerateMapRegion(regionId: string, prompt: string): Pro
   }
 }
 
+export async function autoLabelMapRegion(regionId: string): Promise<WorldSnapshot | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/map/regions/${regionId}/auto-label`, {
+      method: "POST"
+    });
+    return response.ok ? normalizeWorldSnapshot(await response.json()) : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function patchAgent(agentId: string, patch: Partial<Omit<AgentProfile, "id">>) {
   try {
     const response = await fetch(`${apiBase}/api/agents/${agentId}`, {

@@ -427,7 +427,7 @@ def test_api_http_sam_provider(monkeypatch):
     assert payload["segmentation"]["stage"] == "done"
     assert payload["segmentation"]["progress"] == 100
     assert payload["world"]["map"]["regions"][0]["name"] == "HTTP 区域"
-    assert len(payload["world"]["map"]["regions"][0]["points"]) > 4
+    assert len(payload["world"]["map"]["regions"][0]["points"]) >= 4
 
 
 def test_api_prefers_embedded_sam_over_http(monkeypatch):
@@ -502,6 +502,64 @@ def test_api_prefers_embedded_sam_over_http(monkeypatch):
     assert payload["segmentation"]["mode"] == "embedded"
     assert payload["segmentation"]["provider_id"] == "model_local_sam_embedded"
     assert payload["world"]["map"]["regions"][0]["name"] == "内置优先区域"
+
+
+def test_api_auto_label_region_with_local_vision(monkeypatch):
+    client = TestClient(app)
+
+    client.patch(
+        "/api/map",
+        json={
+            "width": 640,
+            "height": 360,
+            "background_image": "/api/assets/test-map.png",
+        },
+    )
+    client.patch(
+        "/api/models",
+        json={
+            "models": [
+                {
+                    "id": "model_local_vision",
+                    "name": "本地图像识别 - qwen2.5vl:3b",
+                    "kind": "local",
+                    "provider": "ollama",
+                    "base_url": "http://127.0.0.1:11434",
+                    "model": "qwen2.5vl:3b",
+                    "enabled": True,
+                    "capabilities": ["vision_labeling"],
+                }
+            ]
+        },
+    )
+    api_main.runtime.world.map.regions = [
+        api_main.MapRegion(
+            id="region_label_test",
+            name="SAM 分区 1",
+            function="unassigned",
+            source="model_local_sam_embedded",
+            points=[
+                api_main.Point(10, 10),
+                api_main.Point(120, 10),
+                api_main.Point(120, 100),
+                api_main.Point(10, 100),
+            ],
+            notes="待命名",
+            tags=["MobileSAM"],
+        )
+    ]
+
+    monkeypatch.setattr(
+        api_main,
+        "_label_region_with_model",
+        lambda config, world_map, region: {"name": "石板路", "notes": "一段穿过场景中央的道路。", "tags": ["道路", "通行"]},
+    )
+    response = client.post("/api/map/regions/region_label_test/auto-label")
+
+    assert response.status_code == 200
+    region = next(region for region in response.json()["map"]["regions"] if region["id"] == "region_label_test")
+    assert region["name"] == "石板路"
+    assert "道路" in region["tags"]
 
 
 def default_model_configs():

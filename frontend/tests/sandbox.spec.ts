@@ -799,6 +799,7 @@ test("map studio separates model management and runs gated SAM flow", async ({ p
 
   await expect(mapStudioPanel.getByTestId("map-workflow-steps")).toContainText("背景生成/导入");
   await expect(mapStudioPanel.getByTestId("map-workflow-steps")).toContainText("SAM 分层");
+  await expect(mapStudioPanel.getByTestId("map-workflow-steps")).toContainText("图层处理");
   await expect(mapStudioPanel.getByTestId("map-step-body-background")).toBeVisible();
   await expect(mapStudioPanel.getByTestId("map-step-body-segment")).toHaveCount(0);
   await mapStudioPanel.getByTestId("map-ratio-controls").getByRole("button", { name: "16:9" }).click();
@@ -864,12 +865,11 @@ test("map studio separates model management and runs gated SAM flow", async ({ p
 
   await mapStudioPanel.getByTestId("map-step-layers").click();
   await expect(mapStudioPanel.getByTestId("map-step-body-layers")).toBeVisible();
+  await expect(mapStudioPanel.getByTestId("layer-action-controls")).toBeVisible();
   await expect(mapStudioPanel.getByLabel("图层名称")).toBeVisible();
   await expect(mapStudioPanel.getByRole("button", { name: "未配置图像识别模型" })).toBeVisible();
-
-  await mapStudioPanel.getByTestId("map-step-functions").click();
-  await expect(mapStudioPanel.getByTestId("map-step-body-functions")).toBeVisible();
-  await mapStudioPanel.getByTestId("map-step-body-functions").getByRole("button", { name: "不可穿过", exact: true }).click();
+  await mapStudioPanel.getByTestId("layer-action-controls").getByRole("button", { name: "功能分区", exact: true }).click();
+  await mapStudioPanel.getByRole("button", { name: "不可穿过", exact: true }).click();
   await expect(page.getByTestId("panel-scene").getByText("不可穿过").first()).toBeVisible();
 });
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import asyncio
+import base64
 import hashlib
 import importlib.util
 import json
@@ -486,6 +487,22 @@ def regenerate_region(region_id: str, payload: dict[str, Any] | None = None) -> 
     prompt = str((payload or {}).get("prompt") or region.image_prompt or region.name)
     region.image_prompt = prompt
     region.notes = f"已为区域“{region.name}”创建局部重绘提示：{prompt}"
+    store.save_world(runtime.world)
+    return runtime.snapshot()
+
+
+@app.post("/api/map/regions/{region_id}/auto-label")
+def auto_label_region(region_id: str) -> dict[str, Any]:
+    region = runtime.world.map.region_by_id(region_id)
+    if region is None:
+        raise HTTPException(status_code=404, detail="Region not found")
+    config = _find_enabled_model("vision_labeling")
+    if config is None:
+        raise HTTPException(status_code=400, detail="未配置图像识别模型")
+    label = _label_region_with_model(config, runtime.world.map, region)
+    region.name = label["name"]
+    region.notes = label["notes"]
+    region.tags = label["tags"]
     store.save_world(runtime.world)
     return runtime.snapshot()
 
@@ -1242,43 +1259,55 @@ def _call_embedded_mobile_sam_provider(config: dict[str, Any], world_map: WorldM
     raw_masks = generator.generate(image_rgb)
     raw_masks = sorted(raw_masks, key=lambda item: float(item.get("area", 0)), reverse=True)
     regions: list[MapRegion] = []
+    occupied = np.zeros(raw_masks[0]["segmentation"].shape, dtype=np.uint8) if raw_masks else None
     map_area = max(1, original_width * original_height)
     for raw in raw_masks:
-        if len(regions) >= 80:
+        if len(regions) >= 120:
             break
-        area = float(raw.get("area", 0)) / max(scale * scale, 0.0001)
-        area_ratio = area / map_area
-        if area_ratio < 0.001 or area_ratio > 0.82:
-            continue
         mask = raw.get("segmentation")
         if mask is None:
             continue
-        contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        residual = mask.astype(np.uint8)
+        if occupied is not None:
+            residual = cv2.bitwise_and(residual, cv2.bitwise_not(occupied))
+        area = float(residual.sum()) / max(scale * scale, 0.0001)
+        area_ratio = area / map_area
+        if area_ratio < 0.0006 or area_ratio > 0.9:
+            continue
+        contours, _ = cv2.findContours(residual, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             continue
-        contour = max(contours, key=cv2.contourArea)
-        perimeter = cv2.arcLength(contour, True)
-        if perimeter <= 0:
-            continue
-        approximated = cv2.approxPolyDP(contour, max(2.0, perimeter * 0.006), True)
-        points = [
-            Point(float(point[0][0]) / scale, float(point[0][1]) / scale)
-            for point in approximated
-        ]
-        if len(points) < 3:
-            continue
-        regions.append(
-            MapRegion(
-                id=new_id("region"),
-                name=f"SAM 分区 {len(regions) + 1}",
-                function="unassigned",
-                source=config.get("id", MOBILE_SAM_MODEL_ID),
-                points=points,
-                notes="内置 MobileSAM 自动分层，等待命名和功能设定。",
-                confidence=float(raw.get("predicted_iou") or raw.get("stability_score") or 0),
-                tags=["MobileSAM"],
+        for contour in sorted(contours, key=cv2.contourArea, reverse=True):
+            if len(regions) >= 120:
+                break
+            contour_area = cv2.contourArea(contour) / max(scale * scale, 0.0001)
+            contour_ratio = contour_area / map_area
+            if contour_ratio < 0.0006:
+                continue
+            perimeter = cv2.arcLength(contour, True)
+            if perimeter <= 0:
+                continue
+            approximated = cv2.approxPolyDP(contour, max(1.0, perimeter * 0.0025), True)
+            points = [
+                Point(float(point[0][0]) / scale, float(point[0][1]) / scale)
+                for point in approximated
+            ]
+            if len(points) < 3:
+                continue
+            regions.append(
+                MapRegion(
+                    id=new_id("region"),
+                    name=f"SAM 分区 {len(regions) + 1}",
+                    function="unassigned",
+                    source=config.get("id", MOBILE_SAM_MODEL_ID),
+                    points=points,
+                    notes="内置 MobileSAM 自动分层，等待命名和功能设定。",
+                    confidence=float(raw.get("predicted_iou") or raw.get("stability_score") or 0),
+                    tags=["MobileSAM"],
+                )
             )
-        )
+        if occupied is not None:
+            occupied = cv2.bitwise_or(occupied, residual)
     return regions
 
 
@@ -1368,25 +1397,10 @@ def _points_from_region_payload(raw: dict[str, Any]) -> list[Point]:
 def _postprocess_regions(regions: list[MapRegion]) -> list[MapRegion]:
     next_regions: list[MapRegion] = []
     for region in regions:
-        smoothed = _smooth_polygon_points(region.points)
-        if len(smoothed) >= 3:
-            region.points = smoothed
+        region.points = _remove_near_duplicate_points(region.points, min_distance=1.0)
+        if len(region.points) >= 3 and _polygon_area(region.points) >= 64:
             next_regions.append(region)
     return next_regions
-
-
-def _smooth_polygon_points(points: list[Point], iterations: int = 2) -> list[Point]:
-    clean = _remove_near_duplicate_points(points)
-    clean = _remove_nearly_collinear_points(clean)
-    if len(clean) < 4:
-        return clean
-    smoothed = clean
-    for _ in range(iterations):
-        smoothed = _chaikin_closed_polygon(smoothed)
-    if len(smoothed) > 160:
-        step = math.ceil(len(smoothed) / 160)
-        smoothed = smoothed[::step]
-    return _remove_near_duplicate_points(smoothed)
 
 
 def _remove_near_duplicate_points(points: list[Point], min_distance: float = 2.0) -> list[Point]:
@@ -1399,66 +1413,169 @@ def _remove_near_duplicate_points(points: list[Point], min_distance: float = 2.0
     return clean
 
 
-def _remove_nearly_collinear_points(points: list[Point], epsilon: float = 0.015) -> list[Point]:
-    if len(points) < 4:
-        return points
-    kept: list[Point] = []
-    for index, current in enumerate(points):
-        previous = points[index - 1]
-        following = points[(index + 1) % len(points)]
-        area = abs(
-            (current.x - previous.x) * (following.y - previous.y)
-            - (current.y - previous.y) * (following.x - previous.x)
-        )
-        base = max(1.0, _distance(previous, following))
-        if area / base > epsilon:
-            kept.append(current)
-    return kept if len(kept) >= 3 else points
-
-
-def _chaikin_closed_polygon(points: list[Point]) -> list[Point]:
-    next_points: list[Point] = []
-    for index, point in enumerate(points):
-        following = points[(index + 1) % len(points)]
-        next_points.append(Point(point.x * 0.75 + following.x * 0.25, point.y * 0.75 + following.y * 0.25))
-        next_points.append(Point(point.x * 0.25 + following.x * 0.75, point.y * 0.25 + following.y * 0.75))
-    return next_points
-
-
 def _distance(a: Point, b: Point) -> float:
     return math.hypot(a.x - b.x, a.y - b.y)
+
+
+def _polygon_area(points: list[Point]) -> float:
+    if len(points) < 3:
+        return 0.0
+    area = 0.0
+    for index, point in enumerate(points):
+        following = points[(index + 1) % len(points)]
+        area += point.x * following.y - following.x * point.y
+    return abs(area) * 0.5
+
+
+def _label_region_with_model(config: dict[str, Any], world_map: WorldMap, region: MapRegion) -> dict[str, Any]:
+    provider = str(config.get("provider", ""))
+    if provider == "ollama":
+        return _label_region_with_ollama(config, world_map, region)
+    raise HTTPException(status_code=400, detail="当前图像识别模型不支持自动命名")
+
+
+def _label_region_with_ollama(config: dict[str, Any], world_map: WorldMap, region: MapRegion) -> dict[str, Any]:
+    image_b64 = _region_crop_png_base64(world_map, region)
+    prompt = (
+        "请观察这张 2D 地图局部图，只返回 JSON。"
+        "{\"name\":\"...\",\"notes\":\"...\",\"tags\":[\"...\",\"...\"]}"
+        "name 用 2 到 8 个中文，不能包含 SAM、MobileSAM、分区、区域。"
+        "notes 一句中文。tags 给 1 到 3 个中文短词。"
+    )
+    body = {
+        "model": config.get("model", ""),
+        "prompt": prompt,
+        "stream": False,
+        "format": "json",
+        "images": [image_b64],
+        "options": {"temperature": 0.1, "num_predict": 120},
+    }
+    payload = json.dumps(body).encode("utf-8")
+    request = urlrequest.Request(
+        f"{str(config.get('base_url', '')).rstrip('/')}/api/generate",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlrequest.urlopen(request, timeout=120) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"图像识别模型服务错误：{exc.code}") from exc
+    except (URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        raise HTTPException(status_code=502, detail=f"图像识别模型不可用：{exc}") from exc
+    raw_text = str(data.get("response", "")).strip()
+    try:
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError:
+        parsed = {}
+    name = str(parsed.get("name") or "").strip() if isinstance(parsed, dict) else ""
+    notes = str(parsed.get("notes") or "").strip() if isinstance(parsed, dict) else ""
+    tags = list(parsed.get("tags") or []) if isinstance(parsed, dict) else []
+    if not name:
+        name = region.name
+    if not notes:
+        notes = f"已由 {config.get('name', '本地图像识别模型')} 自动识别并命名。"
+    clean_name = name.replace("SAM", "").replace("MobileSAM", "").replace("分区", "").replace("区域", "").strip()[:8] or region.name
+    clean_tags = [str(tag).strip() for tag in tags if str(tag).strip()][:3]
+    if not clean_tags:
+        clean_tags = ["视觉识别"]
+    return {"name": clean_name, "notes": notes, "tags": clean_tags}
+
+
+def _region_crop_png_base64(world_map: WorldMap, region: MapRegion) -> str:
+    image_path = _asset_path_for_url(world_map.background_image)
+    if not image_path:
+        raise HTTPException(status_code=400, detail="当前地图缺少可裁剪的背景图")
+    import cv2
+    import numpy as np
+
+    image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+    if image is None:
+        raise HTTPException(status_code=400, detail="背景图读取失败，无法做图像识别")
+    height, width = image.shape[:2]
+    polygon = np.array([[[int(round(point.x)), int(round(point.y))]] for point in region.points], dtype=np.int32)
+    x, y, w, h = cv2.boundingRect(polygon)
+    margin = 18
+    left = max(0, x - margin)
+    top = max(0, y - margin)
+    right = min(width, x + w + margin)
+    bottom = min(height, y + h + margin)
+    cropped = image[top:bottom, left:right].copy()
+    shifted = polygon.copy()
+    shifted[:, 0, 0] -= left
+    shifted[:, 0, 1] -= top
+    mask = np.zeros(cropped.shape[:2], dtype=np.uint8)
+    cv2.fillPoly(mask, [shifted], 255)
+    background = np.full_like(cropped, 245)
+    composed = np.where(mask[:, :, None] > 0, cropped, background)
+    max_side = max(composed.shape[0], composed.shape[1])
+    if max_side > 512:
+        scale = 512 / max_side
+        composed = cv2.resize(
+            composed,
+            (max(32, int(composed.shape[1] * scale)), max(32, int(composed.shape[0] * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+    ok, encoded = cv2.imencode(".png", composed)
+    if not ok:
+        raise HTTPException(status_code=500, detail="区域裁剪编码失败")
+    return base64.b64encode(encoded.tobytes()).decode("ascii")
 
 
 def _mock_generated_candidate(
     generation_id: str, index: int, prompt: str, width: int, height: int
 ) -> dict[str, Any]:
-    import html
+    from PIL import Image, ImageDraw
 
-    asset_name = f"{generation_id}_{index + 1}.svg"
+    asset_name = f"{generation_id}_{index + 1}.png"
     destination = store.assets_dir / asset_name
     store.initialize()
     hue = (index * 62 + len(prompt) * 7) % 360
-    title = html.escape(prompt[:80] or "生成式游戏地图")
-    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="hsl({hue}, 36%, 78%)"/>
-      <stop offset="1" stop-color="hsl({(hue + 84) % 360}, 34%, 64%)"/>
-    </linearGradient>
-    <pattern id="tiles" width="96" height="96" patternUnits="userSpaceOnUse">
-      <path d="M0 0H96V96H0Z" fill="none" stroke="rgba(20,20,20,.12)" stroke-width="2"/>
-      <path d="M0 48H96M48 0V96" stroke="rgba(255,255,255,.22)" stroke-width="1"/>
-    </pattern>
-  </defs>
-  <rect width="100%" height="100%" fill="url(#bg)"/>
-  <rect width="100%" height="100%" fill="url(#tiles)" opacity=".72"/>
-  <path d="M{width*.08:.0f} {height*.62:.0f} C {width*.28:.0f} {height*.44:.0f}, {width*.52:.0f} {height*.7:.0f}, {width*.9:.0f} {height*.42:.0f}" fill="none" stroke="rgba(36,36,36,.42)" stroke-width="{max(18, width*.018):.0f}" stroke-linecap="round"/>
-  <rect x="{width*.1:.0f}" y="{height*.12:.0f}" width="{width*.24:.0f}" height="{height*.24:.0f}" rx="18" fill="rgba(255,255,255,.24)" stroke="rgba(20,20,20,.22)" stroke-width="4"/>
-  <rect x="{width*.62:.0f}" y="{height*.16:.0f}" width="{width*.25:.0f}" height="{height*.28:.0f}" rx="22" fill="rgba(255,255,255,.2)" stroke="rgba(20,20,20,.2)" stroke-width="4"/>
-  <circle cx="{width*.46:.0f}" cy="{height*.36:.0f}" r="{min(width,height)*.09:.0f}" fill="rgba(255,255,255,.18)" stroke="rgba(20,20,20,.18)" stroke-width="4"/>
-  <text x="32" y="{height - 32}" fill="rgba(20,20,20,.36)" font-family="Arial" font-size="28">{title}</text>
-</svg>"""
-    destination.write_text(svg, encoding="utf-8")
+    image = Image.new("RGB", (width, height), _hsl_to_rgb(hue, 0.34, 0.78))
+    draw = ImageDraw.Draw(image, "RGBA")
+    draw.rectangle((0, 0, width, height), fill=_hsl_to_rgb((hue + 84) % 360, 0.26, 0.68) + (86,))
+    grid_step = max(72, width // 20)
+    for x in range(0, width + 1, grid_step):
+        draw.line((x, 0, x, height), fill=(32, 32, 32, 24), width=1)
+    for y in range(0, height + 1, grid_step):
+        draw.line((0, y, width, y), fill=(245, 245, 245, 30), width=1)
+    road_width = max(18, width // 48)
+    draw.line(
+        (
+            int(width * 0.08),
+            int(height * 0.62),
+            int(width * 0.28),
+            int(height * 0.44),
+            int(width * 0.52),
+            int(height * 0.7),
+            int(width * 0.9),
+            int(height * 0.42),
+        ),
+        fill=(36, 36, 36, 120),
+        width=road_width,
+    )
+    draw.rounded_rectangle(
+        (int(width * 0.1), int(height * 0.12), int(width * 0.34), int(height * 0.36)),
+        radius=18,
+        fill=(245, 245, 245, 64),
+        outline=(20, 20, 20, 52),
+        width=4,
+    )
+    draw.rounded_rectangle(
+        (int(width * 0.62), int(height * 0.16), int(width * 0.87), int(height * 0.44)),
+        radius=22,
+        fill=(245, 245, 245, 56),
+        outline=(20, 20, 20, 48),
+        width=4,
+    )
+    draw.ellipse(
+        (int(width * 0.37), int(height * 0.27), int(width * 0.55), int(height * 0.45)),
+        fill=(245, 245, 245, 46),
+        outline=(20, 20, 20, 40),
+        width=4,
+    )
+    image.save(destination, format="PNG")
     return {
         "id": f"{generation_id}_candidate_{index + 1}",
         "url": f"/api/assets/{asset_name}",
@@ -1467,6 +1584,13 @@ def _mock_generated_candidate(
         "height": height,
         "provider_id": "model_mock_image",
     }
+
+
+def _hsl_to_rgb(h: int, s: float, l: float) -> tuple[int, int, int]:
+    import colorsys
+
+    r, g, b = colorsys.hls_to_rgb((h % 360) / 360.0, l, s)
+    return (int(r * 255), int(g * 255), int(b * 255))
 
 
 def _mock_regions(width: int, height: int, source: str = "mock_sam") -> list[MapRegion]:

@@ -14,6 +14,7 @@ import {
   snapWorldPointToGrid
 } from "./lib/canvasCoords";
 import {
+  autoLabelMapRegion,
   createAgent as createAgentRemote,
   createMapGeneration,
   configureLocalCapability,
@@ -617,6 +618,17 @@ export default function App() {
     }
   }
 
+  async function autoLabelRegion(regionId: string) {
+    const snapshot = await autoLabelMapRegion(regionId);
+    if (snapshot) {
+      setWorld(snapshot);
+      setSelection({ kind: "region", id: regionId });
+      setStatus("图层已由本地图像识别模型命名");
+    } else {
+      setStatus("图层自动命名失败");
+    }
+  }
+
   async function configureRemoteModelCapability(capability: ModelCapabilityId, draft: { baseUrl: string; apiKey: string; model: string }) {
     const result = await configureRemoteCapability(capability, draft);
     if (result) {
@@ -944,6 +956,7 @@ export default function App() {
               onSelect={setSelection}
               onUpdateRegion={(regionId, patch) => void updateRegion(regionId, patch)}
               onRegenerateRegion={(regionId, prompt) => void regenerateRegion(regionId, prompt)}
+              onAutoLabelRegion={(regionId) => void autoLabelRegion(regionId)}
             />
           ) : null}
           {panel.id === "properties" ? (

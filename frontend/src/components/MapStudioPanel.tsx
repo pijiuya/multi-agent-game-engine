@@ -12,7 +12,8 @@ import type {
   WorldSnapshot
 } from "../types";
 
-type StudioStep = "background" | "segment" | "layers" | "functions";
+type StudioStep = "background" | "segment" | "layers";
+type LayerAction = "name" | "regenerate" | "function";
 
 type Props = {
   world: WorldSnapshot;
@@ -28,6 +29,7 @@ type Props = {
   onSelect: (selection: SelectionState) => void;
   onUpdateRegion: (regionId: string, patch: Partial<Omit<MapRegion, "id" | "points" | "source">>) => void;
   onRegenerateRegion: (regionId: string, prompt: string) => void;
+  onAutoLabelRegion: (regionId: string) => void;
 };
 
 const DEFAULT_PROMPT = "一个适合多 agent 生活和社交的俯视 2D 小镇工作站，有清晰道路、居住区、公共社交空间和不可穿过的景观结构";
@@ -35,8 +37,7 @@ const DEFAULT_PROMPT = "一个适合多 agent 生活和社交的俯视 2D 小镇
 const STEPS: { id: StudioStep; label: string }[] = [
   { id: "background", label: "背景生成/导入" },
   { id: "segment", label: "SAM 分层" },
-  { id: "layers", label: "图层命名/重生成" },
-  { id: "functions", label: "功能分区" }
+  { id: "layers", label: "图层处理" }
 ];
 
 export function MapStudioPanel({
@@ -52,9 +53,11 @@ export function MapStudioPanel({
   onSegment,
   onSelect,
   onUpdateRegion,
-  onRegenerateRegion
+  onRegenerateRegion,
+  onAutoLabelRegion
 }: Props) {
   const [activeStep, setActiveStep] = useState<StudioStep>("background");
+  const [layerAction, setLayerAction] = useState<LayerAction>("name");
   const [ratio, setRatio] = useState<MapRatioPreset>(() => ratioFromSize(world.map.width, world.map.height));
   const [width, setWidth] = useState(world.map.width || 1920);
   const [height, setHeight] = useState(world.map.height || 1080);
@@ -77,7 +80,7 @@ export function MapStudioPanel({
   }, [world.map.width, world.map.height]);
 
   useEffect(() => {
-    if (activeStep === "layers" || activeStep === "functions") {
+    if (activeStep === "layers") {
       const nextRegion = selectedRegion ?? world.map.regions[0] ?? null;
       if (nextRegion && selection.kind !== "region") {
         onSelect({ kind: "region", id: nextRegion.id });
@@ -116,11 +119,7 @@ export function MapStudioPanel({
     if (!selectedRegion || !visionProvider) {
       return;
     }
-    const name = selectedRegion.tags[0] || selectedRegion.notes.split("，")[0] || selectedRegion.name;
-    onUpdateRegion(selectedRegion.id, {
-      name,
-      notes: `${selectedRegion.notes || "已选中区域"}；已请求 ${visionProvider.name} 进行图层命名。`
-    });
+    onAutoLabelRegion(selectedRegion.id);
   }
 
   return (
@@ -242,60 +241,65 @@ export function MapStudioPanel({
           <RegionList world={world} selection={selection} onSelect={onSelect} />
           {selectedRegion ? (
             <>
-              <label className="prompt-row">
-                <span>图层名称</span>
-                <input
-                  aria-label="图层名称"
-                  key={selectedRegion.id}
-                  defaultValue={selectedRegion.name}
-                  onBlur={(event) => renameSelectedRegion(event.currentTarget.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      renameSelectedRegion(event.currentTarget.value);
-                      event.currentTarget.blur();
-                    }
-                  }}
-                />
-              </label>
-              <button className="panel-action-button" disabled={!visionProvider} onClick={nameWithVisionModel} type="button">
-                <WandSparkles size={15} />
-                {visionProvider ? `用 ${visionProvider.name} 命名` : "未配置图像识别模型"}
-              </button>
-              <label className="prompt-row">
-                <span>局部重绘提示</span>
-                <input
-                  aria-label="局部重绘提示"
-                  onChange={(event) => setRegionPrompt(event.currentTarget.value)}
-                  placeholder={selectedRegion.image_prompt || selectedRegion.name}
-                  value={regionPrompt}
-                />
-              </label>
-              <button
-                className="panel-action-button"
-                disabled={!regionPrompt.trim()}
-                onClick={() => {
-                  onRegenerateRegion(selectedRegion.id, regionPrompt.trim());
-                  setRegionPrompt("");
-                }}
-                type="button"
-              >
-                <RefreshCw size={15} />
-                重新生成当前图层
-              </button>
+              <div className="ratio-row" data-testid="layer-action-controls">
+                <button className={layerAction === "name" ? "active" : ""} onClick={() => setLayerAction("name")} type="button">命名</button>
+                <button className={layerAction === "regenerate" ? "active" : ""} onClick={() => setLayerAction("regenerate")} type="button">重生成</button>
+                <button className={layerAction === "function" ? "active" : ""} onClick={() => setLayerAction("function")} type="button">功能分区</button>
+              </div>
+              {layerAction === "name" ? (
+                <>
+                  <label className="prompt-row">
+                    <span>图层名称</span>
+                    <input
+                      aria-label="图层名称"
+                      key={selectedRegion.id}
+                      defaultValue={selectedRegion.name}
+                      onBlur={(event) => renameSelectedRegion(event.currentTarget.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          renameSelectedRegion(event.currentTarget.value);
+                          event.currentTarget.blur();
+                        }
+                      }}
+                    />
+                  </label>
+                  <button className="panel-action-button" disabled={!visionProvider} onClick={nameWithVisionModel} type="button">
+                    <WandSparkles size={15} />
+                    {visionProvider ? `用 ${visionProvider.name} 自动命名` : "未配置图像识别模型"}
+                  </button>
+                </>
+              ) : null}
+              {layerAction === "regenerate" ? (
+                <>
+                  <label className="prompt-row">
+                    <span>局部重绘提示</span>
+                    <input
+                      aria-label="局部重绘提示"
+                      onChange={(event) => setRegionPrompt(event.currentTarget.value)}
+                      placeholder={selectedRegion.image_prompt || selectedRegion.name}
+                      value={regionPrompt}
+                    />
+                  </label>
+                  <button
+                    className="panel-action-button"
+                    disabled={!regionPrompt.trim()}
+                    onClick={() => {
+                      onRegenerateRegion(selectedRegion.id, regionPrompt.trim());
+                      setRegionPrompt("");
+                    }}
+                    type="button"
+                  >
+                    <RefreshCw size={15} />
+                    重新生成当前图层
+                  </button>
+                </>
+              ) : null}
+              {layerAction === "function" ? (
+                <FunctionButtons value={selectedRegion.function} onCommit={(value) => onUpdateRegion(selectedRegion.id, { function: value })} />
+              ) : null}
             </>
           ) : (
             <div className="segmentation-status error">还没有 SAM 图层</div>
-          )}
-        </section>
-      ) : null}
-
-      {activeStep === "functions" ? (
-        <section className="map-step-body" data-testid="map-step-body-functions">
-          <RegionList world={world} selection={selection} onSelect={onSelect} />
-          {selectedRegion ? (
-            <FunctionButtons value={selectedRegion.function} onCommit={(value) => onUpdateRegion(selectedRegion.id, { function: value })} />
-          ) : (
-            <div className="segmentation-status error">还没有可设定的区域</div>
           )}
         </section>
       ) : null}
@@ -394,7 +398,7 @@ function stepState(step: StudioStep, world: WorldSnapshot, generation: MapGenera
   if (step === "layers") {
     return world.map.regions.length ? "active" : "idle";
   }
-  return world.map.regions.some((region) => region.function !== "unassigned") ? "done" : world.map.regions.length ? "active" : "idle";
+  return "idle";
 }
 
 function mapStatusText(world: WorldSnapshot, provider: ModelConfig | null, segmentation: MapSegmentationState) {
