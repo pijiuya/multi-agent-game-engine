@@ -1403,6 +1403,38 @@ input:focus {
   color: var(--ink);
 }
 
+.model-install-progress {
+  display: grid;
+  gap: 5px;
+  padding: 8px;
+  background: rgba(var(--material-rgb), 0.48);
+  border: 1px solid rgba(var(--grid-rgb), 0.2);
+  border-radius: 8px;
+}
+
+.model-install-progress.error {
+  border-color: rgba(239, 68, 68, 0.42);
+}
+
+.model-install-progress > div {
+  height: 6px;
+  overflow: hidden;
+  background: rgba(var(--grid-rgb), 0.12);
+  border-radius: 999px;
+}
+
+.model-install-progress span {
+  display: block;
+  height: 100%;
+  background: rgba(var(--grid-rgb), 0.7);
+  border-radius: inherit;
+}
+
+.model-install-progress small {
+  font-size: 11px;
+  color: var(--soft-muted);
+}
+
 .model-action-row {
   display: grid;
   grid-template-columns: 1fr 1fr;

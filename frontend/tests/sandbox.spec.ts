@@ -544,6 +544,108 @@ test("drawing tools create vector areas and item transform handles edit items", 
   expect(Number(scaleValue)).toBeGreaterThanOrEqual(1);
 });
 
+test("sam capability starts embedded MobileSAM install without service address", async ({ page }) => {
+  let installed = false;
+  await page.route("**/api/model-capabilities/status", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        capabilities: [
+          {
+            id: "llm",
+            label: "语言模型 LLM",
+            status: "missing",
+            summary: "未配置 LLM",
+            configured: false,
+            configured_model_id: null,
+            configured_model_name: null,
+            local_available: false,
+            installable: false,
+            recommended_local: null,
+            suggestions: []
+          },
+          {
+            id: "image_generation",
+            label: "图片生成",
+            status: "missing",
+            summary: "未配置图片生成",
+            configured: false,
+            configured_model_id: null,
+            configured_model_name: null,
+            local_available: false,
+            installable: false,
+            recommended_local: null,
+            suggestions: []
+          },
+          {
+            id: "segmentation",
+            label: "SAM 分层",
+            status: installed ? "ready" : "installable",
+            summary: installed ? "已配置：内置 MobileSAM" : "可安装内置 MobileSAM，本机完成分层，无需服务地址",
+            configured: installed,
+            configured_model_id: installed ? "model_local_sam_embedded" : null,
+            configured_model_name: installed ? "内置 MobileSAM" : null,
+            local_available: false,
+            installable: !installed,
+            recommended_local: null,
+            suggestions: ["推荐直接点击安装内置 MobileSAM；完成后无需配置服务地址。"]
+          }
+        ],
+        environment: {}
+      })
+    })
+  );
+  await page.route("**/api/model-capabilities/segmentation/install-local", async (route) => {
+    installed = true;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        task: {
+          id: "task_embedded_sam",
+          capability: "segmentation",
+          title: "安装并启用内置 MobileSAM",
+          status: "running",
+          stage: "download_weights",
+          progress: 68,
+          message: "下载 MobileSAM 权重",
+          error: null
+        }
+      })
+    });
+  });
+  await page.route("**/api/model-capabilities/tasks/task_embedded_sam", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        task: {
+          id: "task_embedded_sam",
+          capability: "segmentation",
+          title: "安装并启用内置 MobileSAM",
+          status: "done",
+          stage: "done",
+          progress: 100,
+          message: "内置 MobileSAM 已启用",
+          error: null
+        }
+      })
+    })
+  );
+
+  await page.goto("/");
+  const modelsPanel = page.getByTestId("panel-models");
+  await modelsPanel.getByTestId("model-capability-segmentation").click();
+  await expect(modelsPanel.getByText("服务地址", { exact: true })).toHaveCount(0);
+  const installButton = modelsPanel.getByRole("button", { name: /安装并启用内置 SAM/ });
+  await expect(installButton).toBeEnabled();
+  await installButton.click();
+  await expect(modelsPanel.getByTestId("model-install-task-segmentation")).toContainText("正在连接本机引擎并启动安装");
+  await expect(modelsPanel.getByTestId("model-install-task-segmentation")).toContainText("内置 MobileSAM 已启用", { timeout: 4000 });
+});
+
 test("map studio separates model management and runs gated SAM flow", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 820 });
   await page.goto("/");

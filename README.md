@@ -48,7 +48,7 @@ The Model Manager is organized as three capability cards:
 
 - `语言模型 LLM`: Install/open Ollama, prepare `qwen2.5:1.5b`, `qwen2.5:7b`, or `gemma3:1b`, then click `重新检测` and `一键使用本地 LLM`.
 - `图片生成`: For now you can import an image or use test candidates. To use a real local image model, start ComfyUI or another local image generator and paste its service address in `高级配置`.
-- `SAM 分层`: Start a local SAM segmentation service, then click `重新检测` and `一键使用本地 SAM`. If using another machine or cloud endpoint, paste its service address and API key in `高级配置`.
+- `SAM 分层`: Click `安装并启用内置 SAM`. The app installs MobileSAM into the current Python environment and caches `mobile_sam.pt` under `runtime_project/models/`, so users do not need to configure a local service. External SAM service address/API key remains available in `高级配置` for advanced users.
 
 ## Project Data
 

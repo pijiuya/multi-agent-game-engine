@@ -1,6 +1,6 @@
 import { Bot, CheckCircle2, Cloud, ImagePlus, Layers3, RefreshCw, WandSparkles } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { ModelCapabilityId, ModelCapabilityStatus, ModelConfig } from "../types";
+import type { ModelCapabilityId, ModelCapabilityStatus, ModelCapabilityTask, ModelConfig } from "../types";
 
 type RemoteDraft = {
   baseUrl: string;
@@ -10,9 +10,11 @@ type RemoteDraft = {
 
 type Props = {
   statuses: ModelCapabilityStatus[];
+  tasks: Partial<Record<ModelCapabilityId, ModelCapabilityTask>>;
   models: ModelConfig[];
   onRefresh: () => void;
   onConfigureLocal: (capability: ModelCapabilityId) => void;
+  onInstallLocal: (capability: ModelCapabilityId) => void;
   onConfigureRemote: (capability: ModelCapabilityId, draft: RemoteDraft) => void;
 };
 
@@ -50,14 +52,14 @@ const CAPABILITY_META: Record<
     icon: Layers3,
     localLabel: "一键使用本地 SAM",
     setupSteps: [
-      "启动一个本地 SAM 分层小服务，默认建议端口 8001。",
-      "它只需要接收地图图片并返回区域多边形。",
-      "启动后点击重新检测；检测到后点一键使用本地 SAM。"
+      "点击安装并启用内置 SAM。",
+      "程序会自动安装 MobileSAM 并缓存轻量权重。",
+      "完成后回到地图工作台直接开始 SAM 分层。"
     ]
   }
 };
 
-export function ModelManagerPanel({ statuses, models, onRefresh, onConfigureLocal, onConfigureRemote }: Props) {
+export function ModelManagerPanel({ statuses, tasks, models, onRefresh, onConfigureLocal, onInstallLocal, onConfigureRemote }: Props) {
   const [activeCapability, setActiveCapability] = useState<ModelCapabilityId>("llm");
   const [advancedOpen, setAdvancedOpen] = useState<Record<ModelCapabilityId, boolean>>({
     llm: false,
@@ -131,8 +133,10 @@ export function ModelManagerPanel({ statuses, models, onRefresh, onConfigureLoca
         capability={activeCapability}
         draft={remoteDrafts[activeCapability]}
         onConfigureLocal={onConfigureLocal}
+        onInstallLocal={onInstallLocal}
         onConfigureRemote={() => onConfigureRemote(activeCapability, remoteDrafts[activeCapability])}
         onRefresh={onRefresh}
+        task={tasks[activeCapability] ?? null}
         onToggleAdvanced={() => setAdvancedOpen((current) => ({ ...current, [activeCapability]: !current[activeCapability] }))}
         onUpdateDraft={(patch) => updateRemoteDraft(activeCapability, patch)}
         status={statusMap.get(activeCapability) ?? fallbackStatus(activeCapability)}
@@ -146,8 +150,10 @@ function CapabilityDetail({
   status,
   draft,
   advancedOpen,
+  task,
   onRefresh,
   onConfigureLocal,
+  onInstallLocal,
   onConfigureRemote,
   onToggleAdvanced,
   onUpdateDraft
@@ -156,14 +162,23 @@ function CapabilityDetail({
   status: ModelCapabilityStatus;
   draft: RemoteDraft;
   advancedOpen: boolean;
+  task: ModelCapabilityTask | null;
   onRefresh: () => void;
   onConfigureLocal: (capability: ModelCapabilityId) => void;
+  onInstallLocal: (capability: ModelCapabilityId) => void;
   onConfigureRemote: () => void;
   onToggleAdvanced: () => void;
   onUpdateDraft: (patch: Partial<RemoteDraft>) => void;
 }) {
   const meta = CAPABILITY_META[capability];
   const canUseLocal = Boolean(status.recommended_local);
+  const canInstallLocal = capability === "segmentation" && status.installable;
+  const isInstalling = task?.status === "running";
+  const actionLabel = isInstalling
+    ? `安装中 ${task.progress}%`
+    : canInstallLocal
+      ? "安装并启用内置 SAM"
+      : meta.localLabel;
   return (
     <section className="model-capability-detail" data-testid={`model-capability-detail-${capability}`}>
       <div className="model-dialogue-row">
@@ -194,10 +209,23 @@ function CapabilityDetail({
           </ol>
         </div>
       ) : null}
+      {task ? (
+        <div className={task.status === "error" ? "model-install-progress error" : "model-install-progress"} data-testid={`model-install-task-${capability}`}>
+          <div>
+            <span style={{ width: `${task.progress}%` }} />
+          </div>
+          <small>{task.status === "error" ? task.error || task.message : task.message}</small>
+        </div>
+      ) : null}
       <div className="model-action-row">
-        <button className="panel-action-button" disabled={!canUseLocal} onClick={() => onConfigureLocal(capability)} type="button">
+        <button
+          className="panel-action-button"
+          disabled={isInstalling || (!canUseLocal && !canInstallLocal)}
+          onClick={() => (canInstallLocal ? onInstallLocal(capability) : onConfigureLocal(capability))}
+          type="button"
+        >
           <CheckCircle2 size={15} />
-          {meta.localLabel}
+          {actionLabel}
         </button>
         <button className="panel-action-button" onClick={onRefresh} type="button">
           <RefreshCw size={15} />
@@ -235,6 +263,7 @@ function statusBadge(status: ModelCapabilityStatus) {
   const labels: Record<ModelCapabilityStatus["status"], string> = {
     ready: "已配置",
     local_available: "检测到本地方案",
+    installable: "可安装",
     mock_only: "仅测试 Mock",
     missing: "未配置"
   };
@@ -260,6 +289,7 @@ function fallbackStatus(capability: ModelCapabilityId): ModelCapabilityStatus {
     configured_model_id: null,
     configured_model_name: null,
     local_available: false,
+    installable: capability === "segmentation",
     recommended_local: null,
     suggestions: ["点击重新检测获取本机模型状态。"]
   };

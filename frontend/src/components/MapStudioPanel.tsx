@@ -308,7 +308,7 @@ function ProviderCard({ provider, segmentation }: { provider: ModelConfig | null
     return (
       <div className="model-config-row" data-testid="sam-provider-card">
         <strong>未配置 SAM 分层模型</strong>
-        <small>请先在模型管理里配置 SAM 分层；优先使用本机 SAM 小服务。</small>
+        <small>请先在模型管理里安装并启用内置 MobileSAM。</small>
       </div>
     );
   }
@@ -316,7 +316,7 @@ function ProviderCard({ provider, segmentation }: { provider: ModelConfig | null
     <div className="model-config-row" data-testid="sam-provider-card">
       <strong>{provider.name}</strong>
       <small>
-        {provider.provider === "mock" ? "测试 Mock" : "SAM 分层服务"} / {provider.model || "未指定模型"}
+        {samProviderLabel(provider.provider)} / {provider.model || "未指定模型"}
       </small>
       <small>{provider.baseUrl || "本地 mock provider"}</small>
       {segmentation.mode === "mock" || segmentation.mode === "local_mock" ? <small>当前结果来自测试 Mock SAM</small> : null}
@@ -419,6 +419,16 @@ function mapStatusText(world: WorldSnapshot, provider: ModelConfig | null, segme
 
 function enabledModelForCapability(models: ModelConfig[], capability: ModelConfig["capabilities"][number]) {
   return models.find((model) => model.enabled && model.capabilities.includes(capability)) ?? null;
+}
+
+function samProviderLabel(provider: string) {
+  if (provider === "mock") {
+    return "测试 Mock";
+  }
+  if (provider === "embedded-mobile-sam") {
+    return "内置 MobileSAM";
+  }
+  return "SAM 分层服务";
 }
 
 function stageLabel(stage: MapSegmentationState["stage"]) {

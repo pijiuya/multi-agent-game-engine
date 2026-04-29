@@ -166,14 +166,26 @@ export type ModelConfig = {
 export type ModelCapabilityStatus = {
   id: ModelCapabilityId;
   label: string;
-  status: "ready" | "local_available" | "mock_only" | "missing";
+  status: "ready" | "local_available" | "installable" | "mock_only" | "missing";
   summary: string;
   configured: boolean;
   configured_model_id: string | null;
   configured_model_name: string | null;
   local_available: boolean;
+  installable: boolean;
   recommended_local: ModelConfig | null;
   suggestions: string[];
+};
+
+export type ModelCapabilityTask = {
+  id: string;
+  capability: ModelCapabilityId;
+  title: string;
+  status: "running" | "done" | "error";
+  stage: string;
+  progress: number;
+  message: string;
+  error: string | null;
 };
 
 export type GeneratedImageCandidate = {
@@ -207,7 +219,7 @@ export type MapSegmentationState = {
   provider_name: string | null;
   error: string | null;
   region_count: number;
-  mode: "none" | "http" | "mock" | "local_mock";
+  mode: "none" | "http" | "embedded" | "mock" | "local_mock";
 };
 
 export type MapRatioPreset = "1:1" | "16:9" | "custom";

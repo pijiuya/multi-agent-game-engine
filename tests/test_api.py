@@ -213,6 +213,7 @@ def test_api_model_capability_status_and_one_click_config(monkeypatch):
 
     assert client.patch("/api/models", json={"models": default_model_configs()}).status_code == 200
     monkeypatch.setattr(api_main, "_detect_ollama_models", lambda: ["qwen2.5:7b", "qwen2.5vl:3b"])
+    monkeypatch.setattr(api_main, "_embedded_mobile_sam_ready", lambda: False)
     monkeypatch.setattr(
         api_main,
         "_detect_local_model_services",
@@ -238,7 +239,8 @@ def test_api_model_capability_status_and_one_click_config(monkeypatch):
     sam = next(item for item in status.json()["capabilities"] if item["id"] == "segmentation")
     assert llm["status"] == "local_available"
     assert llm["recommended_local"]["model"] == "qwen2.5:7b"
-    assert sam["status"] == "missing"
+    assert sam["status"] == "installable"
+    assert sam["installable"] is True
 
     configured = client.post("/api/model-capabilities/llm/configure-local")
     assert configured.status_code == 200
@@ -263,6 +265,105 @@ def test_api_model_capability_status_and_one_click_config(monkeypatch):
     sam_model = next(model for model in remote_sam.json()["models"] if model["id"] == "model_remote_sam")
     assert sam_model["api_key"] == "local-dev-key"
     assert sam_model["base_url"] == "http://localhost:8001/segment"
+
+
+def test_api_embedded_sam_install_task(monkeypatch):
+    client = TestClient(app)
+
+    assert client.patch("/api/models", json={"models": default_model_configs()}).status_code == 200
+    monkeypatch.setattr(api_main, "_embedded_mobile_sam_ready", lambda: False)
+
+    def fake_start(task_id):
+        configs = api_main._upsert_model_config(
+            api_main.store.load_model_configs(),
+            api_main._embedded_mobile_sam_config(),
+        )
+        api_main.store.save_model_configs(configs)
+        api_main._set_capability_task(
+            task_id,
+            status="done",
+            stage="done",
+            progress=100,
+            message="内置 MobileSAM 已启用",
+            error="",
+        )
+
+    monkeypatch.setattr(api_main, "_start_embedded_sam_install_task", fake_start)
+    task_response = client.post("/api/model-capabilities/segmentation/install-local")
+
+    assert task_response.status_code == 200
+    task = task_response.json()["task"]
+    assert task["status"] == "running"
+
+    task_status = client.get(f"/api/model-capabilities/tasks/{task['id']}")
+    assert task_status.status_code == 200
+    assert task_status.json()["task"]["status"] == "done"
+
+    models = client.get("/api/models").json()["models"]
+    embedded = next(model for model in models if model["id"] == "model_local_sam_embedded")
+    assert embedded["provider"] == "embedded-mobile-sam"
+    assert embedded["base_url"] == ""
+
+
+def test_api_embedded_sam_provider(monkeypatch):
+    client = TestClient(app)
+
+    client.patch(
+        "/api/map",
+        json={
+            "width": 640,
+            "height": 360,
+            "background_image": "/api/assets/test-map.png",
+        },
+    )
+    client.patch(
+        "/api/models",
+        json={
+            "models": [
+                {
+                    "id": "model_local_sam_embedded",
+                    "name": "内置 MobileSAM",
+                    "kind": "local",
+                    "provider": "embedded-mobile-sam",
+                    "base_url": "",
+                    "model": "vit_t",
+                    "enabled": True,
+                    "capabilities": ["segmentation"],
+                }
+            ]
+        },
+    )
+
+    def fake_embedded_provider(config, world_map):
+        assert config["provider"] == "embedded-mobile-sam"
+        assert world_map.width == 640
+        return [
+            api_main.MapRegion(
+                id="region_embedded_test",
+                name="内置区域",
+                function="social",
+                source="model_local_sam_embedded",
+                points=[
+                    api_main.Point(20, 20),
+                    api_main.Point(180, 20),
+                    api_main.Point(180, 120),
+                    api_main.Point(20, 120),
+                ],
+                confidence=0.91,
+                notes="内置 MobileSAM 返回",
+                tags=["MobileSAM"],
+            )
+        ]
+
+    monkeypatch.setattr(api_main, "_call_embedded_mobile_sam_provider", fake_embedded_provider)
+    segmented = client.post("/api/map/segment")
+
+    assert segmented.status_code == 200
+    payload = segmented.json()
+    assert payload["segmentation"]["mode"] == "embedded"
+    assert payload["segmentation"]["provider_name"] == "内置 MobileSAM"
+    assert payload["world"]["map"]["regions"][0]["name"] == "内置区域"
+    assert any(area["metadata"].get("region_id") == "region_embedded_test" for area in payload["world"]["map"]["interaction_zones"])
 
 
 def test_api_http_sam_provider(monkeypatch):

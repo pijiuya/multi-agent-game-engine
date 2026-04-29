@@ -3,9 +3,13 @@ from __future__ import annotations
 import os
 import shutil
 import asyncio
+import hashlib
+import importlib.util
 import json
 import math
 import subprocess
+import sys
+import threading
 from pathlib import Path
 from typing import Any
 from urllib import request as urlrequest
@@ -163,6 +167,19 @@ class RegionPatch(BaseModel):
 
 
 generation_tasks: dict[str, dict[str, Any]] = {}
+capability_tasks: dict[str, dict[str, Any]] = {}
+capability_tasks_lock = threading.Lock()
+embedded_sam_cache: dict[str, Any] = {}
+
+MOBILE_SAM_PROVIDER = "embedded-mobile-sam"
+MOBILE_SAM_MODEL_ID = "model_local_sam_embedded"
+MOBILE_SAM_WEIGHT_NAME = "mobile_sam.pt"
+MOBILE_SAM_WEIGHT_SHA256 = "6dbb90523a35330fedd7f1d3dfc66f995213d81b29a5ca8108dbcdd4e37d6c2f"
+MOBILE_SAM_WEIGHT_URLS = [
+    "https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt",
+    "https://huggingface.co/dhkim2810/MobileSAM/resolve/main/mobile_sam.pt",
+    "https://huggingface.co/RogerQi/MobileSAMV2/resolve/main/mobile_sam.pt",
+]
 
 
 @app.get("/healthz")
@@ -314,6 +331,37 @@ def configure_local_capability(capability: str) -> dict[str, Any]:
     }
 
 
+@app.post("/api/model-capabilities/{capability}/install-local")
+def install_local_capability(capability: str) -> dict[str, Any]:
+    if capability != "segmentation":
+        raise HTTPException(status_code=400, detail="当前只有 SAM 分层支持内置安装")
+    if _embedded_mobile_sam_ready():
+        configs = _upsert_model_config(store.load_model_configs(), _embedded_mobile_sam_config())
+        store.save_model_configs(configs)
+        task = _create_capability_task(capability, title="内置 MobileSAM 已可用")
+        _set_capability_task(
+            task["id"],
+            status="done",
+            stage="done",
+            progress=100,
+            message="内置 MobileSAM 已启用",
+        )
+        task = _get_capability_task(task["id"])
+        return {"task": task, "models": [_public_model_config(config) for config in configs]}
+
+    task = _create_capability_task(capability, title="安装并启用内置 MobileSAM")
+    _start_embedded_sam_install_task(task["id"])
+    return {"task": task}
+
+
+@app.get("/api/model-capabilities/tasks/{task_id}")
+def get_model_capability_task(task_id: str) -> dict[str, Any]:
+    task = _get_capability_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Model capability task not found")
+    return {"task": task}
+
+
 @app.post("/api/model-capabilities/{capability}/configure-remote")
 def configure_remote_capability(capability: str, payload: CapabilityConfigurePayload) -> dict[str, Any]:
     config = _remote_capability_config(capability, payload)
@@ -331,6 +379,12 @@ def test_model(model_id: str) -> dict[str, Any]:
     if config is None:
         raise HTTPException(status_code=404, detail="Model config not found")
     provider = config.get("provider", "mock")
+    if provider == MOBILE_SAM_PROVIDER:
+        return {
+            "ok": _embedded_mobile_sam_ready(),
+            "provider": provider,
+            "message": "内置 MobileSAM 可用" if _embedded_mobile_sam_ready() else "内置 MobileSAM 尚未安装",
+        }
     if provider != "mock" and not config.get("base_url"):
         return {"ok": False, "provider": provider, "message": "缺少服务地址"}
     return {
@@ -393,6 +447,9 @@ def segment_map() -> dict[str, Any]:
     if provider == "mock":
         regions = _mock_regions(runtime.world.map.width, runtime.world.map.height, source="mock_sam")
         mode = "mock"
+    elif provider == MOBILE_SAM_PROVIDER:
+        regions = _call_embedded_mobile_sam_provider(config, runtime.world.map)
+        mode = "embedded"
     else:
         regions = _call_http_sam_provider(config, runtime.world.map)
         mode = "http"
@@ -619,7 +676,18 @@ def _capability_status(
         "image_generation": "图片生成",
         "segmentation": "SAM 分层",
     }.get(capability, capability)
-    if configured:
+    non_embedded_sam = (
+        capability == "segmentation"
+        and configured is not None
+        and configured.get("provider") != MOBILE_SAM_PROVIDER
+    )
+    embedded_unavailable = (
+        capability == "segmentation"
+        and configured is not None
+        and configured.get("provider") == MOBILE_SAM_PROVIDER
+        and not _embedded_mobile_sam_ready()
+    )
+    if configured and not embedded_unavailable and not non_embedded_sam:
         status = "ready"
         summary = f"已配置：{configured.get('name', '')}"
     elif recommendation:
@@ -628,6 +696,13 @@ def _capability_status(
     elif mock_config:
         status = "mock_only"
         summary = "当前只有测试 Mock，不能当作真实模型能力"
+    elif capability == "segmentation":
+        status = "installable"
+        summary = "可安装内置 MobileSAM，本机完成分层，无需服务地址"
+        if embedded_unavailable:
+            summary = "内置 MobileSAM 配置存在但依赖不完整；请重新安装"
+        elif non_embedded_sam:
+            summary = "当前使用外部 SAM 备用配置；建议安装内置 MobileSAM"
     else:
         status = "missing"
         summary = _missing_capability_message(capability)
@@ -641,21 +716,28 @@ def _capability_status(
         "configured_model_name": configured.get("name") if configured else None,
         "local_available": recommendation is not None,
         "recommended_local": _public_model_config(recommendation) if recommendation else None,
+        "installable": (
+            capability == "segmentation"
+            and recommendation is None
+            and (configured is None or embedded_unavailable or non_embedded_sam)
+        ),
         "suggestions": _capability_suggestions(capability, ollama_models, local_services),
     }
 
 
 def _configured_model_for_capability(configs: list[dict[str, Any]], capability: str) -> dict[str, Any] | None:
-    return next(
-        (
-            config
-            for config in configs
-            if config.get("enabled", True)
-            and config.get("provider") != "mock"
-            and capability in set(config.get("capabilities", []))
-        ),
-        None,
-    )
+    matching = [
+        config
+        for config in configs
+        if config.get("enabled", True)
+        and config.get("provider") != "mock"
+        and capability in set(config.get("capabilities", []))
+    ]
+    if capability == "segmentation":
+        embedded = next((config for config in matching if config.get("provider") == MOBILE_SAM_PROVIDER), None)
+        if embedded:
+            return embedded
+    return matching[0] if matching else None
 
 
 def _mock_model_for_capability(configs: list[dict[str, Any]], capability: str) -> dict[str, Any] | None:
@@ -707,6 +789,8 @@ def _recommended_local_config(
             "capabilities": ["image_generation"],
         }
     if capability == "segmentation":
+        if _embedded_mobile_sam_ready():
+            return _embedded_mobile_sam_config()
         service = local_services.get("segmentation")
         if not service or not service.get("available"):
             return None
@@ -765,6 +849,196 @@ def _remote_capability_config(capability: str, payload: CapabilityConfigurePaylo
 
 def _upsert_model_config(configs: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in configs if item.get("id") != config.get("id")] + [config]
+
+
+def _create_capability_task(capability: str, title: str) -> dict[str, Any]:
+    task = {
+        "id": new_id("model_task"),
+        "capability": capability,
+        "title": title,
+        "status": "running",
+        "stage": "checking",
+        "progress": 1,
+        "message": "准备检查本机环境",
+        "error": None,
+    }
+    with capability_tasks_lock:
+        capability_tasks[task["id"]] = task
+    return dict(task)
+
+
+def _get_capability_task(task_id: str) -> dict[str, Any] | None:
+    with capability_tasks_lock:
+        task = capability_tasks.get(task_id)
+        return dict(task) if task else None
+
+
+def _set_capability_task(
+    task_id: str,
+    *,
+    status: str | None = None,
+    stage: str | None = None,
+    progress: int | None = None,
+    message: str | None = None,
+    error: str | None = None,
+) -> None:
+    with capability_tasks_lock:
+        task = capability_tasks.get(task_id)
+        if not task:
+            return
+        if status is not None:
+            task["status"] = status
+        if stage is not None:
+            task["stage"] = stage
+        if progress is not None:
+            task["progress"] = max(0, min(100, int(progress)))
+        if message is not None:
+            task["message"] = message
+        if error is not None:
+            task["error"] = error
+
+
+def _start_embedded_sam_install_task(task_id: str) -> None:
+    thread = threading.Thread(target=_run_embedded_sam_install_task, args=(task_id,), daemon=True)
+    thread.start()
+
+
+def _run_embedded_sam_install_task(task_id: str) -> None:
+    try:
+        _set_capability_task(task_id, stage="checking", progress=8, message="检查 Python 和本地模型目录")
+        _embedded_mobile_sam_model_dir().mkdir(parents=True, exist_ok=True)
+
+        if not _python_module_available("torch"):
+            _set_capability_task(task_id, stage="install_torch", progress=18, message="安装 Torch CUDA 版")
+            if not _pip_install(["torch", "torchvision", "--index-url", "https://download.pytorch.org/whl/cu121"]):
+                _set_capability_task(task_id, stage="install_torch", progress=28, message="CUDA 版失败，回退安装 CPU 版")
+                if not _pip_install(["torch", "torchvision", "--index-url", "https://download.pytorch.org/whl/cpu"]):
+                    raise RuntimeError("Torch 安装失败，请检查网络或 Python 环境。")
+
+        if not _python_module_available("mobile_sam"):
+            _set_capability_task(task_id, stage="install_mobile_sam", progress=45, message="安装 MobileSAM 代码")
+            if not _pip_install(["git+https://github.com/ChaoningZhang/MobileSAM.git"]):
+                if not _pip_install(["https://github.com/ChaoningZhang/MobileSAM/archive/refs/heads/master.zip"]):
+                    raise RuntimeError("MobileSAM 安装失败，请检查网络或 GitHub 访问。")
+
+        _set_capability_task(task_id, stage="download_weights", progress=68, message="下载 MobileSAM 权重")
+        _download_mobile_sam_weights()
+
+        _set_capability_task(task_id, stage="verify", progress=88, message="验证内置 MobileSAM")
+        if not _embedded_mobile_sam_ready():
+            raise RuntimeError("MobileSAM 验证失败，请重试安装。")
+
+        configs = _upsert_model_config(store.load_model_configs(), _embedded_mobile_sam_config())
+        store.save_model_configs(configs)
+        _set_capability_task(
+            task_id,
+            status="done",
+            stage="done",
+            progress=100,
+            message="内置 MobileSAM 已启用",
+            error="",
+        )
+    except Exception as exc:  # pragma: no cover - failures are surfaced through the task API.
+        _set_capability_task(
+            task_id,
+            status="error",
+            stage="error",
+            progress=100,
+            message="内置 MobileSAM 安装失败",
+            error=str(exc),
+        )
+
+
+def _pip_install(args: list[str]) -> bool:
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", *args],
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+            timeout=1800,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode == 0:
+        importlib.invalidate_caches()
+        return True
+    return False
+
+
+def _python_module_available(module: str) -> bool:
+    importlib.invalidate_caches()
+    return importlib.util.find_spec(module) is not None
+
+
+def _embedded_mobile_sam_model_dir() -> Path:
+    return store.project_dir / "models" / "mobile_sam"
+
+
+def _embedded_mobile_sam_weight_path() -> Path:
+    return _embedded_mobile_sam_model_dir() / MOBILE_SAM_WEIGHT_NAME
+
+
+def _embedded_mobile_sam_ready() -> bool:
+    return (
+        _python_module_available("torch")
+        and _python_module_available("mobile_sam")
+        and _valid_mobile_sam_weight(_embedded_mobile_sam_weight_path())
+    )
+
+
+def _embedded_mobile_sam_config() -> dict[str, Any]:
+    return {
+        "id": MOBILE_SAM_MODEL_ID,
+        "name": "内置 MobileSAM",
+        "kind": "local",
+        "provider": MOBILE_SAM_PROVIDER,
+        "base_url": "",
+        "api_key": "",
+        "model": "vit_t",
+        "enabled": True,
+        "capabilities": ["segmentation"],
+    }
+
+
+def _download_mobile_sam_weights() -> Path:
+    destination = _embedded_mobile_sam_weight_path()
+    if _valid_mobile_sam_weight(destination):
+        return destination
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    errors: list[str] = []
+    for url in MOBILE_SAM_WEIGHT_URLS:
+        try:
+            temporary = destination.with_suffix(".pt.part")
+            if temporary.exists():
+                temporary.unlink()
+            with urlrequest.urlopen(url, timeout=120) as response, temporary.open("wb") as output:
+                shutil.copyfileobj(response, output)
+            if _valid_mobile_sam_weight(temporary):
+                temporary.replace(destination)
+                return destination
+            temporary.unlink(missing_ok=True)
+            errors.append(f"{url} 校验失败")
+        except (OSError, URLError, HTTPError, TimeoutError) as exc:
+            errors.append(f"{url} 下载失败：{exc}")
+    raise RuntimeError("MobileSAM 权重下载失败：" + "；".join(errors[:2]))
+
+
+def _valid_mobile_sam_weight(path: Path) -> bool:
+    if not path.exists() or path.stat().st_size < 10_000_000:
+        return False
+    if not MOBILE_SAM_WEIGHT_SHA256:
+        return True
+    return _sha256_file(path) == MOBILE_SAM_WEIGHT_SHA256
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as input_file:
+        for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _detect_ollama_models() -> list[str]:
@@ -844,9 +1118,11 @@ def _capability_suggestions(
             return ["检测到本地图片生成服务，可以一键配置。"]
         return ["可先导入图片或使用测试候选；需要真生成时，推荐接入本地 ComfyUI 等图片生成器。"]
     if capability == "segmentation":
+        if _embedded_mobile_sam_ready():
+            return ["内置 MobileSAM 已安装，可以一键启用。"]
         if local_services.get("segmentation", {}).get("available"):
             return ["检测到本地 SAM 分层服务，可以一键配置。"]
-        return ["推荐启动一个本地 SAM 分层小服务；启动后重新检测，或在高级配置填写它给出的服务地址。"]
+        return ["推荐直接点击安装内置 MobileSAM；完成后无需配置服务地址。"]
     return []
 
 
@@ -854,7 +1130,7 @@ def _missing_capability_message(capability: str) -> str:
     messages = {
         "llm": "未检测到可用本地 LLM；建议安装 Ollama 并准备 qwen2.5:1.5b。",
         "image_generation": "未检测到本地图片生成器；可先导入图片，或在高级配置接入图片生成服务。",
-        "segmentation": "未检测到本地 SAM 分层服务；请先启动 SAM 小服务，或在高级配置填写服务地址。",
+        "segmentation": "未检测到可直接启用的 SAM；可以安装内置 MobileSAM。",
     }
     return messages.get(capability, "未检测到可用本地能力")
 
@@ -889,6 +1165,97 @@ def _segmentation_state(
         "region_count": region_count,
         "mode": mode,
     }
+
+
+def _call_embedded_mobile_sam_provider(config: dict[str, Any], world_map: WorldMap) -> list[MapRegion]:
+    image_path = _asset_path_for_url(world_map.background_image)
+    if not image_path:
+        raise HTTPException(status_code=400, detail="内置 MobileSAM 需要本地地图图片文件")
+    if Path(image_path).suffix.lower() not in {".png", ".jpg", ".jpeg"}:
+        raise HTTPException(status_code=400, detail="内置 MobileSAM 暂只支持 PNG/JPG 地图背景")
+    if not _embedded_mobile_sam_ready():
+        raise HTTPException(status_code=400, detail="内置 MobileSAM 尚未安装，请先在模型管理中安装")
+
+    try:
+        import cv2
+        import numpy as np
+        import torch
+        from mobile_sam import SamAutomaticMaskGenerator, sam_model_registry
+    except ImportError as exc:
+        raise HTTPException(status_code=400, detail=f"内置 MobileSAM 缺少依赖：{exc}") from exc
+
+    image_bgr = cv2.imread(image_path, cv2.IMREAD_COLOR)
+    if image_bgr is None:
+        raise HTTPException(status_code=400, detail="无法读取地图背景图片")
+    original_height, original_width = image_bgr.shape[:2]
+    max_side = max(original_width, original_height)
+    scale = min(1.0, 1280 / max(1, max_side))
+    if scale < 1.0:
+        image_bgr = cv2.resize(
+            image_bgr,
+            (max(1, int(original_width * scale)), max(1, int(original_height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+
+    cache_key = str(_embedded_mobile_sam_weight_path())
+    model = embedded_sam_cache.get(cache_key)
+    if model is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = sam_model_registry["vit_t"](checkpoint=cache_key)
+        model.to(device=device)
+        model.eval()
+        embedded_sam_cache[cache_key] = model
+
+    generator = SamAutomaticMaskGenerator(
+        model,
+        points_per_side=24,
+        pred_iou_thresh=0.86,
+        stability_score_thresh=0.88,
+        crop_n_layers=0,
+        min_mask_region_area=96,
+    )
+    raw_masks = generator.generate(image_rgb)
+    raw_masks = sorted(raw_masks, key=lambda item: float(item.get("area", 0)), reverse=True)
+    regions: list[MapRegion] = []
+    map_area = max(1, original_width * original_height)
+    for raw in raw_masks:
+        if len(regions) >= 80:
+            break
+        area = float(raw.get("area", 0)) / max(scale * scale, 0.0001)
+        area_ratio = area / map_area
+        if area_ratio < 0.001 or area_ratio > 0.82:
+            continue
+        mask = raw.get("segmentation")
+        if mask is None:
+            continue
+        contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+        contour = max(contours, key=cv2.contourArea)
+        perimeter = cv2.arcLength(contour, True)
+        if perimeter <= 0:
+            continue
+        approximated = cv2.approxPolyDP(contour, max(2.0, perimeter * 0.006), True)
+        points = [
+            Point(float(point[0][0]) / scale, float(point[0][1]) / scale)
+            for point in approximated
+        ]
+        if len(points) < 3:
+            continue
+        regions.append(
+            MapRegion(
+                id=new_id("region"),
+                name=f"SAM 分区 {len(regions) + 1}",
+                function="unassigned",
+                source=config.get("id", MOBILE_SAM_MODEL_ID),
+                points=points,
+                notes="内置 MobileSAM 自动分层，等待命名和功能设定。",
+                confidence=float(raw.get("predicted_iou") or raw.get("stability_score") or 0),
+                tags=["MobileSAM"],
+            )
+        )
+    return regions
 
 
 def _call_http_sam_provider(config: dict[str, Any], world_map: WorldMap) -> list[MapRegion]:

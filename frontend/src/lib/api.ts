@@ -6,6 +6,7 @@ import type {
   MapSegmentationState,
   ModelCapabilityId,
   ModelCapabilityStatus,
+  ModelCapabilityTask,
   ModelConfig,
   WorldItem,
   WorldMap,
@@ -146,6 +147,35 @@ export async function configureRemoteCapability(
       models: (data.models ?? []).map(modelFromApi),
       capability: capabilityStatusFromApi(data.capability)
     };
+  } catch {
+    return null;
+  }
+}
+
+export async function installLocalCapability(capability: ModelCapabilityId): Promise<{ task: ModelCapabilityTask; models: ModelConfig[] } | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/model-capabilities/${capability}/install-local`, { method: "POST" });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(String(data.detail ?? "local install failed"));
+    }
+    return {
+      task: capabilityTaskFromApi(data.task),
+      models: (data.models ?? []).map(modelFromApi)
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function getModelCapabilityTask(taskId: string): Promise<ModelCapabilityTask | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/model-capabilities/tasks/${taskId}`);
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(String(data.detail ?? "task request failed"));
+    }
+    return capabilityTaskFromApi(data.task);
   } catch {
     return null;
   }
@@ -438,8 +468,22 @@ function capabilityStatusFromApi(data: Record<string, unknown>): ModelCapability
     configured_model_id: data.configured_model_id ? String(data.configured_model_id) : null,
     configured_model_name: data.configured_model_name ? String(data.configured_model_name) : null,
     local_available: Boolean(data.local_available),
+    installable: Boolean(data.installable),
     recommended_local: data.recommended_local && typeof data.recommended_local === "object" ? modelFromApi(data.recommended_local as Record<string, unknown>) : null,
     suggestions: Array.isArray(data.suggestions) ? data.suggestions.map(String) : []
+  };
+}
+
+function capabilityTaskFromApi(data: Record<string, unknown>): ModelCapabilityTask {
+  return {
+    id: String(data.id ?? ""),
+    capability: String(data.capability ?? "segmentation") as ModelCapabilityId,
+    title: String(data.title ?? ""),
+    status: String(data.status ?? "running") as ModelCapabilityTask["status"],
+    stage: String(data.stage ?? ""),
+    progress: clampProgress(Number(data.progress ?? 0)),
+    message: String(data.message ?? ""),
+    error: data.error ? String(data.error) : null
   };
 }
 
@@ -468,6 +512,7 @@ function defaultCapabilityStatus(): ModelCapabilityStatus[] {
       configured_model_id: null,
       configured_model_name: null,
       local_available: false,
+      installable: false,
       recommended_local: null,
       suggestions: ["桌面版会自动启动本机引擎；如果一直没有连接，请确认 Python 依赖已安装。"]
     },
@@ -480,20 +525,22 @@ function defaultCapabilityStatus(): ModelCapabilityStatus[] {
       configured_model_id: null,
       configured_model_name: null,
       local_available: false,
+      installable: false,
       recommended_local: null,
       suggestions: ["现在可以先导入图片；连接本机引擎后再检测本地图片生成器。"]
     },
     {
       id: "segmentation",
       label: "SAM 分层",
-      status: "missing",
-      summary: "本机引擎服务暂未连接，暂时无法检测 SAM 分层",
+      status: "installable",
+      summary: "可安装内置 MobileSAM；正在等待本机引擎连接",
       configured: false,
       configured_model_id: null,
       configured_model_name: null,
       local_available: false,
+      installable: true,
       recommended_local: null,
-      suggestions: ["连接本机引擎后会检测 SAM 分层小服务；没有检测到时可按卡片里的最快路径处理。"]
+      suggestions: ["桌面版会自动启动本机引擎；连接完成后点击安装并启用内置 SAM。"]
     }
   ];
 }

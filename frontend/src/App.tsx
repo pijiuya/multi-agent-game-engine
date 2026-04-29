@@ -18,10 +18,12 @@ import {
   createMapGeneration,
   configureLocalCapability,
   configureRemoteCapability,
+  getModelCapabilityTask,
   getModelCapabilityStatus,
   getWorld,
   getModels,
   idleSegmentation,
+  installLocalCapability,
   patchAgent,
   patchMap,
   patchMapItem,
@@ -50,6 +52,7 @@ import type {
   MapSegmentationState,
   ModelCapabilityId,
   ModelCapabilityStatus,
+  ModelCapabilityTask,
   ModelConfig,
   PanelState,
   Point,
@@ -88,6 +91,7 @@ export default function App() {
   const [anchorMenu, setAnchorMenu] = useState<AnchorMenuState | null>(null);
   const [models, setModels] = useState<ModelConfig[]>([]);
   const [modelCapabilityStatuses, setModelCapabilityStatuses] = useState<ModelCapabilityStatus[]>([]);
+  const [modelCapabilityTasks, setModelCapabilityTasks] = useState<Partial<Record<ModelCapabilityId, ModelCapabilityTask>>>({});
   const [generation, setGeneration] = useState<MapGenerationState | null>(null);
   const [segmentation, setSegmentation] = useState<MapSegmentationState>(() => idleSegmentation());
   const [panels, setPanels] = useState<PanelState[]>(() => loadPanelLayout(createInitialPanels()));
@@ -109,6 +113,14 @@ export default function App() {
     void refreshWorld();
     void refreshModels();
     void refreshModelCapabilities();
+  }, []);
+
+  useEffect(() => {
+    const retry = window.setInterval(() => {
+      void refreshModels();
+      void refreshModelCapabilities();
+    }, 3500);
+    return () => window.clearInterval(retry);
   }, []);
 
   useEffect(() => {
@@ -574,6 +586,68 @@ export default function App() {
     }
   }
 
+  async function installLocalModelCapability(capability: ModelCapabilityId) {
+    const optimisticTask: ModelCapabilityTask = {
+      id: makeId("local_model_task"),
+      capability,
+      title: capability === "segmentation" ? "安装并启用内置 MobileSAM" : "安装本地模型",
+      status: "running",
+      stage: "connecting",
+      progress: 4,
+      message: "正在连接本机引擎并启动安装",
+      error: null
+    };
+    setModelCapabilityTasks((current) => ({ ...current, [capability]: optimisticTask }));
+    setStatus("正在启动内置模型安装");
+    const result = await installLocalCapability(capability);
+    if (!result) {
+      setModelCapabilityTasks((current) => ({
+        ...current,
+        [capability]: {
+          ...optimisticTask,
+          status: "error",
+          stage: "error",
+          progress: 100,
+          message: "安装启动失败",
+          error: "本机引擎暂未连接，或当前后端还不是最新版本。请稍后重试，必要时重启 Electron。"
+        }
+      }));
+      setStatus("本机引擎暂未连接，请稍后重试安装");
+      return;
+    }
+    if (result.models.length) {
+      setModels(result.models);
+    }
+    setModelCapabilityTasks((current) => ({ ...current, [capability]: result.task }));
+    setStatus(result.task.message || "内置模型安装中");
+    void pollModelCapabilityTask(capability, result.task.id);
+  }
+
+  async function pollModelCapabilityTask(capability: ModelCapabilityId, taskId: string) {
+    for (let attempt = 0; attempt < 1800; attempt += 1) {
+      await delay(1000);
+      const task = await getModelCapabilityTask(taskId);
+      if (!task) {
+        setStatus("内置模型安装状态丢失");
+        return;
+      }
+      setModelCapabilityTasks((current) => ({ ...current, [capability]: task }));
+      setStatus(task.message || "内置模型安装中");
+      if (task.status === "done") {
+        await refreshModels();
+        await refreshModelCapabilities();
+        setStatus("内置 MobileSAM 已启用");
+        return;
+      }
+      if (task.status === "error") {
+        await refreshModelCapabilities();
+        setStatus(task.error || "内置模型安装失败");
+        return;
+      }
+    }
+    setStatus("内置模型安装仍在进行，请稍后重新检测");
+  }
+
   async function updateAgentProfile(agentId: string, patch: AgentPatch) {
     if (!world) {
       return;
@@ -806,8 +880,10 @@ export default function App() {
             <ModelManagerPanel
               models={models}
               statuses={modelCapabilityStatuses}
+              tasks={modelCapabilityTasks}
               onRefresh={() => void refreshModelCapabilities()}
               onConfigureLocal={(capability) => void configureLocalModelCapability(capability)}
+              onInstallLocal={(capability) => void installLocalModelCapability(capability)}
               onConfigureRemote={(capability, draft) => void configureRemoteModelCapability(capability, draft)}
             />
           ) : null}
@@ -1028,6 +1104,10 @@ function snapToTargets(active: PanelState, panels: PanelState[]): PanelState {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function applyItemPatch(world: WorldSnapshot, itemId: string, patch: Partial<Omit<WorldItem, "id">>): WorldSnapshot {

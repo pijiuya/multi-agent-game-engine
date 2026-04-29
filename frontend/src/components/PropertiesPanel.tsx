@@ -363,7 +363,10 @@ function segmentationLabel(segmentation: MapSegmentationState) {
     if (segmentation.mode === "mock" || segmentation.mode === "local_mock") {
       return `测试 Mock SAM 完成，${segmentation.region_count} 个区域`;
     }
-    return `HTTP SAM 完成，${segmentation.region_count} 个区域`;
+    if (segmentation.mode === "embedded") {
+      return `内置 MobileSAM 完成，${segmentation.region_count} 个区域`;
+    }
+    return `SAM 完成，${segmentation.region_count} 个区域`;
   }
   return "未分层";
 }
