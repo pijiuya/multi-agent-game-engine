@@ -16,6 +16,9 @@ import {
 import {
   createAgent as createAgentRemote,
   createMapGeneration,
+  configureLocalCapability,
+  configureRemoteCapability,
+  getModelCapabilityStatus,
   getWorld,
   getModels,
   idleSegmentation,
@@ -26,12 +29,10 @@ import {
   postAction,
   normalizeWorldSnapshot,
   regenerateMapRegion,
-  replaceModels,
   saveMap,
   segmentMap,
   selectGeneratedMap,
   setSimulation,
-  testModel as testModelRemote,
   tickSimulation,
   uploadAsset,
   uploadMapImage,
@@ -47,6 +48,8 @@ import type {
   MapRatioPreset,
   MapRegion,
   MapSegmentationState,
+  ModelCapabilityId,
+  ModelCapabilityStatus,
   ModelConfig,
   PanelState,
   Point,
@@ -84,6 +87,7 @@ export default function App() {
   const [anchorPoint, setAnchorPoint] = useState<Point | null>(null);
   const [anchorMenu, setAnchorMenu] = useState<AnchorMenuState | null>(null);
   const [models, setModels] = useState<ModelConfig[]>([]);
+  const [modelCapabilityStatuses, setModelCapabilityStatuses] = useState<ModelCapabilityStatus[]>([]);
   const [generation, setGeneration] = useState<MapGenerationState | null>(null);
   const [segmentation, setSegmentation] = useState<MapSegmentationState>(() => idleSegmentation());
   const [panels, setPanels] = useState<PanelState[]>(() => loadPanelLayout(createInitialPanels()));
@@ -104,6 +108,7 @@ export default function App() {
   useEffect(() => {
     void refreshWorld();
     void refreshModels();
+    void refreshModelCapabilities();
   }, []);
 
   useEffect(() => {
@@ -176,6 +181,10 @@ export default function App() {
 
   async function refreshModels() {
     setModels(await getModels());
+  }
+
+  async function refreshModelCapabilities() {
+    setModelCapabilityStatuses(await getModelCapabilityStatus());
   }
 
   async function setSimulationRunning(running: boolean, stopped = false) {
@@ -542,13 +551,27 @@ export default function App() {
     }
   }
 
-  async function saveModels(nextModels: ModelConfig[]) {
-    setModels(await replaceModels(nextModels));
-    setStatus("模型配置已保存");
+  async function configureLocalModelCapability(capability: ModelCapabilityId) {
+    const result = await configureLocalCapability(capability);
+    if (result) {
+      setModels(result.models);
+      setModelCapabilityStatuses((current) => mergeCapabilityStatus(current, result.capability));
+      setStatus("本地模型配置已启用");
+    } else {
+      await refreshModelCapabilities();
+      setStatus("未检测到可用本地能力");
+    }
   }
 
-  async function testModelConnection(modelId: string) {
-    return testModelRemote(modelId);
+  async function configureRemoteModelCapability(capability: ModelCapabilityId, draft: { baseUrl: string; apiKey: string; model: string }) {
+    const result = await configureRemoteCapability(capability, draft);
+    if (result) {
+      setModels(result.models);
+      setModelCapabilityStatuses((current) => mergeCapabilityStatus(current, result.capability));
+      setStatus("远程备用配置已保存");
+    } else {
+      setStatus("远程配置保存失败");
+    }
   }
 
   async function updateAgentProfile(agentId: string, patch: AgentPatch) {
@@ -782,8 +805,10 @@ export default function App() {
           {panel.id === "models" ? (
             <ModelManagerPanel
               models={models}
-              onSaveModels={saveModels}
-              onTestModel={testModelConnection}
+              statuses={modelCapabilityStatuses}
+              onRefresh={() => void refreshModelCapabilities()}
+              onConfigureLocal={(capability) => void configureLocalModelCapability(capability)}
+              onConfigureRemote={(capability, draft) => void configureRemoteModelCapability(capability, draft)}
             />
           ) : null}
           {panel.id === "mapStudio" ? (
@@ -1036,6 +1061,14 @@ function mapPrompt(prompt: string, width: number, height: number, ratio: MapRati
 
 function enabledModelForCapability(models: ModelConfig[], capability: ModelConfig["capabilities"][number]) {
   return models.find((model) => model.enabled && model.capabilities.includes(capability)) ?? null;
+}
+
+function mergeCapabilityStatus(statuses: ModelCapabilityStatus[], next: ModelCapabilityStatus): ModelCapabilityStatus[] {
+  const hasExisting = statuses.some((status) => status.id === next.id);
+  if (!hasExisting) {
+    return [...statuses, next];
+  }
+  return statuses.map((status) => (status.id === next.id ? next : status));
 }
 
 function createLocalGeneration(prompt: string, width: number, height: number, ratio: MapRatioPreset): MapGenerationState {

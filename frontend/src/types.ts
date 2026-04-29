@@ -149,15 +149,31 @@ export type CanvasPoint = {
 
 export type ModelCapability = "llm" | "image_generation" | "segmentation" | "vision_labeling";
 
+export type ModelCapabilityId = "llm" | "image_generation" | "segmentation";
+
 export type ModelConfig = {
   id: string;
   name: string;
   kind: string;
   provider: string;
   baseUrl: string;
+  apiKey: string;
   model: string;
   enabled: boolean;
   capabilities: ModelCapability[];
+};
+
+export type ModelCapabilityStatus = {
+  id: ModelCapabilityId;
+  label: string;
+  status: "ready" | "local_available" | "mock_only" | "missing";
+  summary: string;
+  configured: boolean;
+  configured_model_id: string | null;
+  configured_model_name: string | null;
+  local_available: boolean;
+  recommended_local: ModelConfig | null;
+  suggestions: string[];
 };
 
 export type GeneratedImageCandidate = {

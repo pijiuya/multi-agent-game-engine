@@ -553,10 +553,19 @@ test("map studio separates model management and runs gated SAM flow", async ({ p
   const modelsPanel = page.getByTestId("panel-models");
   const mapStudioPanel = page.getByTestId("panel-mapStudio");
   await expect(page.getByTestId("panel-title-models")).toContainText("模型管理");
-  await expect(modelsPanel.getByTestId("model-config-list")).toContainText("Mock 图片生成");
+  await expect(modelsPanel.getByTestId("model-capability-cards")).toContainText("语言模型 LLM");
+  await expect(modelsPanel.getByTestId("model-capability-cards")).toContainText("图片生成");
+  await expect(modelsPanel.getByTestId("model-capability-cards")).toContainText("SAM 分层");
+  await expect(modelsPanel.getByText("API 地址")).toHaveCount(0);
+  await expect(modelsPanel.getByText("Provider")).toHaveCount(0);
+  await expect(modelsPanel.getByRole("button", { name: "新增模型" })).toHaveCount(0);
   await expect(modelsPanel.getByTestId("map-ratio-controls")).toHaveCount(0);
   await expect(modelsPanel.getByTestId("generate-map-button")).toHaveCount(0);
   await expect(modelsPanel.getByTestId("segment-map-button")).toHaveCount(0);
+  await modelsPanel.getByTestId("model-capability-segmentation").click();
+  await modelsPanel.getByTestId("model-advanced-toggle-segmentation").click();
+  await expect(modelsPanel.getByTestId("model-advanced-segmentation").getByText("API 地址", { exact: true })).toBeVisible();
+  await expect(modelsPanel.getByTestId("model-advanced-segmentation").getByText("API Key", { exact: true })).toBeVisible();
 
   await expect(mapStudioPanel.getByTestId("map-workflow-steps")).toContainText("背景生成/导入");
   await expect(mapStudioPanel.getByTestId("map-workflow-steps")).toContainText("SAM 分层");
@@ -588,6 +597,16 @@ test("map studio separates model management and runs gated SAM flow", async ({ p
   await expect(mapStudioPanel.getByTestId("generated-candidates").locator(".candidate-card")).toHaveCount(3);
   await mapStudioPanel.getByTestId("generated-candidates").locator(".candidate-card").first().click();
   await expect(page.getByTestId("world-map-background")).toBeVisible();
+  await expect(page.getByTestId("world-map-frame")).toHaveCount(0);
+  const backgroundState = await page.getByTestId("world-map-background").evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      inCoordinateLayer: Boolean(element.closest(".world-coordinate-layer")),
+      opacity: Number(style.opacity)
+    };
+  });
+  expect(backgroundState.inCoordinateLayer).toBe(true);
+  expect(backgroundState.opacity).toBeGreaterThan(0.9);
   await expect(mapStudioPanel.getByText("已应用为地图背景")).toBeVisible();
 
   await mapStudioPanel.getByTestId("map-step-segment").click();

@@ -82,7 +82,6 @@ def test_api_models_generation_and_region_semantics():
     models = client.get("/api/models")
     assert models.status_code == 200
     assert any("image_generation" in model["capabilities"] for model in models.json()["models"])
-    assert "api_key" not in models.text.lower()
 
     created = client.post(
         "/api/models",
@@ -209,6 +208,63 @@ def test_api_models_generation_and_region_semantics():
     assert region["image_prompt"] == "重绘为花园入口"
 
 
+def test_api_model_capability_status_and_one_click_config(monkeypatch):
+    client = TestClient(app)
+
+    assert client.patch("/api/models", json={"models": default_model_configs()}).status_code == 200
+    monkeypatch.setattr(api_main, "_detect_ollama_models", lambda: ["qwen2.5:7b", "qwen2.5vl:3b"])
+    monkeypatch.setattr(
+        api_main,
+        "_detect_local_model_services",
+        lambda: {
+            "image_generation": {
+                "available": False,
+                "base_url": "http://127.0.0.1:8188",
+                "provider": "local-http-image",
+                "model": "local-image",
+            },
+            "segmentation": {
+                "available": False,
+                "base_url": "http://127.0.0.1:8001/segment",
+                "provider": "sam-http",
+                "model": "sam-local",
+            },
+        },
+    )
+
+    status = client.get("/api/model-capabilities/status")
+    assert status.status_code == 200
+    llm = next(item for item in status.json()["capabilities"] if item["id"] == "llm")
+    sam = next(item for item in status.json()["capabilities"] if item["id"] == "segmentation")
+    assert llm["status"] == "local_available"
+    assert llm["recommended_local"]["model"] == "qwen2.5:7b"
+    assert sam["status"] == "missing"
+
+    configured = client.post("/api/model-capabilities/llm/configure-local")
+    assert configured.status_code == 200
+    models = configured.json()["models"]
+    assert any(model["id"] == "model_local_llm" and model["model"] == "qwen2.5:7b" for model in models)
+    assert any(model["id"] == "model_local_vision" and "vision_labeling" in model["capabilities"] for model in models)
+    assert configured.json()["capability"]["status"] == "ready"
+
+    missing_sam = client.post("/api/model-capabilities/segmentation/configure-local")
+    assert missing_sam.status_code == 400
+    assert "SAM" in missing_sam.json()["detail"]
+
+    remote_sam = client.post(
+        "/api/model-capabilities/segmentation/configure-remote",
+        json={
+            "base_url": "http://localhost:8001/segment",
+            "api_key": "local-dev-key",
+            "model": "sam2-tiny",
+        },
+    )
+    assert remote_sam.status_code == 200
+    sam_model = next(model for model in remote_sam.json()["models"] if model["id"] == "model_remote_sam")
+    assert sam_model["api_key"] == "local-dev-key"
+    assert sam_model["base_url"] == "http://localhost:8001/segment"
+
+
 def test_api_http_sam_provider(monkeypatch):
     client = TestClient(app)
 
@@ -281,6 +337,7 @@ def default_model_configs():
             "kind": "local",
             "provider": "mock",
             "base_url": "",
+            "api_key": "",
             "model": "mock-agent",
             "enabled": True,
             "capabilities": ["llm"],
@@ -291,6 +348,7 @@ def default_model_configs():
             "kind": "local",
             "provider": "mock",
             "base_url": "",
+            "api_key": "",
             "model": "mock-map-generator",
             "enabled": True,
             "capabilities": ["image_generation"],
@@ -301,6 +359,7 @@ def default_model_configs():
             "kind": "local",
             "provider": "mock",
             "base_url": "",
+            "api_key": "",
             "model": "mock-sam",
             "enabled": False,
             "capabilities": ["segmentation", "vision_labeling"],

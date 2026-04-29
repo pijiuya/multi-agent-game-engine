@@ -4,6 +4,8 @@ import type {
   MapGenerationState,
   MapRegion,
   MapSegmentationState,
+  ModelCapabilityId,
+  ModelCapabilityStatus,
   ModelConfig,
   WorldItem,
   WorldMap,
@@ -94,6 +96,58 @@ export async function testModel(modelId: string): Promise<{ ok: boolean; message
     };
   } catch {
     return { ok: false, message: "连接测试失败", provider: "" };
+  }
+}
+
+export async function getModelCapabilityStatus(): Promise<ModelCapabilityStatus[]> {
+  try {
+    const response = await fetch(`${apiBase}/api/model-capabilities/status`);
+    if (!response.ok) {
+      throw new Error(`model capability status failed: ${response.status}`);
+    }
+    const data = await response.json();
+    return (data.capabilities ?? []).map(capabilityStatusFromApi);
+  } catch {
+    return defaultCapabilityStatus();
+  }
+}
+
+export async function configureLocalCapability(capability: ModelCapabilityId): Promise<{ models: ModelConfig[]; capability: ModelCapabilityStatus } | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/model-capabilities/${capability}/configure-local`, { method: "POST" });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(String(data.detail ?? "local configure failed"));
+    }
+    return {
+      models: (data.models ?? []).map(modelFromApi),
+      capability: capabilityStatusFromApi(data.capability)
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function configureRemoteCapability(
+  capability: ModelCapabilityId,
+  payload: { baseUrl: string; apiKey: string; model: string }
+): Promise<{ models: ModelConfig[]; capability: ModelCapabilityStatus } | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/model-capabilities/${capability}/configure-remote`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ base_url: payload.baseUrl, api_key: payload.apiKey, model: payload.model })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(String(data.detail ?? "remote configure failed"));
+    }
+    return {
+      models: (data.models ?? []).map(modelFromApi),
+      capability: capabilityStatusFromApi(data.capability)
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -374,6 +428,21 @@ function normalizeGenerationSelection(data: { generation: MapGenerationState; wo
   };
 }
 
+function capabilityStatusFromApi(data: Record<string, unknown>): ModelCapabilityStatus {
+  return {
+    id: String(data.id ?? "llm") as ModelCapabilityId,
+    label: String(data.label ?? ""),
+    status: String(data.status ?? "missing") as ModelCapabilityStatus["status"],
+    summary: String(data.summary ?? ""),
+    configured: Boolean(data.configured),
+    configured_model_id: data.configured_model_id ? String(data.configured_model_id) : null,
+    configured_model_name: data.configured_model_name ? String(data.configured_model_name) : null,
+    local_available: Boolean(data.local_available),
+    recommended_local: data.recommended_local && typeof data.recommended_local === "object" ? modelFromApi(data.recommended_local as Record<string, unknown>) : null,
+    suggestions: Array.isArray(data.suggestions) ? data.suggestions.map(String) : []
+  };
+}
+
 function modelFromApi(data: Record<string, unknown>): ModelConfig {
   return {
     id: String(data.id ?? ""),
@@ -381,10 +450,52 @@ function modelFromApi(data: Record<string, unknown>): ModelConfig {
     kind: String(data.kind ?? "local"),
     provider: String(data.provider ?? "mock"),
     baseUrl: String(data.base_url ?? data.baseUrl ?? ""),
+    apiKey: String(data.api_key ?? data.apiKey ?? ""),
     model: String(data.model ?? ""),
     enabled: Boolean(data.enabled ?? true),
     capabilities: Array.isArray(data.capabilities) ? (data.capabilities as ModelConfig["capabilities"]) : []
   };
+}
+
+function defaultCapabilityStatus(): ModelCapabilityStatus[] {
+  return [
+    {
+      id: "llm",
+      label: "语言模型 LLM",
+      status: "missing",
+      summary: "未连接后端，无法检测本地 LLM",
+      configured: false,
+      configured_model_id: null,
+      configured_model_name: null,
+      local_available: false,
+      recommended_local: null,
+      suggestions: ["启动后端后可检测 Ollama。"]
+    },
+    {
+      id: "image_generation",
+      label: "图片生成",
+      status: "missing",
+      summary: "未连接后端，无法检测图片生成服务",
+      configured: false,
+      configured_model_id: null,
+      configured_model_name: null,
+      local_available: false,
+      recommended_local: null,
+      suggestions: ["可先使用高级配置接入本地图片生成 HTTP 服务。"]
+    },
+    {
+      id: "segmentation",
+      label: "SAM 分层",
+      status: "missing",
+      summary: "未连接后端，无法检测 SAM 服务",
+      configured: false,
+      configured_model_id: null,
+      configured_model_name: null,
+      local_available: false,
+      recommended_local: null,
+      suggestions: ["启动 SAM HTTP 服务后可一键配置。"]
+    }
+  ];
 }
 
 function modelToApi(model: ModelConfig) {
@@ -394,6 +505,7 @@ function modelToApi(model: ModelConfig) {
     kind: model.kind,
     provider: model.provider,
     base_url: model.baseUrl,
+    api_key: model.apiKey,
     model: model.model,
     enabled: model.enabled,
     capabilities: model.capabilities
@@ -408,6 +520,7 @@ function defaultModels(): ModelConfig[] {
       kind: "local",
       provider: "mock",
       baseUrl: "",
+      apiKey: "",
       model: "mock-agent",
       enabled: true,
       capabilities: ["llm"]
@@ -418,6 +531,7 @@ function defaultModels(): ModelConfig[] {
       kind: "local",
       provider: "mock",
       baseUrl: "",
+      apiKey: "",
       model: "mock-map-generator",
       enabled: true,
       capabilities: ["image_generation"]
@@ -428,6 +542,7 @@ function defaultModels(): ModelConfig[] {
       kind: "local",
       provider: "mock",
       baseUrl: "",
+      apiKey: "",
       model: "mock-sam",
       enabled: false,
       capabilities: ["segmentation", "vision_labeling"]

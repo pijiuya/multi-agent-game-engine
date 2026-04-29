@@ -272,6 +272,7 @@ input,
 .workspace-surface {
   position: absolute;
   inset: 0;
+  z-index: 0;
   width: 100%;
   height: 100%;
   pointer-events: auto;
@@ -280,7 +281,7 @@ input,
 .world-coordinate-layer {
   position: absolute;
   inset: 0;
-  z-index: 1;
+  z-index: 2;
   pointer-events: none;
   transform-origin: 0 0;
   will-change: transform;
@@ -289,21 +290,23 @@ input,
 .world-label-layer {
   position: absolute;
   inset: 0;
-  z-index: 3;
+  z-index: 4;
   pointer-events: none;
 }
 
 .world-map-background {
   position: absolute;
+  z-index: 0;
   object-fit: fill;
-  opacity: 0.68;
+  opacity: 0.96;
   pointer-events: auto;
   user-select: none;
-  filter: saturate(0.82) contrast(1.02);
+  filter: saturate(0.98) contrast(1.01);
 }
 
 .world-map-frame {
   position: absolute;
+  z-index: 0;
   display: grid;
   place-items: center;
   color: rgba(var(--grid-rgb), 0.58);
@@ -330,6 +333,7 @@ input,
   position: absolute;
   top: 0;
   left: 0;
+  z-index: 1;
   overflow: visible;
   pointer-events: none;
 }
@@ -1277,6 +1281,149 @@ input:focus {
   background: var(--active-bg);
   border-color: var(--active-bg);
   text-shadow: none;
+}
+
+.model-capability-cards {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.model-capability-card {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  min-height: 48px;
+  padding: 8px 9px;
+  color: var(--ink);
+  text-align: left;
+  background:
+    linear-gradient(90deg, rgba(var(--grid-rgb), 0.12) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(var(--grid-rgb), 0.1) 1px, transparent 1px),
+    rgba(var(--material-rgb), 0.5);
+  background-size: 12px 12px;
+  border: 1px solid rgba(var(--grid-rgb), 0.22);
+  border-radius: 9px;
+}
+
+.model-capability-card svg {
+  justify-self: center;
+}
+
+.model-capability-card span,
+.model-dialogue-row,
+.model-status-card,
+.model-suggestion {
+  min-width: 0;
+}
+
+.model-capability-card strong,
+.model-dialogue-row strong,
+.model-status-card span {
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-capability-card small,
+.model-dialogue-row small,
+.model-suggestion {
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--soft-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-capability-card.active {
+  color: var(--active-ink);
+  background: var(--active-bg);
+  border-color: var(--active-bg);
+  text-shadow: none;
+}
+
+.model-capability-card.active small {
+  color: var(--active-ink);
+}
+
+.model-capability-detail {
+  display: grid;
+  gap: 8px;
+}
+
+.model-dialogue-row,
+.model-status-card,
+.model-suggestion,
+.model-advanced-panel {
+  display: grid;
+  gap: 4px;
+  padding: 9px;
+  background: rgba(var(--material-rgb), 0.54);
+  border: 1px solid rgba(var(--grid-rgb), 0.2);
+  border-radius: 9px;
+}
+
+.model-dialogue-row span,
+.model-advanced-panel span {
+  font-size: 11px;
+  color: var(--label);
+}
+
+.model-status-card {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  background: rgba(var(--panel-rgb), 0.62);
+}
+
+.model-status-card.ready {
+  border-color: rgba(16, 185, 129, 0.42);
+}
+
+.model-suggestion {
+  color: var(--ink);
+  white-space: normal;
+}
+
+.model-action-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+}
+
+.model-action-row .panel-action-button {
+  width: 100%;
+  min-width: 0;
+}
+
+.model-advanced-toggle {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 0 10px;
+  color: var(--ink);
+  background: rgba(var(--material-rgb), 0.46);
+  border: 1px solid rgba(var(--grid-rgb), 0.2);
+  border-radius: 8px;
+}
+
+.model-advanced-panel label {
+  display: grid;
+  gap: 4px;
+}
+
+.model-advanced-panel input {
+  width: 100%;
+  height: 32px;
 }
 
 .model-config-list {

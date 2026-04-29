@@ -1,168 +1,238 @@
-import { Plus, Save, TestTube2, Trash2 } from "lucide-react";
+import { Bot, CheckCircle2, Cloud, ImagePlus, Layers3, RefreshCw, WandSparkles } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { ModelCapability, ModelConfig } from "../types";
+import type { ModelCapabilityId, ModelCapabilityStatus, ModelConfig } from "../types";
 
-type TestResult = {
-  ok: boolean;
-  message: string;
-  provider: string;
+type RemoteDraft = {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
 };
 
 type Props = {
+  statuses: ModelCapabilityStatus[];
   models: ModelConfig[];
-  onSaveModels: (models: ModelConfig[]) => Promise<void> | void;
-  onTestModel: (modelId: string) => Promise<TestResult>;
+  onRefresh: () => void;
+  onConfigureLocal: (capability: ModelCapabilityId) => void;
+  onConfigureRemote: (capability: ModelCapabilityId, draft: RemoteDraft) => void;
 };
 
-const CAPABILITIES: { value: ModelCapability; label: string }[] = [
-  { value: "llm", label: "LLM" },
-  { value: "image_generation", label: "图片生成" },
-  { value: "segmentation", label: "SAM 分层" },
-  { value: "vision_labeling", label: "图像识别" }
-];
+const CAPABILITY_ORDER: ModelCapabilityId[] = ["llm", "image_generation", "segmentation"];
 
-export function ModelManagerPanel({ models, onSaveModels, onTestModel }: Props) {
-  const [draftModels, setDraftModels] = useState<ModelConfig[]>(models);
-  const [testResults, setTestResults] = useState<Record<string, TestResult>>({});
+const CAPABILITY_META: Record<ModelCapabilityId, { title: string; subtitle: string; icon: typeof Bot; localLabel: string }> = {
+  llm: {
+    title: "语言模型 LLM",
+    subtitle: "控制 agent 的语言、意图和身份表达",
+    icon: Bot,
+    localLabel: "一键使用本地 LLM"
+  },
+  image_generation: {
+    title: "图片生成",
+    subtitle: "生成 2D 地图背景和后续局部重绘",
+    icon: ImagePlus,
+    localLabel: "一键使用本地图片服务"
+  },
+  segmentation: {
+    title: "SAM 分层",
+    subtitle: "把背景图切分成可命名、可设定功能的区域",
+    icon: Layers3,
+    localLabel: "一键使用本地 SAM"
+  }
+};
+
+export function ModelManagerPanel({ statuses, models, onRefresh, onConfigureLocal, onConfigureRemote }: Props) {
+  const [activeCapability, setActiveCapability] = useState<ModelCapabilityId>("llm");
+  const [advancedOpen, setAdvancedOpen] = useState<Record<ModelCapabilityId, boolean>>({
+    llm: false,
+    image_generation: false,
+    segmentation: false
+  });
+  const [remoteDrafts, setRemoteDrafts] = useState<Record<ModelCapabilityId, RemoteDraft>>(() => ({
+    llm: defaultRemoteDraft("llm", models),
+    image_generation: defaultRemoteDraft("image_generation", models),
+    segmentation: defaultRemoteDraft("segmentation", models)
+  }));
+  const statusMap = new Map(statuses.map((status) => [status.id, status]));
 
   useEffect(() => {
-    setDraftModels(models);
+    setRemoteDrafts((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const capability of CAPABILITY_ORDER) {
+        const currentDraft = current[capability];
+        if (currentDraft.baseUrl || currentDraft.apiKey || currentDraft.model) {
+          continue;
+        }
+        const defaultDraft = defaultRemoteDraft(capability, models);
+        if (defaultDraft.baseUrl || defaultDraft.apiKey || defaultDraft.model) {
+          next[capability] = defaultDraft;
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
   }, [models]);
 
-  function updateModel(id: string, patch: Partial<ModelConfig>) {
-    setDraftModels((current) => current.map((model) => (model.id === id ? { ...model, ...patch } : model)));
-  }
-
-  function toggleCapability(model: ModelConfig, capability: ModelCapability) {
-    const current = new Set(model.capabilities);
-    if (current.has(capability)) {
-      current.delete(capability);
-    } else {
-      current.add(capability);
-    }
-    updateModel(model.id, { capabilities: Array.from(current) });
-  }
-
-  function addModel() {
-    const id = `model_${Date.now()}`;
-    setDraftModels((current) => [
+  function updateRemoteDraft(capability: ModelCapabilityId, patch: Partial<RemoteDraft>) {
+    setRemoteDrafts((current) => ({
       ...current,
-      {
-        id,
-        name: "新模型",
-        kind: "remote",
-        provider: "http",
-        baseUrl: "",
-        model: "",
-        enabled: false,
-        capabilities: []
+      [capability]: {
+        ...current[capability],
+        ...patch
       }
-    ]);
-  }
-
-  async function testConnection(modelId: string) {
-    setTestResults((current) => ({
-      ...current,
-      [modelId]: { ok: false, provider: "", message: "测试中" }
     }));
-    await onSaveModels(draftModels);
-    const result = await onTestModel(modelId);
-    setTestResults((current) => ({ ...current, [modelId]: result }));
   }
 
   return (
     <div className="model-manager-panel" data-testid="model-manager-panel">
       <div className="panel-section-label">模型管理</div>
-      <div className="model-config-list" data-testid="model-config-list">
-        {draftModels.map((model) => {
-          const result = testResults[model.id];
+      <div className="model-capability-cards" data-testid="model-capability-cards">
+        {CAPABILITY_ORDER.map((capability) => {
+          const status = statusMap.get(capability) ?? fallbackStatus(capability);
+          const meta = CAPABILITY_META[capability];
+          const Icon = meta.icon;
           return (
-            <div className="model-config-row" data-testid={`model-config-${model.id}`} key={model.id}>
-              <label className="model-enable-row">
-                <input
-                  checked={model.enabled}
-                  onChange={(event) => updateModel(model.id, { enabled: event.currentTarget.checked })}
-                  type="checkbox"
-                />
-                <span>{model.name}</span>
-              </label>
-              <div className="model-field-grid">
-                <label>
-                  <span>名称</span>
-                  <input
-                    aria-label={`${model.name} 名称`}
-                    onChange={(event) => updateModel(model.id, { name: event.currentTarget.value })}
-                    value={model.name}
-                  />
-                </label>
-                <label>
-                  <span>Provider</span>
-                  <input
-                    aria-label={`${model.name} Provider`}
-                    onChange={(event) => updateModel(model.id, { provider: event.currentTarget.value })}
-                    value={model.provider}
-                  />
-                </label>
-                <label>
-                  <span>模型</span>
-                  <input
-                    aria-label={`${model.name} 模型`}
-                    onChange={(event) => updateModel(model.id, { model: event.currentTarget.value })}
-                    value={model.model}
-                  />
-                </label>
-                <label>
-                  <span>HTTP 地址</span>
-                  <input
-                    aria-label={`${model.name} HTTP 地址`}
-                    onChange={(event) => updateModel(model.id, { baseUrl: event.currentTarget.value })}
-                    value={model.baseUrl}
-                  />
-                </label>
-              </div>
-              <div className="capability-row" aria-label={`${model.name} 能力`}>
-                {CAPABILITIES.map((capability) => (
-                  <label key={capability.value}>
-                    <input
-                      checked={model.capabilities.includes(capability.value)}
-                      onChange={() => toggleCapability(model, capability.value)}
-                      type="checkbox"
-                    />
-                    <span>{capability.label}</span>
-                  </label>
-                ))}
-              </div>
-              <div className="model-row-actions">
-                <button className="model-test-button" onClick={() => void testConnection(model.id)} type="button">
-                  <TestTube2 size={14} />
-                  测试连接
-                </button>
-                <button
-                  aria-label={`删除 ${model.name}`}
-                  className="model-delete-button"
-                  onClick={() => setDraftModels((current) => current.filter((item) => item.id !== model.id))}
-                  type="button"
-                >
-                  <Trash2 size={14} />
-                </button>
-              </div>
-              {result ? (
-                <div className={result.ok ? "model-test-result ok" : "model-test-result error"} data-testid={`model-test-${model.id}`}>
-                  {result.message}
-                </div>
-              ) : null}
-            </div>
+            <button
+              className={activeCapability === capability ? "model-capability-card active" : "model-capability-card"}
+              data-testid={`model-capability-${capability}`}
+              key={capability}
+              onClick={() => setActiveCapability(capability)}
+              type="button"
+            >
+              <Icon size={16} />
+              <span>
+                <strong>{meta.title}</strong>
+                <small>{statusBadge(status)}</small>
+              </span>
+            </button>
           );
         })}
       </div>
-      <button className="panel-action-button" onClick={addModel} type="button">
-        <Plus size={15} />
-        新增模型
-      </button>
-      <button className="panel-action-button" onClick={() => onSaveModels(draftModels)} type="button">
-        <Save size={15} />
-        保存模型配置
-      </button>
+
+      <CapabilityDetail
+        advancedOpen={advancedOpen[activeCapability]}
+        capability={activeCapability}
+        draft={remoteDrafts[activeCapability]}
+        onConfigureLocal={onConfigureLocal}
+        onConfigureRemote={() => onConfigureRemote(activeCapability, remoteDrafts[activeCapability])}
+        onRefresh={onRefresh}
+        onToggleAdvanced={() => setAdvancedOpen((current) => ({ ...current, [activeCapability]: !current[activeCapability] }))}
+        onUpdateDraft={(patch) => updateRemoteDraft(activeCapability, patch)}
+        status={statusMap.get(activeCapability) ?? fallbackStatus(activeCapability)}
+      />
     </div>
   );
+}
+
+function CapabilityDetail({
+  capability,
+  status,
+  draft,
+  advancedOpen,
+  onRefresh,
+  onConfigureLocal,
+  onConfigureRemote,
+  onToggleAdvanced,
+  onUpdateDraft
+}: {
+  capability: ModelCapabilityId;
+  status: ModelCapabilityStatus;
+  draft: RemoteDraft;
+  advancedOpen: boolean;
+  onRefresh: () => void;
+  onConfigureLocal: (capability: ModelCapabilityId) => void;
+  onConfigureRemote: () => void;
+  onToggleAdvanced: () => void;
+  onUpdateDraft: (patch: Partial<RemoteDraft>) => void;
+}) {
+  const meta = CAPABILITY_META[capability];
+  const canUseLocal = Boolean(status.recommended_local);
+  return (
+    <section className="model-capability-detail" data-testid={`model-capability-detail-${capability}`}>
+      <div className="model-dialogue-row">
+        <strong>{meta.title}</strong>
+        <small>{meta.subtitle}</small>
+      </div>
+      <div className={status.status === "ready" || status.status === "local_available" ? "model-status-card ready" : "model-status-card"}>
+        {status.status === "ready" ? <CheckCircle2 size={16} /> : <WandSparkles size={16} />}
+        <span>{status.summary}</span>
+      </div>
+      {status.recommended_local ? (
+        <div className="model-dialogue-row">
+          <span>推荐本地方案</span>
+          <strong>{status.recommended_local.name}</strong>
+          <small>{status.recommended_local.model || status.recommended_local.provider}</small>
+        </div>
+      ) : null}
+      {status.suggestions.map((suggestion) => (
+        <div className="model-suggestion" key={suggestion}>{suggestion}</div>
+      ))}
+      <div className="model-action-row">
+        <button className="panel-action-button" disabled={!canUseLocal} onClick={() => onConfigureLocal(capability)} type="button">
+          <CheckCircle2 size={15} />
+          {meta.localLabel}
+        </button>
+        <button className="panel-action-button" onClick={onRefresh} type="button">
+          <RefreshCw size={15} />
+          重新检测
+        </button>
+      </div>
+      <button className="model-advanced-toggle" data-testid={`model-advanced-toggle-${capability}`} onClick={onToggleAdvanced} type="button">
+        <Cloud size={14} />
+        {advancedOpen ? "收起高级配置" : "高级配置"}
+      </button>
+      {advancedOpen ? (
+        <div className="model-advanced-panel" data-testid={`model-advanced-${capability}`}>
+          <label>
+            <span>API 地址</span>
+            <input aria-label={`${meta.title} API 地址`} onChange={(event) => onUpdateDraft({ baseUrl: event.currentTarget.value })} value={draft.baseUrl} />
+          </label>
+          <label>
+            <span>API Key</span>
+            <input aria-label={`${meta.title} API Key`} onChange={(event) => onUpdateDraft({ apiKey: event.currentTarget.value })} value={draft.apiKey} />
+          </label>
+          <label>
+            <span>模型名称</span>
+            <input aria-label={`${meta.title} 模型名称`} onChange={(event) => onUpdateDraft({ model: event.currentTarget.value })} value={draft.model} />
+          </label>
+          <button className="panel-action-button" disabled={!draft.baseUrl.trim()} onClick={onConfigureRemote} type="button">
+            保存远程备用配置
+          </button>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function statusBadge(status: ModelCapabilityStatus) {
+  const labels: Record<ModelCapabilityStatus["status"], string> = {
+    ready: "已配置",
+    local_available: "检测到本地方案",
+    mock_only: "仅测试 Mock",
+    missing: "未配置"
+  };
+  return labels[status.status];
+}
+
+function defaultRemoteDraft(capability: ModelCapabilityId, models: ModelConfig[]): RemoteDraft {
+  const existing = models.find((model) => model.kind === "remote" && model.capabilities.includes(capability));
+  return {
+    baseUrl: existing?.baseUrl ?? "",
+    apiKey: existing?.apiKey ?? "",
+    model: existing?.model ?? ""
+  };
+}
+
+function fallbackStatus(capability: ModelCapabilityId): ModelCapabilityStatus {
+  return {
+    id: capability,
+    label: CAPABILITY_META[capability].title,
+    status: "missing",
+    summary: "等待后端检测本机模型环境",
+    configured: false,
+    configured_model_id: null,
+    configured_model_name: null,
+    local_available: false,
+    recommended_local: null,
+    suggestions: ["点击重新检测获取本机模型状态。"]
+  };
 }

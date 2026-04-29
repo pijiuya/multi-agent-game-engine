@@ -5,6 +5,7 @@ import shutil
 import asyncio
 import json
 import math
+import subprocess
 from pathlib import Path
 from typing import Any
 from urllib import request as urlrequest
@@ -116,6 +117,7 @@ class ModelConfigPayload(BaseModel):
     kind: str = "local"
     provider: str = "mock"
     base_url: str = ""
+    api_key: str = ""
     model: str = ""
     enabled: bool = True
     capabilities: list[str] = Field(default_factory=list)
@@ -126,6 +128,7 @@ class ModelConfigPatch(BaseModel):
     kind: str | None = None
     provider: str | None = None
     base_url: str | None = None
+    api_key: str | None = None
     model: str | None = None
     enabled: bool | None = None
     capabilities: list[str] | None = None
@@ -133,6 +136,12 @@ class ModelConfigPatch(BaseModel):
 
 class ModelsPatch(BaseModel):
     models: list[ModelConfigPayload]
+
+
+class CapabilityConfigurePayload(BaseModel):
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
 
 
 class MapGenerationRequest(BaseModel):
@@ -260,6 +269,60 @@ def delete_model(model_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Model config not found")
     store.save_model_configs(next_configs)
     return {"models": [_public_model_config(config) for config in next_configs]}
+
+
+@app.get("/api/model-capabilities/status")
+def model_capabilities_status() -> dict[str, Any]:
+    configs = store.load_model_configs()
+    ollama_models = _detect_ollama_models()
+    local_services = _detect_local_model_services()
+    return {
+        "capabilities": [
+            _capability_status("llm", configs, ollama_models, local_services),
+            _capability_status("image_generation", configs, ollama_models, local_services),
+            _capability_status("segmentation", configs, ollama_models, local_services),
+        ],
+        "environment": {
+            "ollama": {
+                "available": bool(ollama_models),
+                "models": ollama_models,
+            },
+            "local_services": local_services,
+            "docker": shutil.which("docker") is not None,
+            "nvidia": shutil.which("nvidia-smi") is not None,
+        },
+    }
+
+
+@app.post("/api/model-capabilities/{capability}/configure-local")
+def configure_local_capability(capability: str) -> dict[str, Any]:
+    configs = store.load_model_configs()
+    ollama_models = _detect_ollama_models()
+    local_services = _detect_local_model_services()
+    recommendation = _recommended_local_config(capability, ollama_models, local_services)
+    if recommendation is None:
+        raise HTTPException(status_code=400, detail=_missing_capability_message(capability))
+    next_configs = _upsert_model_config(configs, recommendation)
+    if capability == "llm":
+        vision_config = _recommended_vision_config(ollama_models)
+        if vision_config:
+            next_configs = _upsert_model_config(next_configs, vision_config)
+    store.save_model_configs(next_configs)
+    return {
+        "models": [_public_model_config(config) for config in next_configs],
+        "capability": _capability_status(capability, next_configs, ollama_models, local_services),
+    }
+
+
+@app.post("/api/model-capabilities/{capability}/configure-remote")
+def configure_remote_capability(capability: str, payload: CapabilityConfigurePayload) -> dict[str, Any]:
+    config = _remote_capability_config(capability, payload)
+    configs = _upsert_model_config(store.load_model_configs(), config)
+    store.save_model_configs(configs)
+    return {
+        "models": [_public_model_config(item) for item in configs],
+        "capability": _capability_status(capability, configs, _detect_ollama_models(), _detect_local_model_services()),
+    }
 
 
 @app.post("/api/models/{model_id}/test")
@@ -521,6 +584,7 @@ def _model_config_dict(payload: ModelConfigPayload) -> dict[str, Any]:
         "kind": payload.kind,
         "provider": payload.provider,
         "base_url": payload.base_url,
+        "api_key": payload.api_key,
         "model": payload.model,
         "enabled": payload.enabled,
         "capabilities": payload.capabilities,
@@ -534,10 +598,265 @@ def _public_model_config(config: dict[str, Any]) -> dict[str, Any]:
         "kind": config.get("kind", "local"),
         "provider": config.get("provider", "mock"),
         "base_url": config.get("base_url", ""),
+        "api_key": config.get("api_key", ""),
         "model": config.get("model", ""),
         "enabled": bool(config.get("enabled", True)),
         "capabilities": list(config.get("capabilities", [])),
     }
+
+
+def _capability_status(
+    capability: str,
+    configs: list[dict[str, Any]],
+    ollama_models: list[str],
+    local_services: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    configured = _configured_model_for_capability(configs, capability)
+    mock_config = _mock_model_for_capability(configs, capability)
+    recommendation = _recommended_local_config(capability, ollama_models, local_services)
+    label = {
+        "llm": "语言模型 LLM",
+        "image_generation": "图片生成",
+        "segmentation": "SAM 分层",
+    }.get(capability, capability)
+    if configured:
+        status = "ready"
+        summary = f"已配置：{configured.get('name', '')}"
+    elif recommendation:
+        status = "local_available"
+        summary = f"检测到可用本地方案：{recommendation['name']}"
+    elif mock_config:
+        status = "mock_only"
+        summary = "当前只有测试 Mock，不能当作真实模型能力"
+    else:
+        status = "missing"
+        summary = _missing_capability_message(capability)
+    return {
+        "id": capability,
+        "label": label,
+        "status": status,
+        "summary": summary,
+        "configured": configured is not None,
+        "configured_model_id": configured.get("id") if configured else None,
+        "configured_model_name": configured.get("name") if configured else None,
+        "local_available": recommendation is not None,
+        "recommended_local": _public_model_config(recommendation) if recommendation else None,
+        "suggestions": _capability_suggestions(capability, ollama_models, local_services),
+    }
+
+
+def _configured_model_for_capability(configs: list[dict[str, Any]], capability: str) -> dict[str, Any] | None:
+    return next(
+        (
+            config
+            for config in configs
+            if config.get("enabled", True)
+            and config.get("provider") != "mock"
+            and capability in set(config.get("capabilities", []))
+        ),
+        None,
+    )
+
+
+def _mock_model_for_capability(configs: list[dict[str, Any]], capability: str) -> dict[str, Any] | None:
+    return next(
+        (
+            config
+            for config in configs
+            if config.get("enabled", True)
+            and config.get("provider") == "mock"
+            and capability in set(config.get("capabilities", []))
+        ),
+        None,
+    )
+
+
+def _recommended_local_config(
+    capability: str,
+    ollama_models: list[str],
+    local_services: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    if capability == "llm":
+        model = _preferred_model(ollama_models, ["qwen2.5:7b", "qwen2.5:1.5b", "gemma3:1b"])
+        if not model:
+            return None
+        return {
+            "id": "model_local_llm",
+            "name": f"本地 LLM - {model}",
+            "kind": "local",
+            "provider": "ollama",
+            "base_url": "http://127.0.0.1:11434",
+            "api_key": "",
+            "model": model,
+            "enabled": True,
+            "capabilities": ["llm"],
+        }
+    if capability == "image_generation":
+        service = local_services.get("image_generation")
+        if not service or not service.get("available"):
+            return None
+        return {
+            "id": "model_local_image",
+            "name": "本地图片生成",
+            "kind": "local",
+            "provider": service.get("provider", "local-http-image"),
+            "base_url": service.get("base_url", ""),
+            "api_key": "",
+            "model": service.get("model", "local-image"),
+            "enabled": True,
+            "capabilities": ["image_generation"],
+        }
+    if capability == "segmentation":
+        service = local_services.get("segmentation")
+        if not service or not service.get("available"):
+            return None
+        return {
+            "id": "model_local_sam",
+            "name": "本地 SAM 分层",
+            "kind": "local",
+            "provider": "sam-http",
+            "base_url": service.get("base_url", ""),
+            "api_key": "",
+            "model": service.get("model", "sam-local"),
+            "enabled": True,
+            "capabilities": ["segmentation"],
+        }
+    return None
+
+
+def _recommended_vision_config(ollama_models: list[str]) -> dict[str, Any] | None:
+    model = _preferred_model(ollama_models, ["qwen2.5vl:3b", "llava:7b"])
+    if not model:
+        return None
+    return {
+        "id": "model_local_vision",
+        "name": f"本地图像识别 - {model}",
+        "kind": "local",
+        "provider": "ollama",
+        "base_url": "http://127.0.0.1:11434",
+        "api_key": "",
+        "model": model,
+        "enabled": True,
+        "capabilities": ["vision_labeling"],
+    }
+
+
+def _remote_capability_config(capability: str, payload: CapabilityConfigurePayload) -> dict[str, Any]:
+    labels = {
+        "llm": ("model_remote_llm", "远程 LLM", "openai-compatible", ["llm"]),
+        "image_generation": ("model_remote_image", "远程图片生成", "image-http", ["image_generation"]),
+        "segmentation": ("model_remote_sam", "远程 SAM 分层", "sam-http", ["segmentation"]),
+    }
+    if capability not in labels:
+        raise HTTPException(status_code=404, detail="Unknown capability")
+    model_id, name, provider, capabilities = labels[capability]
+    return {
+        "id": model_id,
+        "name": name,
+        "kind": "remote",
+        "provider": provider,
+        "base_url": payload.base_url,
+        "api_key": payload.api_key,
+        "model": payload.model,
+        "enabled": True,
+        "capabilities": capabilities,
+    }
+
+
+def _upsert_model_config(configs: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
+    return [item for item in configs if item.get("id") != config.get("id")] + [config]
+
+
+def _detect_ollama_models() -> list[str]:
+    executable = shutil.which("ollama")
+    if not executable:
+        return []
+    try:
+        result = subprocess.run(
+            [executable, "list"],
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    models: list[str] = []
+    for line in result.stdout.splitlines()[1:]:
+        parts = line.split()
+        if parts:
+            models.append(parts[0])
+    return models
+
+
+def _detect_local_model_services() -> dict[str, dict[str, Any]]:
+    image_url = os.getenv("AGENT_ENGINE_IMAGE_URL", "http://127.0.0.1:8188")
+    sam_url = os.getenv("AGENT_ENGINE_SAM_URL", "http://127.0.0.1:8001/segment")
+    return {
+        "image_generation": {
+            "available": _http_endpoint_reachable(image_url),
+            "base_url": image_url,
+            "provider": "local-http-image",
+            "model": "local-image",
+        },
+        "segmentation": {
+            "available": _http_endpoint_reachable(sam_url),
+            "base_url": sam_url,
+            "provider": "sam-http",
+            "model": "sam-local",
+        },
+    }
+
+
+def _http_endpoint_reachable(url: str) -> bool:
+    try:
+        request = urlrequest.Request(url, method="GET")
+        with urlrequest.urlopen(request, timeout=0.6):
+            return True
+    except HTTPError:
+        return True
+    except (URLError, TimeoutError, ValueError, OSError):
+        return False
+
+
+def _preferred_model(models: list[str], candidates: list[str]) -> str | None:
+    available = set(models)
+    for candidate in candidates:
+        if candidate in available:
+            return candidate
+    return models[0] if models else None
+
+
+def _capability_suggestions(
+    capability: str,
+    ollama_models: list[str],
+    local_services: dict[str, dict[str, Any]],
+) -> list[str]:
+    if capability == "llm":
+        if ollama_models:
+            return ["可以直接使用已安装的 Ollama 模型。"]
+        return ["安装 Ollama 后拉取 qwen2.5:1.5b 或 gemma3:1b。"]
+    if capability == "image_generation":
+        if local_services.get("image_generation", {}).get("available"):
+            return ["检测到本地图片生成服务，可以一键配置。"]
+        return ["推荐后续接入本地 ComfyUI 或其他轻量图片生成 HTTP 服务。"]
+    if capability == "segmentation":
+        if local_services.get("segmentation", {}).get("available"):
+            return ["检测到本地 SAM HTTP 服务，可以一键配置。"]
+        return ["推荐启动一个本地 SAM HTTP 服务，并通过 AGENT_ENGINE_SAM_URL 或高级配置填写地址。"]
+    return []
+
+
+def _missing_capability_message(capability: str) -> str:
+    messages = {
+        "llm": "未检测到可用本地 LLM；建议安装 Ollama 并准备 qwen2.5:1.5b。",
+        "image_generation": "未检测到本地图片生成服务；可先使用高级配置接入本地/远程 HTTP 服务。",
+        "segmentation": "未检测到本地 SAM 服务；请启动 SAM HTTP 服务或填写高级 API 地址。",
+    }
+    return messages.get(capability, "未检测到可用本地能力")
 
 
 def _find_enabled_model(capability: str) -> dict[str, Any] | None:
