@@ -1,14 +1,21 @@
 import { Maximize2, Minus, Square, X } from "lucide-react";
-import type { CSSProperties, PointerEvent, WheelEvent } from "react";
+import type { CSSProperties, MouseEvent, PointerEvent, WheelEvent } from "react";
 import { useRef, useState } from "react";
-import type { CanvasViewState, EditTool, Point, WorldSnapshot } from "../types";
+import { screenToWorld, snapWorldPointToGrid } from "../lib/canvasCoords";
+import type { CanvasPoint, CanvasViewState, EditTool, Point, SelectionState, WorldSnapshot } from "../types";
 
 type Props = {
   world: WorldSnapshot;
   editTool: EditTool;
   canvasView: CanvasViewState;
+  selection: SelectionState;
+  canvasPoints: CanvasPoint[];
+  anchorPoint: Point | null;
   status: string;
   onViewChange: (view: CanvasViewState) => void;
+  onWorldPoint: (point: Point) => void;
+  onSelect: (selection: SelectionState) => void;
+  onAnchorContext: (screen: Point, world: Point) => void;
 };
 
 type PanDrag = {
@@ -21,11 +28,26 @@ type PanDrag = {
 const MIN_ZOOM = 0.125;
 const MAX_ZOOM = 8;
 
-export function SceneViewport({ world, editTool, canvasView, status, onViewChange }: Props) {
+export function SceneViewport({
+  world,
+  editTool,
+  canvasView,
+  selection,
+  canvasPoints,
+  anchorPoint,
+  status,
+  onViewChange,
+  onWorldPoint,
+  onSelect,
+  onAnchorContext
+}: Props) {
   const panDragRef = useRef<PanDrag | null>(null);
   const [isPanning, setIsPanning] = useState(false);
   const gridStyle = getGridStyle(canvasView);
   const density = getGridDensity(canvasView.zoom);
+  const worldLayerStyle = {
+    transform: `translate(${canvasView.pan.x}px, ${canvasView.pan.y}px) scale(${canvasView.zoom})`
+  } as CSSProperties;
 
   function handleWheel(event: WheelEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -50,6 +72,11 @@ export function SceneViewport({ world, editTool, canvasView, status, onViewChang
   }
 
   function startPan(event: PointerEvent<HTMLDivElement>) {
+    if (event.button === 0) {
+      const point = localWorldPoint(event);
+      onWorldPoint(editTool === "anchor" ? snapWorldPointToGrid(point, canvasView.zoom) : point);
+      return;
+    }
     if (event.button !== 1) {
       return;
     }
@@ -89,6 +116,30 @@ export function SceneViewport({ world, editTool, canvasView, status, onViewChang
     panDragRef.current = null;
     setIsPanning(false);
     event.currentTarget.releasePointerCapture(event.pointerId);
+  }
+
+  function handleContextMenu(event: MouseEvent<HTMLDivElement>) {
+    if (editTool !== "anchor") {
+      return;
+    }
+    event.preventDefault();
+    const point = snapWorldPointToGrid(localWorldPoint(event), canvasView.zoom);
+    onAnchorContext({ x: event.clientX, y: event.clientY }, point);
+  }
+
+  function localWorldPoint(event: PointerEvent<HTMLDivElement> | MouseEvent<HTMLDivElement>): Point {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return screenToWorld(
+      {
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top
+      },
+      canvasView
+    );
+  }
+
+  function stopMarkerPointer(event: PointerEvent<HTMLButtonElement>) {
+    event.stopPropagation();
   }
 
   return (
@@ -131,6 +182,7 @@ export function SceneViewport({ world, editTool, canvasView, status, onViewChang
         onPointerMove={movePan}
         onPointerUp={endPan}
         onPointerCancel={endPan}
+        onContextMenu={handleContextMenu}
         onAuxClick={(event) => {
           if (event.button === 1) {
             event.preventDefault();
@@ -138,6 +190,81 @@ export function SceneViewport({ world, editTool, canvasView, status, onViewChang
         }}
       >
         <div className="workspace-surface" data-testid="workspace-surface" aria-label="透明工作站底图" />
+        <div className="world-coordinate-layer" data-testid="world-coordinate-layer" style={worldLayerStyle}>
+          <div className="world-origin-marker" data-testid="origin-marker" style={pointStyle({ x: 0, y: 0 })}>
+            <span />
+          </div>
+          {world.map.items.map((item) => (
+            <button
+              className={selection.kind === "item" && selection.id === item.id ? "world-item-marker active" : "world-item-marker"}
+              data-testid={`world-item-${item.id}`}
+              data-world-x={item.position.x}
+              data-world-y={item.position.y}
+              data-world-object="item"
+              key={item.id}
+              onClick={() => onSelect({ kind: "item", id: item.id })}
+              onPointerDown={stopMarkerPointer}
+              style={pointStyle(item.position)}
+              title={item.name}
+            >
+              {item.name.slice(0, 1)}
+            </button>
+          ))}
+          {Object.values(world.agent_profiles).map((agent) => {
+            const state = world.agent_states[agent.id];
+            if (!state) {
+              return null;
+            }
+            return (
+              <button
+                className={
+                  selection.kind === "agent" && selection.id === agent.id ? "world-agent-marker active" : "world-agent-marker"
+                }
+                data-testid={`world-agent-${agent.id}`}
+                data-world-x={state.position.x}
+                data-world-y={state.position.y}
+                data-world-object="agent"
+                key={agent.id}
+                onClick={() => onSelect({ kind: "agent", id: agent.id })}
+                onPointerDown={stopMarkerPointer}
+                style={{ ...pointStyle(state.position), "--agent-color": agent.color } as CSSProperties}
+                title={agent.name}
+              >
+                <span />
+                <small>{agent.name}</small>
+              </button>
+            );
+          })}
+          {canvasPoints.map((point) => (
+            <button
+              className={
+                selection.kind === "point" && selection.id === point.id ? "world-empty-point-marker active" : "world-empty-point-marker"
+              }
+              data-testid={`world-point-${point.id}`}
+              data-world-x={point.position.x}
+              data-world-y={point.position.y}
+              data-world-object="point"
+              key={point.id}
+              onClick={() => onSelect({ kind: "point", id: point.id })}
+              onPointerDown={stopMarkerPointer}
+              style={pointStyle(point.position)}
+              title={point.name}
+            />
+          ))}
+          {anchorPoint ? (
+            <button
+              aria-label="当前锚点"
+              className="world-anchor-marker active"
+              data-testid="world-anchor-marker"
+              data-world-x={anchorPoint.x}
+              data-world-y={anchorPoint.y}
+              data-world-object="anchor"
+              onPointerDown={stopMarkerPointer}
+              style={pointStyle(anchorPoint)}
+              title="当前锚点"
+            />
+          ) : null}
+        </div>
         <div className="scene-corner-mark top-left" />
         <div className="scene-corner-mark top-right" />
         <div className="scene-corner-mark bottom-left" />
@@ -153,6 +280,13 @@ export function SceneViewport({ world, editTool, canvasView, status, onViewChang
       </footer>
     </section>
   );
+}
+
+function pointStyle(point: Point) {
+  return {
+    left: `${point.x}px`,
+    top: `${point.y}px`
+  } as CSSProperties;
 }
 
 function getGridStyle(view: CanvasViewState) {
@@ -196,7 +330,8 @@ function toolLabel(tool: EditTool) {
     zone: "互动区",
     item: "元素",
     spawn: "出生点",
-    move: "移动"
+    move: "移动",
+    anchor: "锚点"
   };
   return labels[tool];
 }

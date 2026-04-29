@@ -1,4 +1,5 @@
 import {
+  Anchor,
   Box,
   Crosshair,
   ImagePlus,
@@ -75,6 +76,14 @@ export function ToolPanel({
           onClick={() => onEditTool("select")}
         >
           <MousePointer2 size={18} />
+        </button>
+        <button
+          aria-label="锚点"
+          title="锚点"
+          className={editTool === "anchor" ? "active" : ""}
+          onClick={() => onEditTool("anchor")}
+        >
+          <Anchor size={18} />
         </button>
         <button
           aria-label="移动 agent"

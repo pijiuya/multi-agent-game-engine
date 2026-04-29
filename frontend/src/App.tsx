@@ -7,6 +7,11 @@ import { SceneViewport } from "./components/SceneViewport";
 import { ToolPanel } from "./components/ToolPanel";
 import { TransportControls } from "./components/TransportControls";
 import {
+  centerViewOnWorldPoint,
+  ORIGIN_POINT,
+  snapWorldPointToGrid
+} from "./lib/canvasCoords";
+import {
   createAgent as createAgentRemote,
   getWorld,
   postAction,
@@ -16,8 +21,14 @@ import {
   uploadMapImage,
   wsUrl
 } from "./lib/api";
-import { addAgentLocal, addAreaToMap, addItemToMap, addSpawnToMap, moveAgentLocal } from "./lib/worldOps";
-import type { CanvasViewState, EditTool, PanelState, Point, SelectionState, WorldSnapshot } from "./types";
+import { addAgentLocal, addAreaToMap, addItemToMap, addSpawnToMap, makeId, moveAgentLocal } from "./lib/worldOps";
+import type { CanvasPoint, CanvasViewState, EditTool, PanelState, Point, SelectionState, WorldSnapshot } from "./types";
+
+type AnchorMenuState = {
+  x: number;
+  y: number;
+  point: Point;
+};
 
 export default function App() {
   const [world, setWorld] = useState<WorldSnapshot | null>(null);
@@ -31,6 +42,9 @@ export default function App() {
     pan: { x: 0, y: 0 },
     fitMode: true
   });
+  const [canvasPoints, setCanvasPoints] = useState<CanvasPoint[]>([]);
+  const [anchorPoint, setAnchorPoint] = useState<Point | null>(null);
+  const [anchorMenu, setAnchorMenu] = useState<AnchorMenuState | null>(null);
   const [panels, setPanels] = useState<PanelState[]>(() => createInitialPanels());
   const [zCursor, setZCursor] = useState(40);
 
@@ -76,7 +90,13 @@ export default function App() {
     if (selection.kind === "agent" && !selectedAgentExists) {
       setSelection({ kind: "map", id: world.map.id });
     }
-  }, [selection, selectedAgentExists, world]);
+    if (selection.kind === "item" && !world.map.items.some((item) => item.id === selection.id)) {
+      setSelection({ kind: "map", id: world.map.id });
+    }
+    if (selection.kind === "point" && !canvasPoints.some((point) => point.id === selection.id)) {
+      setSelection({ kind: "map", id: world.map.id });
+    }
+  }, [canvasPoints, selection, selectedAgentExists, world]);
 
   async function refreshWorld() {
     const snapshot = await getWorld();
@@ -145,6 +165,12 @@ export default function App() {
     if (!world) {
       return;
     }
+    setAnchorMenu(null);
+    if (editTool === "anchor") {
+      const snapped = snapWorldPointToGrid(point, canvasView.zoom);
+      setAnchorPoint(snapped);
+      return;
+    }
     if (editTool === "select") {
       setSelection({ kind: "map", id: world.map.id });
       return;
@@ -154,7 +180,10 @@ export default function App() {
       return;
     }
     if (editTool === "item") {
-      setWorld({ ...world, map: addItemToMap(world.map, point) });
+      const map = addItemToMap(world.map, point);
+      const item = map.items[map.items.length - 1];
+      setWorld({ ...world, map });
+      setSelection(item ? { kind: "item", id: item.id } : selection);
       return;
     }
     if (editTool === "spawn") {
@@ -183,10 +212,13 @@ export default function App() {
     if (!world) {
       return;
     }
+    const previousIds = new Set(Object.keys(world.agent_profiles));
     const remoteSnapshot = await createAgentRemote(name, role, point);
     if (remoteSnapshot) {
       setWorld(remoteSnapshot);
-      const created = Object.values(remoteSnapshot.agent_profiles).find((agent) => agent.name === name);
+      const created =
+        Object.values(remoteSnapshot.agent_profiles).find((agent) => !previousIds.has(agent.id)) ??
+        Object.values(remoteSnapshot.agent_profiles).find((agent) => agent.name === name);
       setSelection(created ? { kind: "agent", id: created.id } : selection);
       setStatus("后端已连接");
       return;
@@ -198,6 +230,64 @@ export default function App() {
     if (created) {
       setSelection({ kind: "agent", id: created.id });
     }
+  }
+
+  function centerOnWorldPoint(point: Point) {
+    const shell = document.querySelector(".scene-canvas-shell");
+    const rect = shell?.getBoundingClientRect();
+    const center = rect ? { x: rect.width / 2, y: rect.height / 2 } : { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+    setCanvasView((view) => centerViewOnWorldPoint(view, point, center));
+  }
+
+  function locateAgent(agentId: string) {
+    if (!world) {
+      return;
+    }
+    const state = world.agent_states[agentId];
+    if (!state) {
+      return;
+    }
+    setSelection({ kind: "agent", id: agentId });
+    centerOnWorldPoint(state.position);
+  }
+
+  function openAnchorMenu(screen: Point, point: Point) {
+    setAnchorPoint(point);
+    setAnchorMenu({ x: screen.x, y: screen.y, point });
+  }
+
+  async function generateAgentFromAnchor(point: Point) {
+    setAnchorMenu(null);
+    await createAgent("新 Agent", "居民", point);
+  }
+
+  async function generateItemFromAnchor(point: Point) {
+    if (!world) {
+      return;
+    }
+    const map = addItemToMap(world.map, point);
+    const item = map.items[map.items.length - 1];
+    setWorld({ ...world, map });
+    const remoteSnapshot = await saveMap(map);
+    if (remoteSnapshot) {
+      setWorld(remoteSnapshot);
+    }
+    if (item) {
+      setSelection({ kind: "item", id: item.id });
+    }
+    setAnchorMenu(null);
+  }
+
+  function generatePointFromAnchor(point: Point) {
+    const canvasPoint: CanvasPoint = {
+      id: makeId("point"),
+      name: `空点 ${canvasPoints.length + 1}`,
+      position: point,
+      snapped: true
+    };
+    setCanvasPoints((points) => [...points, canvasPoint]);
+    setSelection({ kind: "point", id: canvasPoint.id });
+    setAnchorMenu(null);
   }
 
   function movePanel(id: PanelState["id"], x: number, y: number) {
@@ -285,8 +375,14 @@ export default function App() {
         world={world}
         editTool={editTool}
         canvasView={canvasView}
+        selection={selection}
+        canvasPoints={canvasPoints}
+        anchorPoint={anchorPoint}
         status={status}
         onViewChange={setCanvasView}
+        onWorldPoint={(point) => void handleWorldClick(point)}
+        onSelect={setSelection}
+        onAnchorContext={openAnchorMenu}
       />
 
       <TransportControls
@@ -294,9 +390,23 @@ export default function App() {
         onRun={() => void setSimulationRunning(true)}
         onPause={() => void setSimulationRunning(false)}
         onStop={() => void setSimulationRunning(false, true)}
+        onCenterOrigin={() => centerOnWorldPoint(ORIGIN_POINT)}
         appearanceMode={appearanceMode}
         onToggleAppearance={() => setAppearanceMode((mode) => (mode === "light" ? "dark" : "light"))}
       />
+
+      {anchorMenu ? (
+        <div
+          className="anchor-context-menu"
+          data-testid="anchor-context-menu"
+          onContextMenu={(event) => event.preventDefault()}
+          style={{ left: anchorMenu.x, top: anchorMenu.y }}
+        >
+          <button onClick={() => void generateAgentFromAnchor(anchorMenu.point)}>生成 Agent</button>
+          <button onClick={() => void generateItemFromAnchor(anchorMenu.point)}>生成地图元素</button>
+          <button onClick={() => generatePointFromAnchor(anchorMenu.point)}>生成空点</button>
+        </div>
+      ) : null}
 
       {panels.map((panel) => (
         <FloatingPanel
@@ -329,18 +439,19 @@ export default function App() {
             />
           ) : null}
           {panel.id === "scene" ? (
-            <SceneElementsPanel world={world} selection={selection} onSelect={setSelection} />
+            <SceneElementsPanel world={world} selection={selection} canvasPoints={canvasPoints} onSelect={setSelection} />
           ) : null}
           {panel.id === "agents" ? (
             <AgentPanel
               world={world}
               selection={selection}
               onSelect={setSelection}
+              onLocateAgent={locateAgent}
               onCreateAgent={(name, role, point) => void createAgent(name, role, point)}
               onRefresh={() => void refreshWorld()}
             />
           ) : null}
-          {panel.id === "properties" ? <PropertiesPanel world={world} selection={selection} /> : null}
+          {panel.id === "properties" ? <PropertiesPanel world={world} selection={selection} canvasPoints={canvasPoints} /> : null}
         </FloatingPanel>
       ))}
     </main>

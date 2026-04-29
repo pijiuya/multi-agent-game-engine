@@ -7,11 +7,12 @@ type Props = {
   world: WorldSnapshot;
   selection: SelectionState;
   onSelect: (selection: SelectionState) => void;
+  onLocateAgent: (agentId: string) => void;
   onCreateAgent: (name: string, role: string, point: Point) => void;
   onRefresh: () => void;
 };
 
-export function AgentPanel({ world, selection, onSelect, onCreateAgent, onRefresh }: Props) {
+export function AgentPanel({ world, selection, onSelect, onLocateAgent, onCreateAgent, onRefresh }: Props) {
   const [name, setName] = useState("新 Agent");
   const [role, setRole] = useState("居民");
   const [speech, setSpeech] = useState("");
@@ -36,6 +37,7 @@ export function AgentPanel({ world, selection, onSelect, onCreateAgent, onRefres
               className={selection.kind === "agent" && selection.id === agent.id ? "agent-card active" : "agent-card"}
               key={agent.id}
               onClick={() => onSelect({ kind: "agent", id: agent.id })}
+              onDoubleClick={() => onLocateAgent(agent.id)}
             >
               <span className="agent-swatch" style={{ background: agent.color }} />
               <span>

@@ -93,7 +93,7 @@ export type WorldSnapshot = {
 
 export type ViewMode = "2d" | "3d";
 
-export type EditTool = "select" | "walkable" | "obstacle" | "zone" | "item" | "spawn" | "move";
+export type EditTool = "select" | "walkable" | "obstacle" | "zone" | "item" | "spawn" | "move" | "anchor";
 
 export type PanelState = {
   id: "tools" | "scene" | "agents" | "properties";
@@ -111,7 +111,8 @@ export type SelectionState =
   | { kind: "map"; id: string }
   | { kind: "agent"; id: string }
   | { kind: "item"; id: string }
-  | { kind: "area"; id: string };
+  | { kind: "area"; id: string }
+  | { kind: "point"; id: string };
 
 export type CanvasViewState = {
   zoom: number;
@@ -119,3 +120,9 @@ export type CanvasViewState = {
   fitMode: boolean;
 };
 
+export type CanvasPoint = {
+  id: string;
+  name: string;
+  position: Point;
+  snapped: boolean;
+};

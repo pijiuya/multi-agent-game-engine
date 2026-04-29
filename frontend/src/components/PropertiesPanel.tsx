@@ -1,12 +1,13 @@
-import type { SelectionState, WorldSnapshot } from "../types";
+import type { CanvasPoint, SelectionState, WorldSnapshot } from "../types";
 
 type Props = {
   world: WorldSnapshot;
   selection: SelectionState;
+  canvasPoints: CanvasPoint[];
 };
 
-export function PropertiesPanel({ world, selection }: Props) {
-  const rows = getPropertyRows(world, selection);
+export function PropertiesPanel({ world, selection, canvasPoints }: Props) {
+  const rows = getPropertyRows(world, selection, canvasPoints);
 
   return (
     <div className="properties-panel">
@@ -26,7 +27,7 @@ export function PropertiesPanel({ world, selection }: Props) {
   );
 }
 
-function getPropertyRows(world: WorldSnapshot, selection: SelectionState) {
+function getPropertyRows(world: WorldSnapshot, selection: SelectionState, canvasPoints: CanvasPoint[]) {
   if (selection.kind === "agent") {
     const profile = world.agent_profiles[selection.id];
     const state = world.agent_states[selection.id];
@@ -77,6 +78,20 @@ function getPropertyRows(world: WorldSnapshot, selection: SelectionState) {
     ];
   }
 
+  if (selection.kind === "point") {
+    const point = canvasPoints.find((candidate) => candidate.id === selection.id);
+    if (!point) {
+      return [{ label: "缺失", value: "没有找到空点" }];
+    }
+    return [
+      { label: "名称", value: point.name },
+      { label: "类型", value: "空点" },
+      { label: "位置", value: `${Math.round(point.position.x)}, ${Math.round(point.position.y)}` },
+      { label: "吸附", value: point.snapped ? "已吸附到网格" : "自由点" },
+      { label: "简介", value: "前端本地画布点，暂不写入后端。" }
+    ];
+  }
+
   return [
     { label: "名称", value: displayName(world.map.name) },
     { label: "类型", value: "2D 场景地图" },
@@ -92,7 +107,8 @@ function selectionKindLabel(kind: SelectionState["kind"]) {
     map: "地图",
     agent: "Agent",
     item: "元素",
-    area: "区域"
+    area: "区域",
+    point: "空点"
   };
   return labels[kind];
 }

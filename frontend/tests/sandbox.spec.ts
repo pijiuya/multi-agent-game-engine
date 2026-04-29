@@ -12,6 +12,7 @@ test("renders the transparent 2D workstation with floating panels", async ({ pag
   await expect(page.getByRole("button", { name: "运行" })).toBeVisible();
   await expect(page.getByRole("button", { name: "暂停" })).toBeVisible();
   await expect(page.getByRole("button", { name: "停止" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "回归零点" })).toBeVisible();
   await expect(page.getByRole("button", { name: "切换黑白反色" })).toBeVisible();
 
   await expect(page.getByTestId("panel-tools")).toBeVisible();
@@ -295,6 +296,100 @@ test("workspace zoom and pan still work after tone inversion", async ({ page }) 
   expect(after.minorSize).toBeGreaterThan(before.minorSize);
   expect(after.panX).not.toBe(before.panX);
   expect(after.backgroundImage).toContain("rgba(255, 255, 255");
+});
+
+test("origin button centers the zero point without changing zoom", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.goto("/");
+
+  const scene = page.getByTestId("scene-viewport");
+  const shell = page.locator(".scene-canvas-shell");
+  const shellBox = await shell.boundingBox();
+  expect(shellBox).not.toBeNull();
+
+  const before = await readGridState(scene);
+  await page.getByRole("button", { name: "回归零点" }).click();
+  const after = await readGridState(scene);
+
+  expect(after.minorSize).toBe(before.minorSize);
+  expect(parseFloat(after.panX)).toBeCloseTo(shellBox!.width / 2, 0);
+  expect(parseFloat(after.panY)).toBeCloseTo(shellBox!.height / 2, 0);
+  await expect(page.getByTestId("origin-marker")).toBeVisible();
+});
+
+test("double clicking an agent centers that agent in world coordinates", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.goto("/");
+
+  const scene = page.getByTestId("scene-viewport");
+  const shell = page.locator(".scene-canvas-shell");
+  const shellBox = await shell.boundingBox();
+  expect(shellBox).not.toBeNull();
+
+  await page.getByTestId("panel-agents").getByRole("button", { name: /Mira/ }).dblclick();
+  await expect(page.getByTestId("panel-properties").getByText("mediator", { exact: true })).toBeVisible();
+  const after = await readGridState(scene);
+  const agentPosition = await page.getByTestId("world-agent-agent_mira").evaluate((element) => ({
+    x: Number(element.getAttribute("data-world-x")),
+    y: Number(element.getAttribute("data-world-y"))
+  }));
+
+  expect(parseFloat(after.panX)).toBeCloseTo(shellBox!.width / 2 - agentPosition.x, 0);
+  expect(parseFloat(after.panY)).toBeCloseTo(shellBox!.height / 2 - agentPosition.y, 0);
+  await expect(page.getByTestId("world-agent-agent_mira")).toBeVisible();
+});
+
+test("anchor tool snaps to the grid and generates empty points", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.goto("/");
+
+  const surface = page.getByTestId("workspace-surface");
+  const box = await surface.boundingBox();
+  expect(box).not.toBeNull();
+
+  await page.getByRole("button", { name: "锚点" }).click();
+  await expect(page.locator(".scene-footer").getByText("锚点", { exact: true })).toBeVisible();
+  await page.mouse.click(box!.x + box!.width / 2 + 13, box!.y + box!.height / 2 + 11);
+  await expect(page.getByTestId("world-anchor-marker")).toBeVisible();
+
+  await page.mouse.click(box!.x + box!.width / 2 + 13, box!.y + box!.height / 2 + 11, { button: "right" });
+  await expect(page.getByTestId("anchor-context-menu")).toBeVisible();
+  await page.getByRole("button", { name: "生成空点" }).click();
+
+  await expect(page.getByTestId("panel-properties").locator(".property-heading strong")).toHaveText("空点");
+  await expect(page.getByTestId("panel-properties").getByText("已吸附到网格", { exact: true })).toBeVisible();
+  await expect(page.locator('[data-testid^="world-point-"]')).toHaveCount(1);
+});
+
+test("anchor context menu generates agents and map elements without affecting panels", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.goto("/");
+
+  const scene = page.getByTestId("scene-viewport");
+  const surface = page.getByTestId("workspace-surface");
+  const box = await surface.boundingBox();
+  expect(box).not.toBeNull();
+
+  await page.getByRole("button", { name: "锚点" }).click();
+  await expect(page.locator(".scene-footer").getByText("锚点", { exact: true })).toBeVisible();
+  const agentCountBefore = await page.locator('[data-testid^="world-agent-"]').count();
+  const itemCountBefore = await page.locator('[data-testid^="world-item-"]').count();
+  await page.mouse.click(box!.x + 430, box!.y + 260, { button: "right" });
+  await page.getByRole("button", { name: "生成 Agent" }).click();
+  await expect(page.locator('[data-testid^="world-agent-"]')).toHaveCount(agentCountBefore + 1);
+
+  await page.mouse.click(box!.x + 520, box!.y + 320, { button: "right" });
+  await page.getByRole("button", { name: "生成地图元素" }).click();
+  await expect(page.locator('[data-testid^="world-item-"]')).toHaveCount(itemCountBefore + 1);
+  await expect(page.getByTestId("panel-properties").locator(".property-heading strong")).toHaveText("元素");
+
+  const zoomBeforePanelRightClick = (await readGridState(scene)).minorSize;
+  await page.getByTestId("panel-tools").click({ button: "right" });
+  await expect(page.getByTestId("anchor-context-menu")).toHaveCount(0);
+  const zoomAfterPanelRightClick = (await readGridState(scene)).minorSize;
+  expect(zoomAfterPanelRightClick).toBe(zoomBeforePanelRightClick);
+
+  await expect(page.getByTestId("world-2d")).toHaveCount(0);
 });
 
 async function readGridState(scene: import("@playwright/test").Locator) {

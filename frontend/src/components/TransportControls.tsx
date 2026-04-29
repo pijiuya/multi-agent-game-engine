@@ -1,10 +1,11 @@
-import { Contrast, Pause, Play, Square } from "lucide-react";
+import { Contrast, LocateFixed, Pause, Play, Square } from "lucide-react";
 
 type Props = {
   running: boolean;
   onRun: () => void;
   onPause: () => void;
   onStop: () => void;
+  onCenterOrigin: () => void;
   appearanceMode: "light" | "dark";
   onToggleAppearance: () => void;
 };
@@ -14,6 +15,7 @@ export function TransportControls({
   onRun,
   onPause,
   onStop,
+  onCenterOrigin,
   appearanceMode,
   onToggleAppearance
 }: Props) {
@@ -27,6 +29,9 @@ export function TransportControls({
       </button>
       <button aria-label="停止" title="停止" onClick={onStop}>
         <Square size={17} />
+      </button>
+      <button aria-label="回归零点" title="回归零点" onClick={onCenterOrigin}>
+        <LocateFixed size={18} />
       </button>
       <button
         aria-label="切换黑白反色"

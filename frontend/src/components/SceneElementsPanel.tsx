@@ -1,13 +1,14 @@
-import { Image, MapPin, Package, Shapes, UserRound } from "lucide-react";
-import type { SelectionState, WorldSnapshot } from "../types";
+import { CircleDot, Image, MapPin, Package, Shapes, UserRound } from "lucide-react";
+import type { CanvasPoint, SelectionState, WorldSnapshot } from "../types";
 
 type Props = {
   world: WorldSnapshot;
   selection: SelectionState;
+  canvasPoints: CanvasPoint[];
   onSelect: (selection: SelectionState) => void;
 };
 
-export function SceneElementsPanel({ world, selection, onSelect }: Props) {
+export function SceneElementsPanel({ world, selection, canvasPoints, onSelect }: Props) {
   const areas = [
     ...world.map.walkable_areas.map((area) => ({ ...area, group: "可行走" })),
     ...world.map.obstacles.map((area) => ({ ...area, group: "障碍" })),
@@ -61,6 +62,21 @@ export function SceneElementsPanel({ world, selection, onSelect }: Props) {
           <Package size={16} />
           <span>{item.name}</span>
           <small>{item.tags.join(", ") || "元素"}</small>
+        </button>
+      ))}
+
+      <div className="panel-section-label">空点</div>
+      {canvasPoints.map((point) => (
+        <button
+          key={point.id}
+          className={selection.kind === "point" && selection.id === point.id ? "scene-list-row active" : "scene-list-row"}
+          onClick={() => onSelect({ kind: "point", id: point.id })}
+        >
+          <CircleDot size={16} />
+          <span>{point.name}</span>
+          <small>
+            {Math.round(point.position.x)}, {Math.round(point.position.y)}
+          </small>
         </button>
       ))}
 

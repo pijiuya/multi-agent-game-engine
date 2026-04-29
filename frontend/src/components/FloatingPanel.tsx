@@ -106,7 +106,13 @@ export function FloatingPanel({
         height: panel.minimized ? undefined : panel.height,
         zIndex: panel.zIndex
       }}
-      onPointerDown={() => onBringToFront(panel.id)}
+      onPointerDown={(event) => {
+        const target = event.target as HTMLElement;
+        if (target.closest("button, input, label")) {
+          return;
+        }
+        onBringToFront(panel.id);
+      }}
     >
       <header
         className="panel-titlebar"
