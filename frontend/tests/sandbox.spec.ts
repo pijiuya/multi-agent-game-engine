@@ -172,6 +172,42 @@ test("floating panels resize from edges and scroll clipped content", async ({ pa
   expect(scrollState.scrollHeight).toBeGreaterThan(scrollState.clientHeight);
 });
 
+test("floating panel layout persists across reloads", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.goto("/");
+  await page.evaluate(() => window.localStorage.removeItem("agent-workstation.panel-layout.v1"));
+  await page.reload();
+
+  const panel = page.getByTestId("panel-scene");
+  const title = page.getByTestId("panel-title-scene");
+  const titleBox = await title.boundingBox();
+  expect(titleBox).not.toBeNull();
+
+  await page.mouse.move(titleBox!.x + titleBox!.width / 2, titleBox!.y + titleBox!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(220, 180, { steps: 8 });
+  await page.mouse.up();
+
+  const resizeCorner = page.getByTestId("resize-scene-se");
+  const corner = await resizeCorner.boundingBox();
+  expect(corner).not.toBeNull();
+  await page.mouse.move(corner!.x + corner!.width / 2, corner!.y + corner!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(corner!.x + corner!.width / 2 + 64, corner!.y + corner!.height / 2 + 48, { steps: 6 });
+  await page.mouse.up();
+
+  const saved = await panel.boundingBox();
+  expect(saved).not.toBeNull();
+  await page.reload();
+
+  const restored = await page.getByTestId("panel-scene").boundingBox();
+  expect(restored).not.toBeNull();
+  expect(restored!.x).toBeCloseTo(saved!.x, 0);
+  expect(restored!.y).toBeCloseTo(saved!.y, 0);
+  expect(restored!.width).toBeCloseTo(saved!.width, 0);
+  expect(restored!.height).toBeCloseTo(saved!.height, 0);
+});
+
 test("floating panels are more legible without becoming solid blocks", async ({ page }) => {
   await page.goto("/");
 
@@ -455,8 +491,17 @@ test("drawing tools create vector areas and item transform handles edit items", 
   await page.mouse.click(box!.x + 620, box!.y + 360);
   await expect(page.locator(".world-item-marker")).toHaveCount(itemCountBefore + 1);
   await expect(page.getByTestId("item-transform-box")).toBeVisible();
+  const transformLayerState = await page.getByTestId("item-transform-box").evaluate((element) => ({
+    inScaledLayer: Boolean(element.closest(".world-coordinate-layer")),
+    scaleWidth: (element.querySelector(".item-transform-handle.scale") as HTMLElement).getBoundingClientRect().width,
+    rotateWidth: (element.querySelector(".item-transform-handle.rotate") as HTMLElement).getBoundingClientRect().width
+  }));
+  expect(transformLayerState.inScaledLayer).toBe(false);
+  expect(transformLayerState.scaleWidth).toBeLessThanOrEqual(14);
+  expect(transformLayerState.rotateWidth).toBeLessThanOrEqual(16);
 
-  const item = page.locator(".world-item-marker").last();
+  const item = page.locator(".world-item-marker.active");
+  await expect(item).toBeVisible();
   const before = await item.evaluate((element) => ({
     x: Number(element.getAttribute("data-world-x")),
     y: Number(element.getAttribute("data-world-y"))
@@ -490,16 +535,19 @@ test("drawing tools create vector areas and item transform handles edit items", 
   expect(Number(scaleValue)).toBeGreaterThan(1);
 });
 
-test("agent labels stay crisp while icons remain vector based during zoom", async ({ page }) => {
+test("agent labels and origin icons stay crisp at a fixed screen size during zoom", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 820 });
   await page.goto("/");
   const surface = page.getByTestId("workspace-surface");
   const label = page.locator(".world-agent-label").first();
-  const icon = page.locator(".world-agent-marker > span").first();
+  const marker = page.locator(".world-agent-marker").first();
+  const icon = marker.locator("> span");
 
   const labelBefore = await label.boundingBox();
+  const markerBefore = await marker.boundingBox();
   const iconBefore = await icon.boundingBox();
   expect(labelBefore).not.toBeNull();
+  expect(markerBefore).not.toBeNull();
   expect(iconBefore).not.toBeNull();
   await expect(page.getByTestId("world-label-layer")).toBeVisible();
   const labelLayerState = await label.evaluate((element) => ({
@@ -518,11 +566,22 @@ test("agent labels stay crisp while icons remain vector based during zoom", asyn
   await page.mouse.wheel(0, -1200);
 
   const labelAfter = await label.boundingBox();
+  const markerAfter = await marker.boundingBox();
   const iconAfter = await icon.boundingBox();
   expect(labelAfter).not.toBeNull();
+  expect(markerAfter).not.toBeNull();
   expect(iconAfter).not.toBeNull();
   expect(Math.abs(labelAfter!.height - labelBefore!.height)).toBeLessThan(2);
-  expect(iconAfter!.width).toBeGreaterThan(iconBefore!.width);
+  expect(Math.abs(markerAfter!.width - markerBefore!.width)).toBeLessThan(1);
+  expect(Math.abs(iconAfter!.width - iconBefore!.width)).toBeLessThan(1);
+  const markerLayerState = await marker.evaluate((element) => ({
+    scaleX: new DOMMatrixReadOnly(getComputedStyle(element).transform).a,
+    scaleY: new DOMMatrixReadOnly(getComputedStyle(element).transform).d,
+    inScaledLayer: Boolean(element.closest(".world-coordinate-layer"))
+  }));
+  expect(markerLayerState.scaleX).toBeCloseTo(1, 2);
+  expect(markerLayerState.scaleY).toBeCloseTo(1, 2);
+  expect(markerLayerState.inScaledLayer).toBe(false);
 });
 
 async function readGridState(scene: import("@playwright/test").Locator) {

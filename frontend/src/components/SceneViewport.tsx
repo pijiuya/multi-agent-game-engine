@@ -65,8 +65,6 @@ export function SceneViewport({
   const gridStyle = getGridStyle(canvasView);
   const density = getGridDensity(canvasView.zoom);
   const worldLayerStyle = {
-    "--inverse-zoom": String(1 / canvasView.zoom),
-    "--agent-icon-size": `${Math.round(clamp(16 + canvasView.zoom * 2, 16, 28))}px`,
     transform: `translate(${canvasView.pan.x}px, ${canvasView.pan.y}px) scale(${canvasView.zoom})`
   } as CSSProperties;
   const selectedItem = selection.kind === "item" ? world.map.items.find((item) => item.id === selection.id) : null;
@@ -342,31 +340,6 @@ export function SceneViewport({
                 {item.image ? <img alt="" draggable={false} src={assetUrl(item.image) ?? item.image} /> : item.name.slice(0, 1)}
               </button>
           ))}
-          {Object.values(world.agent_profiles).map((agent) => {
-            const state = world.agent_states[agent.id];
-            if (!state) {
-              return null;
-            }
-            return (
-              <button
-                className={
-                  selection.kind === "agent" && selection.id === agent.id ? "world-agent-marker active" : "world-agent-marker"
-                }
-                data-testid={`world-agent-${agent.id}`}
-                data-world-x={state.position.x}
-                data-world-y={state.position.y}
-                data-world-object="agent"
-                key={agent.id}
-                onClick={() => onSelect({ kind: "agent", id: agent.id })}
-                onDoubleClick={() => renameAgent(agent.id, agent.name)}
-                onPointerDown={stopMarkerPointer}
-                style={{ ...pointStyle(state.position), "--agent-color": agent.color } as CSSProperties}
-                title={agent.name}
-              >
-                <span />
-              </button>
-            );
-          })}
           {canvasPoints.map((point) => (
               <button
               className={
@@ -383,25 +356,6 @@ export function SceneViewport({
               title={point.name}
             />
           ))}
-          {selectedItem ? (
-            <div className="item-transform-box" data-testid="item-transform-box" style={itemTransformStyle(selectedItem)}>
-              <button
-                aria-label="移动元素"
-                className="item-transform-center"
-                onPointerDown={(event) => startItemTransform("move", selectedItem, event)}
-              />
-              <button
-                aria-label="缩放元素"
-                className="item-transform-handle scale"
-                onPointerDown={(event) => startItemTransform("scale", selectedItem, event)}
-              />
-              <button
-                aria-label="旋转元素"
-                className="item-transform-handle rotate"
-                onPointerDown={(event) => startItemTransform("rotate", selectedItem, event)}
-              />
-            </div>
-          ) : null}
           {anchorPoint ? (
             <button
               aria-label="当前锚点"
@@ -417,6 +371,37 @@ export function SceneViewport({
           ) : null}
         </div>
         <div className="world-label-layer" data-testid="world-label-layer">
+          {Object.values(world.agent_profiles).map((agent) => {
+            const state = world.agent_states[agent.id];
+            if (!state) {
+              return null;
+            }
+            return (
+              <button
+                className={
+                  selection.kind === "agent" && selection.id === agent.id ? "world-agent-marker active" : "world-agent-marker"
+                }
+                data-testid={`world-agent-${agent.id}`}
+                data-world-x={state.position.x}
+                data-world-y={state.position.y}
+                data-world-object="agent"
+                key={agent.id}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onSelect({ kind: "agent", id: agent.id });
+                }}
+                onDoubleClick={(event) => {
+                  event.stopPropagation();
+                  renameAgent(agent.id, agent.name);
+                }}
+                onPointerDown={stopMarkerPointer}
+                style={{ ...screenPointStyle(state.position, canvasView), "--agent-color": agent.color } as CSSProperties}
+                title={agent.name}
+              >
+                <span />
+              </button>
+            );
+          })}
           {world.map.items.map((item) => (
             <button
               className={selection.kind === "item" && selection.id === item.id ? "world-item-label active" : "world-item-label"}
@@ -457,10 +442,29 @@ export function SceneViewport({
                 style={screenPointStyle(state.position, canvasView)}
                 title={agent.name}
               >
-                {agent.name}
-              </button>
+              {agent.name}
+            </button>
             );
           })}
+          {selectedItem ? (
+            <div className="item-transform-box" data-testid="item-transform-box" style={screenItemTransformStyle(selectedItem, canvasView)}>
+              <button
+                aria-label="移动元素"
+                className="item-transform-center"
+                onPointerDown={(event) => startItemTransform("move", selectedItem, event)}
+              />
+              <button
+                aria-label="缩放元素"
+                className="item-transform-handle scale"
+                onPointerDown={(event) => startItemTransform("scale", selectedItem, event)}
+              />
+              <button
+                aria-label="旋转元素"
+                className="item-transform-handle rotate"
+                onPointerDown={(event) => startItemTransform("rotate", selectedItem, event)}
+              />
+            </div>
+          ) : null}
         </div>
         <div className="scene-corner-mark top-left" />
         <div className="scene-corner-mark top-right" />
@@ -504,10 +508,12 @@ function itemStyle(item: WorldItem) {
   } as CSSProperties;
 }
 
-function itemTransformStyle(item: WorldItem) {
-  const size = item.radius * 2 * item.scale;
+function screenItemTransformStyle(item: WorldItem, view: CanvasViewState) {
+  const screen = worldToScreen(item.position, view);
+  const size = Math.max(18, item.radius * 2 * item.scale * view.zoom);
   return {
-    ...pointStyle(item.position),
+    left: `${screen.x}px`,
+    top: `${screen.y}px`,
     width: `${size}px`,
     height: `${size}px`,
     transform: `translate(-50%, -50%) rotate(${item.rotation}deg)`

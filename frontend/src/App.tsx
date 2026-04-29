@@ -46,6 +46,9 @@ type AnchorMenuState = {
 };
 
 type ItemPatch = Partial<Omit<WorldItem, "id">>;
+type MapPatch = Partial<Pick<WorldMap, "name" | "width" | "height" | "background_image">>;
+type AgentPatch = Partial<Omit<AgentProfile, "id">>;
+const PANEL_LAYOUT_STORAGE_KEY = "agent-workstation.panel-layout.v1";
 
 export default function App() {
   const [world, setWorld] = useState<WorldSnapshot | null>(null);
@@ -62,9 +65,12 @@ export default function App() {
   const [canvasPoints, setCanvasPoints] = useState<CanvasPoint[]>([]);
   const [anchorPoint, setAnchorPoint] = useState<Point | null>(null);
   const [anchorMenu, setAnchorMenu] = useState<AnchorMenuState | null>(null);
-  const [panels, setPanels] = useState<PanelState[]>(() => createInitialPanels());
-  const [zCursor, setZCursor] = useState(40);
+  const [panels, setPanels] = useState<PanelState[]>(() => loadPanelLayout(createInitialPanels()));
+  const [zCursor, setZCursor] = useState(() => maxPanelZ(loadPanelLayout(createInitialPanels())));
+  const pendingMapPatchRef = useRef<MapPatch>({});
+  const pendingAgentPatchesRef = useRef<Record<string, AgentPatch>>({});
   const pendingItemPatchesRef = useRef<Record<string, ItemPatch>>({});
+  const pendingLocalItemsRef = useRef<Record<string, WorldItem>>({});
 
   const selectedAgentId = selection.kind === "agent" ? selection.id : null;
   const selectedAgentExists = useMemo(() => {
@@ -79,6 +85,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    savePanelLayout(panels);
+  }, [panels]);
+
+  useEffect(() => {
     if (!world) {
       return;
     }
@@ -88,7 +98,12 @@ export default function App() {
       socket.onopen = () => setStatus("后端已连接");
       socket.onmessage = (event) => {
         const snapshot = JSON.parse(event.data) as WorldSnapshot;
-        setWorld(mergeSnapshotWithPendingItems(snapshot, pendingItemPatchesRef.current));
+        setWorld(mergeSnapshotWithLocalState(snapshot, {
+          mapPatch: pendingMapPatchRef.current,
+          agentPatches: pendingAgentPatchesRef.current,
+          itemPatches: pendingItemPatchesRef.current,
+          localItems: pendingLocalItemsRef.current
+        }));
       };
       socket.onerror = () => setStatus("本地预览");
       socket.onclose = () => setStatus((current) => (current === "后端已连接" ? "本地预览" : current));
@@ -200,12 +215,18 @@ export default function App() {
     if (editTool === "item") {
       const map = addItemToMap(world.map, point);
       const item = map.items[map.items.length - 1];
+      if (item) {
+        setPendingLocalItem(pendingLocalItemsRef, item);
+      }
       setWorld({ ...world, map });
       setSelection(item ? { kind: "item", id: item.id } : selection);
       setEditTool("select");
       const snapshot = await saveMap(map);
       if (snapshot) {
-        setWorld(snapshot);
+        if (item && snapshot.map.items.some((savedItem) => savedItem.id === item.id)) {
+          clearPendingLocalItem(pendingLocalItemsRef, item.id);
+        }
+        setWorld(mergeSnapshotWithLocalState(snapshot, pendingState(pendingMapPatchRef, pendingAgentPatchesRef, pendingItemPatchesRef, pendingLocalItemsRef)));
       }
       return;
     }
@@ -301,10 +322,16 @@ export default function App() {
     }
     const map = addItemToMap(world.map, point);
     const item = map.items[map.items.length - 1];
+    if (item) {
+      setPendingLocalItem(pendingLocalItemsRef, item);
+    }
     setWorld({ ...world, map });
     const remoteSnapshot = await saveMap(map);
     if (remoteSnapshot) {
-      setWorld(remoteSnapshot);
+      if (item && remoteSnapshot.map.items.some((savedItem) => savedItem.id === item.id)) {
+        clearPendingLocalItem(pendingLocalItemsRef, item.id);
+      }
+      setWorld(mergeSnapshotWithLocalState(remoteSnapshot, pendingState(pendingMapPatchRef, pendingAgentPatchesRef, pendingItemPatchesRef, pendingLocalItemsRef)));
     }
     if (item) {
       setSelection({ kind: "item", id: item.id });
@@ -324,22 +351,24 @@ export default function App() {
     setAnchorMenu(null);
   }
 
-  async function updateMapPatch(patch: Partial<Pick<WorldMap, "name" | "width" | "height" | "background_image">>) {
+  async function updateMapPatch(patch: MapPatch) {
     if (!world) {
       return;
     }
+    setPendingMapPatch(pendingMapPatchRef, patch);
     const nextWorld = { ...world, map: { ...world.map, ...patch } };
     setWorld(nextWorld);
     const snapshot = await patchMap(patch);
     if (snapshot) {
-      setWorld(snapshot);
+      clearPendingMapPatch(pendingMapPatchRef, patch);
+      setWorld(mergeSnapshotWithLocalState(snapshot, pendingState(pendingMapPatchRef, pendingAgentPatchesRef, pendingItemPatchesRef, pendingLocalItemsRef)));
       setStatus("已保存");
     } else {
       setStatus("本地更改");
     }
   }
 
-  async function updateAgentProfile(agentId: string, patch: Partial<Omit<AgentProfile, "id">>) {
+  async function updateAgentProfile(agentId: string, patch: AgentPatch) {
     if (!world) {
       return;
     }
@@ -347,6 +376,7 @@ export default function App() {
     if (!profile) {
       return;
     }
+    setPendingAgentPatch(pendingAgentPatchesRef, agentId, patch);
     setWorld({
       ...world,
       agent_profiles: {
@@ -356,7 +386,8 @@ export default function App() {
     });
     const snapshot = await patchAgent(agentId, patch);
     if (snapshot) {
-      setWorld(snapshot);
+      clearPendingAgentPatch(pendingAgentPatchesRef, agentId, patch);
+      setWorld(mergeSnapshotWithLocalState(snapshot, pendingState(pendingMapPatchRef, pendingAgentPatchesRef, pendingItemPatchesRef, pendingLocalItemsRef)));
       setStatus("已保存");
     } else {
       setStatus("本地更改");
@@ -382,7 +413,7 @@ export default function App() {
     const snapshot = await patchMapItem(itemId, patch);
     if (snapshot) {
       clearPendingItemPatch(pendingItemPatchesRef, itemId);
-      setWorld(mergeSnapshotWithPendingItems(snapshot, pendingItemPatchesRef.current));
+      setWorld(mergeSnapshotWithLocalState(snapshot, pendingState(pendingMapPatchRef, pendingAgentPatchesRef, pendingItemPatchesRef, pendingLocalItemsRef)));
       setStatus("已保存");
     } else {
       setStatus("本地更改");
@@ -613,6 +644,93 @@ function makePanel(
   return { id, title, x, y, width, height, minimized: false, dockedTo: null, zIndex };
 }
 
+function loadPanelLayout(defaultPanels: PanelState[]): PanelState[] {
+  if (typeof window === "undefined") {
+    return defaultPanels;
+  }
+  try {
+    const raw = window.localStorage.getItem(PANEL_LAYOUT_STORAGE_KEY);
+    if (!raw) {
+      return defaultPanels;
+    }
+    const parsed = JSON.parse(raw) as { panels?: Partial<PanelState>[] } | Partial<PanelState>[];
+    const savedPanels = Array.isArray(parsed) ? parsed : parsed.panels;
+    if (!Array.isArray(savedPanels)) {
+      return defaultPanels;
+    }
+    return defaultPanels.map((panel) => {
+      const saved = savedPanels.find((candidate) => candidate.id === panel.id);
+      if (!saved) {
+        return clampPanelToViewport(panel);
+      }
+      return clampPanelToViewport({
+        ...panel,
+        x: safeNumber(saved.x, panel.x),
+        y: safeNumber(saved.y, panel.y),
+        width: safeNumber(saved.width, panel.width),
+        height: safeNumber(saved.height, panel.height),
+        minimized: Boolean(saved.minimized),
+        dockedTo: typeof saved.dockedTo === "string" ? saved.dockedTo : null,
+        zIndex: safeNumber(saved.zIndex, panel.zIndex)
+      });
+    });
+  } catch {
+    return defaultPanels;
+  }
+}
+
+function savePanelLayout(panels: PanelState[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.setItem(
+      PANEL_LAYOUT_STORAGE_KEY,
+      JSON.stringify({
+        panels: panels.map((panel) => ({
+          id: panel.id,
+          x: panel.x,
+          y: panel.y,
+          width: panel.width,
+          height: panel.height,
+          minimized: panel.minimized,
+          dockedTo: panel.dockedTo,
+          zIndex: panel.zIndex
+        }))
+      })
+    );
+  } catch {
+    // Layout persistence is a convenience; editor behavior should continue without storage.
+  }
+}
+
+function clampPanelToViewport(panel: PanelState): PanelState {
+  if (typeof window === "undefined") {
+    return panel;
+  }
+  const minWidth = 92;
+  const minHeight = 120;
+  const nextX = clamp(panel.x, 16, Math.max(16, window.innerWidth - minWidth - 16));
+  const nextY = clamp(panel.y, 16, Math.max(16, window.innerHeight - 44));
+  const nextWidth = clamp(panel.width, minWidth, Math.max(minWidth, window.innerWidth - nextX - 16));
+  const nextHeight = clamp(panel.height, minHeight, Math.max(minHeight, window.innerHeight - nextY - 16));
+  return {
+    ...panel,
+    x: nextX,
+    y: nextY,
+    width: nextWidth,
+    height: nextHeight
+  };
+}
+
+function safeNumber(value: unknown, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function maxPanelZ(panels: PanelState[]) {
+  return Math.max(40, ...panels.map((panel) => panel.zIndex));
+}
+
 function snapToTargets(active: PanelState, panels: PanelState[]): PanelState {
   const snap = 20;
   let x = active.x;
@@ -682,10 +800,59 @@ function applyItemPatch(world: WorldSnapshot, itemId: string, patch: Partial<Omi
   };
 }
 
-function mergeSnapshotWithPendingItems(snapshot: WorldSnapshot, pending: Record<string, ItemPatch>): WorldSnapshot {
-  return Object.entries(pending).reduce(
+type PendingState = {
+  mapPatch: MapPatch;
+  agentPatches: Record<string, AgentPatch>;
+  itemPatches: Record<string, ItemPatch>;
+  localItems: Record<string, WorldItem>;
+};
+
+function pendingState(
+  mapPatchRef: { current: MapPatch },
+  agentPatchRef: { current: Record<string, AgentPatch> },
+  itemPatchRef: { current: Record<string, ItemPatch> },
+  localItemsRef: { current: Record<string, WorldItem> }
+): PendingState {
+  return {
+    mapPatch: mapPatchRef.current,
+    agentPatches: agentPatchRef.current,
+    itemPatches: itemPatchRef.current,
+    localItems: localItemsRef.current
+  };
+}
+
+function mergeSnapshotWithLocalState(snapshot: WorldSnapshot, pending: PendingState): WorldSnapshot {
+  const withMapPatch = Object.keys(pending.mapPatch).length
+    ? { ...snapshot, map: { ...snapshot.map, ...pending.mapPatch } }
+    : snapshot;
+  const withAgentPatches = Object.entries(pending.agentPatches).reduce((current, [agentId, patch]) => {
+    const profile = current.agent_profiles[agentId];
+    if (!profile) {
+      return current;
+    }
+    return {
+      ...current,
+      agent_profiles: {
+        ...current.agent_profiles,
+        [agentId]: { ...profile, ...patch }
+      }
+    };
+  }, withMapPatch);
+  const withLocalItems = Object.values(pending.localItems).reduce((current, item) => {
+    if (current.map.items.some((existing) => existing.id === item.id)) {
+      return current;
+    }
+    return {
+      ...current,
+      map: {
+        ...current.map,
+        items: [...current.map.items, item]
+      }
+    };
+  }, withAgentPatches);
+  return Object.entries(pending.itemPatches).reduce(
     (current, [itemId, patch]) => applyItemPatch(current, itemId, patch),
-    snapshot
+    withLocalItems
   );
 }
 
@@ -699,7 +866,63 @@ function setPendingItemPatch(ref: { current: Record<string, ItemPatch> }, itemId
   };
 }
 
+function setPendingMapPatch(ref: { current: MapPatch }, patch: MapPatch) {
+  ref.current = {
+    ...ref.current,
+    ...patch
+  };
+}
+
+function clearPendingMapPatch(ref: { current: MapPatch }, patch: MapPatch) {
+  const next = { ...ref.current };
+  for (const key of Object.keys(patch) as (keyof MapPatch)[]) {
+    delete next[key];
+  }
+  ref.current = next;
+}
+
+function setPendingAgentPatch(ref: { current: Record<string, AgentPatch> }, agentId: string, patch: AgentPatch) {
+  ref.current = {
+    ...ref.current,
+    [agentId]: {
+      ...ref.current[agentId],
+      ...patch
+    }
+  };
+}
+
+function clearPendingAgentPatch(ref: { current: Record<string, AgentPatch> }, agentId: string, patch: AgentPatch) {
+  const currentPatch = ref.current[agentId];
+  if (!currentPatch) {
+    return;
+  }
+  const nextPatch = { ...currentPatch };
+  for (const key of Object.keys(patch) as (keyof AgentPatch)[]) {
+    delete nextPatch[key];
+  }
+  const next = { ...ref.current };
+  if (Object.keys(nextPatch).length) {
+    next[agentId] = nextPatch;
+  } else {
+    delete next[agentId];
+  }
+  ref.current = next;
+}
+
 function clearPendingItemPatch(ref: { current: Record<string, ItemPatch> }, itemId: string) {
+  const next = { ...ref.current };
+  delete next[itemId];
+  ref.current = next;
+}
+
+function setPendingLocalItem(ref: { current: Record<string, WorldItem> }, item: WorldItem) {
+  ref.current = {
+    ...ref.current,
+    [item.id]: item
+  };
+}
+
+function clearPendingLocalItem(ref: { current: Record<string, WorldItem> }, itemId: string) {
   const next = { ...ref.current };
   delete next[itemId];
   ref.current = next;
