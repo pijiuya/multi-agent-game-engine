@@ -174,11 +174,15 @@ function CapabilityDetail({
   const canUseLocal = Boolean(status.recommended_local);
   const canInstallLocal = capability === "segmentation" && status.installable;
   const isInstalling = task?.status === "running";
+  const isReady = status.status === "ready";
   const actionLabel = isInstalling
     ? `安装中 ${task.progress}%`
     : canInstallLocal
       ? "安装并启用内置 SAM"
-      : meta.localLabel;
+      : isReady
+        ? readyActionLabel(capability)
+        : meta.localLabel;
+  const taskMessage = task?.status === "error" ? task.error || task.message : task?.message;
   return (
     <section className="model-capability-detail" data-testid={`model-capability-detail-${capability}`}>
       <div className="model-dialogue-row">
@@ -214,7 +218,7 @@ function CapabilityDetail({
           <div>
             <span style={{ width: `${task.progress}%` }} />
           </div>
-          <small>{task.status === "error" ? task.error || task.message : task.message}</small>
+          <small>{taskMessage}</small>
         </div>
       ) : null}
       <div className="model-action-row">
@@ -222,6 +226,7 @@ function CapabilityDetail({
           className="panel-action-button"
           disabled={isInstalling || (!canUseLocal && !canInstallLocal)}
           onClick={() => (canInstallLocal ? onInstallLocal(capability) : onConfigureLocal(capability))}
+          title={isReady ? "重新确认当前本地模型配置，并在这里显示结果" : undefined}
           type="button"
         >
           <CheckCircle2 size={15} />
@@ -268,6 +273,16 @@ function statusBadge(status: ModelCapabilityStatus) {
     missing: "未配置"
   };
   return labels[status.status];
+}
+
+function readyActionLabel(capability: ModelCapabilityId) {
+  if (capability === "llm") {
+    return "重新启用本地 LLM";
+  }
+  if (capability === "segmentation") {
+    return "重新启用内置 SAM";
+  }
+  return "重新启用本地模型";
 }
 
 function defaultRemoteDraft(capability: ModelCapabilityId, models: ModelConfig[]): RemoteDraft {

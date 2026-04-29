@@ -564,14 +564,56 @@ export default function App() {
   }
 
   async function configureLocalModelCapability(capability: ModelCapabilityId) {
+    const optimisticTask: ModelCapabilityTask = {
+      id: makeId("local_model_task"),
+      capability,
+      title: capability === "llm" ? "启用本地 LLM" : capability === "segmentation" ? "启用内置 MobileSAM" : "启用本地模型",
+      status: "running",
+      stage: "configuring",
+      progress: 20,
+      message: capability === "llm" ? "正在启用本地 LLM" : capability === "segmentation" ? "正在启用内置 MobileSAM" : "正在启用本地模型",
+      error: null
+    };
+    setModelCapabilityTasks((current) => ({ ...current, [capability]: optimisticTask }));
+    setStatus(optimisticTask.message);
     const result = await configureLocalCapability(capability);
     if (result) {
       setModels(result.models);
       setModelCapabilityStatuses((current) => mergeCapabilityStatus(current, result.capability));
-      setStatus("本地模型配置已启用");
+      const doneMessage = capability === "llm"
+        ? "本地 LLM 已启用"
+        : capability === "segmentation"
+          ? "内置 MobileSAM 已启用"
+          : "本地模型配置已启用";
+      setModelCapabilityTasks((current) => ({
+        ...current,
+        [capability]: {
+          ...optimisticTask,
+          status: "done",
+          stage: "done",
+          progress: 100,
+          message: doneMessage,
+          error: null
+        }
+      }));
+      setStatus(doneMessage);
     } else {
       await refreshModelCapabilities();
-      setStatus("未检测到可用本地能力");
+      const errorMessage = capability === "segmentation"
+        ? "内置 MobileSAM 尚未安装，请先安装并启用"
+        : "未检测到可用本地能力";
+      setModelCapabilityTasks((current) => ({
+        ...current,
+        [capability]: {
+          ...optimisticTask,
+          status: "error",
+          stage: "error",
+          progress: 100,
+          message: "启用失败",
+          error: errorMessage
+        }
+      }));
+      setStatus(errorMessage);
     }
   }
 

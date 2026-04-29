@@ -646,6 +646,134 @@ test("sam capability starts embedded MobileSAM install without service address",
   await expect(modelsPanel.getByTestId("model-install-task-segmentation")).toContainText("内置 MobileSAM 已启用", { timeout: 4000 });
 });
 
+test("configured local model actions show inline confirmation", async ({ page }) => {
+  await page.route("**/api/model-capabilities/status", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        capabilities: [
+          {
+            id: "llm",
+            label: "语言模型 LLM",
+            status: "ready",
+            summary: "已配置：本地 LLM - qwen2.5:7b",
+            configured: true,
+            configured_model_id: "model_local_llm",
+            configured_model_name: "本地 LLM - qwen2.5:7b",
+            local_available: true,
+            installable: false,
+            recommended_local: {
+              id: "model_local_llm",
+              name: "本地 LLM - qwen2.5:7b",
+              kind: "local",
+              provider: "ollama",
+              base_url: "http://127.0.0.1:11434",
+              api_key: "",
+              model: "qwen2.5:7b",
+              enabled: true,
+              capabilities: ["llm"]
+            },
+            suggestions: ["可以直接使用已安装的 Ollama 模型。"]
+          },
+          {
+            id: "image_generation",
+            label: "图片生成",
+            status: "missing",
+            summary: "未配置图片生成",
+            configured: false,
+            configured_model_id: null,
+            configured_model_name: null,
+            local_available: false,
+            installable: false,
+            recommended_local: null,
+            suggestions: []
+          },
+          {
+            id: "segmentation",
+            label: "SAM 分层",
+            status: "ready",
+            summary: "已配置：内置 MobileSAM",
+            configured: true,
+            configured_model_id: "model_local_sam_embedded",
+            configured_model_name: "内置 MobileSAM",
+            local_available: true,
+            installable: false,
+            recommended_local: {
+              id: "model_local_sam_embedded",
+              name: "内置 MobileSAM",
+              kind: "local",
+              provider: "embedded-mobile-sam",
+              base_url: "",
+              api_key: "",
+              model: "vit_t",
+              enabled: true,
+              capabilities: ["segmentation"]
+            },
+            suggestions: ["内置 MobileSAM 已安装，可以一键启用。"]
+          }
+        ],
+        environment: {}
+      })
+    })
+  );
+  await page.route("**/api/model-capabilities/llm/configure-local", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        models: [],
+        capability: {
+          id: "llm",
+          label: "语言模型 LLM",
+          status: "ready",
+          summary: "已配置：本地 LLM - qwen2.5:7b",
+          configured: true,
+          configured_model_id: "model_local_llm",
+          configured_model_name: "本地 LLM - qwen2.5:7b",
+          local_available: true,
+          installable: false,
+          recommended_local: null,
+          suggestions: []
+        }
+      })
+    })
+  );
+  await page.route("**/api/model-capabilities/segmentation/configure-local", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        models: [],
+        capability: {
+          id: "segmentation",
+          label: "SAM 分层",
+          status: "ready",
+          summary: "已配置：内置 MobileSAM",
+          configured: true,
+          configured_model_id: "model_local_sam_embedded",
+          configured_model_name: "内置 MobileSAM",
+          local_available: true,
+          installable: false,
+          recommended_local: null,
+          suggestions: []
+        }
+      })
+    })
+  );
+
+  await page.goto("/");
+  const modelsPanel = page.getByTestId("panel-models");
+  await expect(modelsPanel.getByRole("button", { name: /重新启用本地 LLM/ })).toBeEnabled();
+  await modelsPanel.getByRole("button", { name: /重新启用本地 LLM/ }).click();
+  await expect(modelsPanel.getByTestId("model-install-task-llm")).toContainText("本地 LLM 已启用");
+
+  await modelsPanel.getByTestId("model-capability-segmentation").click();
+  await expect(modelsPanel.getByRole("button", { name: /重新启用内置 SAM/ })).toBeEnabled();
+  await modelsPanel.getByRole("button", { name: /重新启用内置 SAM/ }).click();
+  await expect(modelsPanel.getByTestId("model-install-task-segmentation")).toContainText("内置 MobileSAM 已启用");
+});
+
 test("map studio separates model management and runs gated SAM flow", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 820 });
   await page.goto("/");
