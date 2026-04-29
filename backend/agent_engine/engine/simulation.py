@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from dataclasses import dataclass
 from time import perf_counter
 from typing import Any
 
@@ -10,6 +11,14 @@ from agent_engine.models.provider import MockProvider, ModelProvider, ModelReque
 from .geometry import distance, lerp_point
 from .rules import RuleEngine
 from .world import AgentAction, GameWorld, Point
+
+
+@dataclass(slots=True)
+class PendingModelTask:
+    task: asyncio.Task
+    request: ModelRequest
+    provider_name: str
+    model_name: str
 
 
 class SimulationRuntime:
@@ -25,7 +34,7 @@ class SimulationRuntime:
         self.providers = providers or {"mock": MockProvider()}
         self.tick_rate = tick_rate
         self.rule_engine = RuleEngine()
-        self._model_tasks: dict[str, asyncio.Task] = {}
+        self._model_tasks: dict[str, PendingModelTask] = {}
         self._loop_task: asyncio.Task | None = None
         self._last_time = perf_counter()
 
@@ -76,7 +85,7 @@ class SimulationRuntime:
     def snapshot(self) -> dict[str, Any]:
         payload = self.world.to_dict()
         payload["model_tasks"] = {
-            agent_id: {"done": task.done()} for agent_id, task in self._model_tasks.items()
+            agent_id: {"done": record.task.done()} for agent_id, record in self._model_tasks.items()
         }
         return payload
 
@@ -104,6 +113,7 @@ class SimulationRuntime:
             else:
                 state.position = Point.from_dict(lerp_point(current, target, step / remaining))
                 state.status = "moving"
+            self._sync_held_item(state.held_item_id, state.position)
 
     def _schedule_agent_decisions(self) -> None:
         for agent_id, profile in self.world.agent_profiles.items():
@@ -123,39 +133,113 @@ class SimulationRuntime:
                 observation=self._observation_for(agent_id),
             )
             task = asyncio.create_task(provider.generate(request))
-            self._model_tasks[agent_id] = task
+            self._model_tasks[agent_id] = PendingModelTask(
+                task=task,
+                request=request,
+                provider_name=getattr(provider, "name", profile.model_provider),
+                model_name=str(getattr(provider, "model", getattr(provider, "name", profile.model_provider))),
+            )
             state.pending_model = True
             state.last_model_tick = self.world.tick
 
     def _harvest_model_tasks(self) -> None:
-        finished = [agent_id for agent_id, task in self._model_tasks.items() if task.done()]
+        finished = [agent_id for agent_id, record in self._model_tasks.items() if record.task.done()]
         for agent_id in finished:
-            task = self._model_tasks.pop(agent_id)
+            record = self._model_tasks.pop(agent_id)
             state = self.world.agent_states.get(agent_id)
             if state is not None:
                 state.pending_model = False
             try:
-                response = task.result()
+                response = record.task.result()
             except Exception as exc:  # pragma: no cover - defensive API runtime path
                 self.world.add_event("model_error", str(exc), agent_id=agent_id)
+                self.world.add_decision_event(
+                    agent_id=agent_id,
+                    provider=record.provider_name,
+                    model=record.model_name,
+                    observation=record.request.observation,
+                    text="",
+                    actions=[],
+                    results=[{"ok": False, "message": str(exc), "event_id": None}],
+                )
                 continue
             if response.text:
                 self.world.add_event("model_text", response.text, agent_id=agent_id)
+            actions: list[dict[str, Any]] = []
+            results: list[dict[str, Any]] = []
             for raw_action in response.actions[:1]:
                 if not isinstance(raw_action, dict):
+                    results.append({"ok": False, "message": "invalid action payload", "event_id": None})
                     continue
+                actions.append(raw_action)
                 action_type = str(raw_action.get("type", "wait"))
                 payload = dict(raw_action.get("payload", {}))
-                self.submit_action(AgentAction(agent_id=agent_id, type=action_type, payload=payload))
+                result = self.submit_action(AgentAction(agent_id=agent_id, type=action_type, payload=payload))
+                event = result.get("event") if isinstance(result.get("event"), dict) else None
+                results.append(
+                    {
+                        "ok": bool(result.get("ok")),
+                        "message": str(result.get("message", "")),
+                        "event_id": event.get("id") if event else None,
+                        "action_type": action_type,
+                    }
+                )
+            self.world.add_decision_event(
+                agent_id=agent_id,
+                provider=record.provider_name,
+                model=record.model_name,
+                observation=record.request.observation,
+                text=response.text,
+                actions=actions,
+                results=results,
+            )
 
     def _observation_for(self, agent_id: str) -> dict[str, Any]:
         profile = self.world.agent_profiles[agent_id]
         state = self.world.agent_states[agent_id]
+        nearby_agents = self._nearby_agent_observations(agent_id, radius=220)
+        policy = profile.dialogue_policy
+        dialogue_distance = float(policy.get("distance", 180.0))
+        can_social = bool(policy.get("enabled", True)) and self.world.tick >= float(state.cooldowns.get("social_until", 0))
         return {
             "tick": self.world.tick,
             "agent_name": profile.name,
             "position": state.position.to_dict(),
             "status": state.status,
-            "nearby_agents": [agent.name for agent in self.world.nearby_agents(agent_id, 220)],
+            "held_item_id": state.held_item_id,
+            "nearby_agents": nearby_agents,
+            "dialogue_candidates": [
+                agent for agent in nearby_agents if can_social and agent["distance"] <= dialogue_distance
+            ],
             "recent_events": [event.to_dict() for event in self.world.events[-8:]],
         }
+
+    def _nearby_agent_observations(self, agent_id: str, radius: float) -> list[dict[str, Any]]:
+        state = self.world.agent_states[agent_id]
+        nearby: list[dict[str, Any]] = []
+        for other_id, other_state in self.world.agent_states.items():
+            if other_id == agent_id:
+                continue
+            profile = self.world.agent_profiles.get(other_id)
+            if profile is None or profile.hidden:
+                continue
+            current_distance = distance(state.position.to_dict(), other_state.position.to_dict())
+            if current_distance > radius:
+                continue
+            nearby.append(
+                {
+                    "id": other_id,
+                    "name": profile.name,
+                    "status": other_state.status,
+                    "distance": round(current_distance, 2),
+                }
+            )
+        return sorted(nearby, key=lambda item: item["distance"])
+
+    def _sync_held_item(self, item_id: str | None, position: Point) -> None:
+        if not item_id:
+            return
+        item = self.world.map.item_by_id(item_id)
+        if item is None or item.hidden or not item.movable:
+            return
+        item.position = Point(position.x, position.y)

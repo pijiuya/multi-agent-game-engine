@@ -110,6 +110,11 @@ function renderEditor(props: Props) {
         <EditableNumber label="旋转" value={item.rotation} onCommit={(rotation) => onUpdateItem(item.id, { rotation })} />
         <Editable label="标签" value={item.tags.join(", ")} onCommit={(tags) => onUpdateItem(item.id, { tags: parseTags(tags) })} />
         <Editable label="简介" value={item.description} onCommit={(description) => onUpdateItem(item.id, { description })} />
+        <label className="property-toggle-row">
+          <span>Agent 互动</span>
+          <input type="checkbox" checked={item.movable} onChange={(event) => onUpdateItem(item.id, { movable: event.currentTarget.checked })} />
+          <small>{item.movable ? "可移动" : "不可移动"}</small>
+        </label>
         <label className="property-file">
           <span>图片</span>
           <input

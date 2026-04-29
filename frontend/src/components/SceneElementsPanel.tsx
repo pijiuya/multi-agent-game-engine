@@ -67,7 +67,7 @@ export function SceneElementsPanel({ world, selection, canvasPoints, onSelect, o
             >
               <Package size={16} />
               <span>{item.name}</span>
-              <small>{item.hidden ? "已隐藏" : item.tags.join(", ") || "元素"}</small>
+              <small>{item.hidden ? "已隐藏" : item.movable ? item.tags.join(", ") || "可移动" : "不可移动"}</small>
             </button>
           ))
         : null}

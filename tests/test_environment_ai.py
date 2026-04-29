@@ -23,3 +23,14 @@ def test_environment_proposal_accepts_safe_events_and_rejects_unsafe_state():
     assert world.map.items[0].state["mood"] == "warm"
     assert world.events[-1].type == "system"
 
+
+def test_world_loads_agent_event_and_item_defaults():
+    world = GameWorld.from_dict(GameWorld.default().to_dict())
+    item = WorldItem.from_dict({"id": "legacy", "name": "Legacy", "position": {"x": 1, "y": 2}})
+    assert item.movable is True
+    profile = world.agent_profiles["agent_mira"]
+    state = world.agent_states["agent_mira"]
+    assert profile.animation is None
+    assert profile.dialogue_policy["enabled"] is True
+    assert state.held_item_id is None
+    assert world.decision_events == []

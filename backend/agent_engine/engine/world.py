@@ -156,6 +156,7 @@ class WorldItem:
     tags: list[str] = field(default_factory=list)
     state: dict[str, Any] = field(default_factory=dict)
     hidden: bool = False
+    movable: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -170,6 +171,7 @@ class WorldItem:
             "tags": self.tags,
             "state": self.state,
             "hidden": self.hidden,
+            "movable": self.movable,
         }
 
     @classmethod
@@ -186,6 +188,7 @@ class WorldItem:
             tags=list(data.get("tags", [])),
             state=dict(data.get("state", {})),
             hidden=bool(data.get("hidden", False)),
+            movable=bool(data.get("movable", True)),
         )
 
 
@@ -347,7 +350,65 @@ class WorldMap:
         return world_map
 
 
-DEFAULT_ACTION_SPACE = ["move_to", "say", "interact", "use", "observe", "wait"]
+DEFAULT_ACTION_SPACE = [
+    "move_to",
+    "say",
+    "interact",
+    "use",
+    "observe",
+    "wait",
+    "stop",
+    "social",
+    "pick_up",
+    "drop_item",
+    "move_item",
+]
+DEFAULT_DIALOGUE_POLICY = {"enabled": True, "distance": 180.0, "cooldown_ticks": 20}
+
+
+def default_dialogue_policy() -> dict[str, Any]:
+    return dict(DEFAULT_DIALOGUE_POLICY)
+
+
+def normalize_dialogue_policy(data: Any) -> dict[str, Any]:
+    policy = default_dialogue_policy()
+    if isinstance(data, dict):
+        policy.update(
+            {
+                "enabled": bool(data.get("enabled", policy["enabled"])),
+                "distance": float(data.get("distance", policy["distance"])),
+                "cooldown_ticks": int(data.get("cooldown_ticks", policy["cooldown_ticks"])),
+            }
+        )
+    return policy
+
+
+def normalize_agent_animation(data: Any) -> dict[str, Any] | None:
+    if not isinstance(data, dict):
+        return None
+    kind = str(data.get("kind") or "").strip()
+    if kind not in {"gif", "png_sequence"}:
+        return None
+    frames = list(data.get("frames") or [])
+    url = data.get("url")
+    return {
+        "kind": kind,
+        "url": str(url) if url else "",
+        "frames": [str(frame) for frame in frames],
+        "fps": max(1, int(data.get("fps") or 8)),
+        "max_pixels": max(0, int(data.get("max_pixels") or 0)),
+        "width": max(0, int(data.get("width") or 0)),
+        "height": max(0, int(data.get("height") or 0)),
+    }
+
+
+def normalize_action_space(data: Any) -> list[str]:
+    actions = [str(action) for action in data] if isinstance(data, list) else []
+    merged: list[str] = []
+    for action in [*actions, *DEFAULT_ACTION_SPACE]:
+        if action and action not in merged:
+            merged.append(action)
+    return merged
 
 
 @dataclass(slots=True)
@@ -360,6 +421,8 @@ class AgentProfile:
     color: str = "#3b82f6"
     action_space: list[str] = field(default_factory=lambda: list(DEFAULT_ACTION_SPACE))
     hidden: bool = False
+    animation: dict[str, Any] | None = None
+    dialogue_policy: dict[str, Any] = field(default_factory=default_dialogue_policy)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -373,8 +436,10 @@ class AgentProfile:
             identity=data.get("identity", "A curious resident in the scene."),
             model_provider=data.get("model_provider", "mock"),
             color=data.get("color", "#3b82f6"),
-            action_space=list(data.get("action_space", DEFAULT_ACTION_SPACE)),
+            action_space=normalize_action_space(data.get("action_space")),
             hidden=bool(data.get("hidden", False)),
+            animation=normalize_agent_animation(data.get("animation")),
+            dialogue_policy=normalize_dialogue_policy(data.get("dialogue_policy")),
         )
 
 
@@ -389,6 +454,7 @@ class AgentState:
     pending_model: bool = False
     last_model_tick: int = -999
     cooldowns: dict[str, float] = field(default_factory=dict)
+    held_item_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -401,6 +467,7 @@ class AgentState:
             "pending_model": self.pending_model,
             "last_model_tick": self.last_model_tick,
             "cooldowns": self.cooldowns,
+            "held_item_id": self.held_item_id,
         }
 
     @classmethod
@@ -415,6 +482,7 @@ class AgentState:
             pending_model=bool(data.get("pending_model", False)),
             last_model_tick=int(data.get("last_model_tick", -999)),
             cooldowns=dict(data.get("cooldowns", {})),
+            held_item_id=data.get("held_item_id"),
         )
 
 
@@ -487,6 +555,38 @@ class Event:
 
 
 @dataclass(slots=True)
+class DecisionEvent:
+    id: str
+    tick: int
+    agent_id: str
+    provider: str
+    model: str
+    observation: dict[str, Any]
+    text: str
+    actions: list[dict[str, Any]]
+    results: list[dict[str, Any]]
+    timestamp: float = field(default_factory=time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "DecisionEvent":
+        return cls(
+            id=data.get("id", new_id("decision")),
+            tick=int(data.get("tick", 0)),
+            agent_id=data.get("agent_id", ""),
+            provider=data.get("provider", ""),
+            model=data.get("model", ""),
+            observation=dict(data.get("observation", {})),
+            text=str(data.get("text", "")),
+            actions=list(data.get("actions", [])),
+            results=list(data.get("results", [])),
+            timestamp=float(data.get("timestamp", time())),
+        )
+
+
+@dataclass(slots=True)
 class AgentAction:
     agent_id: str
     type: str
@@ -518,6 +618,7 @@ class GameWorld:
     relationships: list[Relationship] = field(default_factory=list)
     memories: list[Memory] = field(default_factory=list)
     events: list[Event] = field(default_factory=list)
+    decision_events: list[DecisionEvent] = field(default_factory=list)
     tick: int = 0
     running: bool = False
 
@@ -547,6 +648,31 @@ class GameWorld:
         self.events = self.events[-250:]
         return event
 
+    def add_decision_event(
+        self,
+        agent_id: str,
+        provider: str,
+        model: str,
+        observation: dict[str, Any],
+        text: str,
+        actions: list[dict[str, Any]],
+        results: list[dict[str, Any]],
+    ) -> DecisionEvent:
+        event = DecisionEvent(
+            id=new_id("decision"),
+            tick=self.tick,
+            agent_id=agent_id,
+            provider=provider,
+            model=model,
+            observation=observation,
+            text=text,
+            actions=actions,
+            results=results,
+        )
+        self.decision_events.append(event)
+        self.decision_events = self.decision_events[-250:]
+        return event
+
     def nearby_agents(self, agent_id: str, radius: float) -> list[AgentProfile]:
         state = self.agent_states[agent_id]
         nearby: list[AgentProfile] = []
@@ -573,6 +699,7 @@ class GameWorld:
             "relationships": [relationship.to_dict() for relationship in self.relationships],
             "memories": [memory.to_dict() for memory in self.memories],
             "events": [event.to_dict() for event in self.events],
+            "decision_events": [event.to_dict() for event in self.decision_events],
             "tick": self.tick,
             "running": self.running,
         }
@@ -618,6 +745,9 @@ class GameWorld:
             ],
             memories=[Memory.from_dict(item) for item in data.get("memories", [])],
             events=[Event.from_dict(item) for item in data.get("events", [])],
+            decision_events=[
+                DecisionEvent.from_dict(item) for item in data.get("decision_events", [])
+            ],
             tick=int(data.get("tick", 0)),
             running=bool(data.get("running", False)),
         )

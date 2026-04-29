@@ -551,6 +551,116 @@ test("scene objects can be hidden, shown, and deleted from right click menus", a
   await expect(page.getByTestId("panel-regions").getByRole("button", { name: /手绘区域/ })).toHaveCount(0);
 });
 
+test("agent panel controls animation, stop, dialogue, and item mobility", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  const actionRequests: Array<Record<string, unknown>> = [];
+  const agentPatches: Array<Record<string, unknown>> = [];
+  const itemPatches: Array<Record<string, unknown>> = [];
+
+  await page.route("**/api/actions", async (route) => {
+    const body = JSON.parse(route.request().postData() || "{}") as Record<string, unknown>;
+    actionRequests.push(body);
+    const snapshot = JSON.parse(JSON.stringify(fallbackWorld));
+    snapshot.agent_states.agent_mira.target = null;
+    snapshot.agent_states.agent_mira.status = "idle";
+    snapshot.events.push({
+      id: "evt_dialogue_test",
+      type: "dialogue",
+      message: "Mira → Tao: hello",
+      tick: 1,
+      timestamp: Date.now() / 1000,
+      agent_id: "agent_mira",
+      payload: { text: "hello", participants: ["agent_mira", "agent_tao"] }
+    });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, message: "ok", event: snapshot.events.at(-1), world: snapshot })
+    });
+  });
+
+  await page.route("**/api/assets", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ asset: "agent_mira.gif", url: "/api/assets/agent_mira.gif" })
+    });
+  });
+
+  await page.route("**/api/agents/agent_mira", async (route) => {
+    const body = JSON.parse(route.request().postData() || "{}") as Record<string, unknown>;
+    agentPatches.push(body);
+    const snapshot = JSON.parse(JSON.stringify(fallbackWorld));
+    snapshot.agent_profiles.agent_mira = { ...snapshot.agent_profiles.agent_mira, ...body };
+    snapshot.agent_states.agent_mira.target = { x: 520, y: 260 };
+    snapshot.agent_states.agent_mira.status = "moving";
+    snapshot.events.push({
+      id: "evt_dialogue_test",
+      type: "dialogue",
+      message: "Mira → Tao: hello",
+      tick: 1,
+      timestamp: Date.now() / 1000,
+      agent_id: "agent_mira",
+      payload: { text: "hello", participants: ["agent_mira", "agent_tao"] }
+    });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(snapshot) });
+  });
+
+  await page.route("**/api/map/items/item_lamp", async (route) => {
+    const body = JSON.parse(route.request().postData() || "{}") as Record<string, unknown>;
+    itemPatches.push(body);
+    const snapshot = JSON.parse(JSON.stringify(fallbackWorld));
+    snapshot.map.items[0] = { ...snapshot.map.items[0], ...body };
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(snapshot) });
+  });
+
+  await page.goto("/");
+
+  const miraCard = page.getByTestId("panel-agents").getByRole("button", { name: /Mira/ });
+  await miraCard.click();
+  await expect(page.getByTestId("agent-detail-agent_mira")).toContainText("实时坐标");
+  await expect(page.getByTestId("agent-detail-agent_mira")).toContainText("Tao");
+
+  await page.getByLabel("对话距离").fill("210");
+  await page.getByLabel("对话距离").blur();
+  expect((agentPatches[agentPatches.length - 1]?.dialogue_policy as Record<string, unknown>).distance).toBe(210);
+
+  const gif = Buffer.from(
+    "R0lGODlhAQABAPAAAP///wAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==",
+    "base64"
+  );
+  await page.getByTestId("agent-detail-agent_mira").locator('input[accept="image/gif"]').setInputFiles({
+    name: "mira.gif",
+    mimeType: "image/gif",
+    buffer: gif
+  });
+  await expect(page.getByTestId("agent-animation-meta-agent_mira")).toContainText("GIF");
+  await expect(page.locator(".world-agent-sprite")).toBeVisible();
+
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+    "base64"
+  );
+  await page.getByTestId("agent-detail-agent_mira").locator('input[accept="image/png"]').setInputFiles([
+    { name: "idle-01.png", mimeType: "image/png", buffer: png },
+    { name: "idle-02.png", mimeType: "image/png", buffer: png }
+  ]);
+  await expect(page.getByTestId("agent-animation-meta-agent_mira")).toContainText("PNG序列 2 帧");
+  const latestAnimation = agentPatches[agentPatches.length - 1]?.animation as Record<string, unknown>;
+  expect(latestAnimation.kind).toBe("png_sequence");
+  expect((latestAnimation.frames as unknown[]).length).toBe(2);
+
+  await page.getByRole("button", { name: "停止移动" }).click();
+  expect(actionRequests[actionRequests.length - 1]?.type).toBe("stop");
+
+  await expect(page.locator('[data-testid^="world-dialogue-"]')).toBeVisible();
+
+  await page.getByTestId("panel-scene").getByRole("button", { name: /Lamp/ }).click();
+  await page.getByTestId("panel-properties").getByLabel("Agent 互动").uncheck();
+  expect(itemPatches[itemPatches.length - 1]?.movable).toBe(false);
+  await expect(page.getByTestId("panel-scene").getByRole("button", { name: /Lamp/ })).toContainText("不可移动");
+});
+
 test("drawing tools create vector areas and item transform handles edit items", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 820 });
   await page.goto("/");

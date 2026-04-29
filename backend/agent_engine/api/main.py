@@ -26,6 +26,7 @@ from agent_engine.engine.simulation import SimulationRuntime
 from agent_engine.engine.world import (
     AgentAction,
     AgentProfile,
+    DEFAULT_ACTION_SPACE,
     GameWorld,
     MapRegion,
     Point,
@@ -33,6 +34,9 @@ from agent_engine.engine.world import (
     WorldItem,
     WorldMap,
     new_id,
+    normalize_action_space,
+    normalize_agent_animation,
+    normalize_dialogue_policy,
 )
 from agent_engine.persistence.sqlite_store import ProjectStore
 
@@ -103,6 +107,8 @@ class AgentPatch(BaseModel):
     model_provider: str | None = None
     action_space: list[str] | None = None
     hidden: bool | None = None
+    animation: dict[str, Any] | None = None
+    dialogue_policy: dict[str, Any] | None = None
 
 
 class WorldItemPatch(BaseModel):
@@ -116,6 +122,7 @@ class WorldItemPatch(BaseModel):
     tags: list[str] | None = None
     state: dict[str, Any] | None = None
     hidden: bool | None = None
+    movable: bool | None = None
 
 
 class ModelConfigPayload(BaseModel):
@@ -692,14 +699,7 @@ def create_agent(payload: AgentCreate) -> dict[str, Any]:
         identity=payload.identity,
         color=payload.color,
         model_provider=payload.model_provider,
-        action_space=payload.action_space or [
-            "move_to",
-            "say",
-            "interact",
-            "use",
-            "observe",
-            "wait",
-        ],
+        action_space=payload.action_space or list(DEFAULT_ACTION_SPACE),
     )
     position = Point.from_dict(payload.position) if payload.position else runtime.world.map.nearest_spawn()
     runtime.world.add_agent(profile, position=position)
@@ -715,6 +715,12 @@ def patch_agent(agent_id: str, payload: AgentPatch) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Agent not found")
     data = _payload_data(payload)
     for field_name, value in data.items():
+        if field_name == "animation":
+            value = normalize_agent_animation(value)
+        if field_name == "dialogue_policy":
+            value = normalize_dialogue_policy(value)
+        if field_name == "action_space":
+            value = normalize_action_space(value)
         setattr(profile, field_name, value)
     store.save_world(runtime.world)
     return runtime.snapshot()
@@ -2020,8 +2026,8 @@ def _payload_data(payload: BaseModel) -> dict[str, Any]:
 
 def _save_uploaded_asset(file: UploadFile, prefix: str) -> str:
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".png", ".jpg", ".jpeg"}:
-        raise HTTPException(status_code=400, detail="Only PNG and JPG assets are supported.")
+    if suffix not in {".png", ".jpg", ".jpeg", ".gif"}:
+        raise HTTPException(status_code=400, detail="Only PNG, JPG and GIF assets are supported.")
     asset_name = f"{new_id(prefix)}{suffix}"
     destination = store.assets_dir / asset_name
     store.initialize()

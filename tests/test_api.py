@@ -65,6 +65,7 @@ def test_api_patch_editor_entities():
             "scale": 1.8,
             "image": "/api/assets/test.png",
             "description": "patched",
+            "movable": False,
         },
     )
     item = next(item for item in item_patch.json()["map"]["items"] if item["id"] == "item_patch_test")
@@ -73,6 +74,7 @@ def test_api_patch_editor_entities():
     assert item["scale"] == 1.8
     assert item["image"] == "/api/assets/test.png"
     assert item["description"] == "patched"
+    assert item["movable"] is False
 
     hidden_item = client.patch("/api/map/items/item_patch_test", json={"hidden": True})
     assert hidden_item.status_code == 200
@@ -95,6 +97,31 @@ def test_api_patch_editor_entities():
     assert deleted_agent.status_code == 200
     assert agent_id not in deleted_agent.json()["agent_profiles"]
     assert agent_id not in deleted_agent.json()["agent_states"]
+
+    animation_agent = client.post(
+        "/api/agents",
+        json={"name": "Animated", "role": "test", "position": {"x": 240, "y": 220}},
+    )
+    animation_id = next(
+        key for key, profile in animation_agent.json()["agent_profiles"].items() if profile["name"] == "Animated"
+    )
+    patched_animation = client.patch(
+        f"/api/agents/{animation_id}",
+        json={
+            "animation": {
+                "kind": "gif",
+                "url": "/api/assets/agent.gif",
+                "fps": 8,
+                "max_pixels": 4096,
+                "width": 64,
+                "height": 64,
+            },
+            "dialogue_policy": {"enabled": True, "distance": 140, "cooldown_ticks": 7},
+        },
+    )
+    animated = patched_animation.json()["agent_profiles"][animation_id]
+    assert animated["animation"]["kind"] == "gif"
+    assert animated["dialogue_policy"]["distance"] == 140
 
     created_region = client.post(
         "/api/map/regions",
@@ -446,6 +473,26 @@ def test_api_region_boolean_subtract_can_remove_target_region():
     assert all(region["id"] != "region_target" for region in world_map["regions"])
     walkable_layer = next(layer for layer in world_map["region_layers"] if layer["function"] == "walkable")
     assert "region_target" not in walkable_layer["region_ids"]
+
+
+def test_api_records_decision_events_from_model_actions():
+    client = TestClient(app)
+    api_main.runtime.world = api_main.GameWorld.default()
+    api_main.runtime.world.running = True
+    api_main.runtime.world.tick = 7
+
+    response = client.post("/api/simulation/tick")
+    assert response.status_code == 200
+
+    response = client.post("/api/simulation/tick")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["decision_events"]
+    decision = payload["decision_events"][-1]
+    assert decision["agent_id"] in payload["agent_profiles"]
+    assert decision["provider"] == "mock"
+    assert decision["results"]
+    assert any(event["id"] == decision["results"][0]["event_id"] for event in payload["events"])
 
 
 def test_api_model_capability_status_and_one_click_config(monkeypatch):

@@ -75,7 +75,8 @@ export const fallbackWorld: WorldSnapshot = {
         description: "A warm scene element.",
         tags: ["light"],
         state: { mood: "warm" },
-        hidden: false
+        hidden: false,
+        movable: true
       }
     ],
     triggers: [],
@@ -93,8 +94,10 @@ export const fallbackWorld: WorldSnapshot = {
       identity: "Mira is a mediator with a distinct social point of view.",
       model_provider: "mock",
       color: "#ef4444",
-      action_space: ["move_to", "say", "interact", "use", "observe", "wait"],
-      hidden: false
+      action_space: ["move_to", "say", "interact", "use", "observe", "wait", "stop", "social", "pick_up", "drop_item", "move_item"],
+      hidden: false,
+      animation: null,
+      dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 20 }
     },
     agent_tao: {
       id: "agent_tao",
@@ -103,8 +106,10 @@ export const fallbackWorld: WorldSnapshot = {
       identity: "Tao is a builder with a practical temperament.",
       model_provider: "mock",
       color: "#10b981",
-      action_space: ["move_to", "say", "interact", "use", "observe", "wait"],
-      hidden: false
+      action_space: ["move_to", "say", "interact", "use", "observe", "wait", "stop", "social", "pick_up", "drop_item", "move_item"],
+      hidden: false,
+      animation: null,
+      dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 20 }
     },
     agent_ren: {
       id: "agent_ren",
@@ -113,8 +118,10 @@ export const fallbackWorld: WorldSnapshot = {
       identity: "Ren notices patterns before speaking.",
       model_provider: "mock",
       color: "#8b5cf6",
-      action_space: ["move_to", "say", "interact", "use", "observe", "wait"],
-      hidden: false
+      action_space: ["move_to", "say", "interact", "use", "observe", "wait", "stop", "social", "pick_up", "drop_item", "move_item"],
+      hidden: false,
+      animation: null,
+      dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 20 }
     }
   },
   agent_states: {
@@ -127,7 +134,8 @@ export const fallbackWorld: WorldSnapshot = {
       action_queue: [],
       pending_model: false,
       last_model_tick: -999,
-      cooldowns: {}
+      cooldowns: {},
+      held_item_id: null
     },
     agent_tao: {
       id: "agent_tao",
@@ -138,7 +146,8 @@ export const fallbackWorld: WorldSnapshot = {
       action_queue: [],
       pending_model: false,
       last_model_tick: -999,
-      cooldowns: {}
+      cooldowns: {},
+      held_item_id: null
     },
     agent_ren: {
       id: "agent_ren",
@@ -149,11 +158,13 @@ export const fallbackWorld: WorldSnapshot = {
       action_queue: [],
       pending_model: false,
       last_model_tick: -999,
-      cooldowns: {}
+      cooldowns: {},
+      held_item_id: null
     }
   },
   relationships: [],
   memories: [],
+  decision_events: [],
   events: [
     {
       id: "evt_boot",

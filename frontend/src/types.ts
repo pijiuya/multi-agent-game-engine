@@ -52,6 +52,7 @@ export type WorldItem = {
   tags: string[];
   state: Record<string, unknown>;
   hidden: boolean;
+  movable: boolean;
 };
 
 export type WorldMap = {
@@ -70,6 +71,22 @@ export type WorldMap = {
   region_layers: RegionLayer[];
 };
 
+export type AgentAnimation = {
+  kind: "gif" | "png_sequence";
+  url: string;
+  frames: string[];
+  fps: number;
+  max_pixels: number;
+  width: number;
+  height: number;
+};
+
+export type DialoguePolicy = {
+  enabled: boolean;
+  distance: number;
+  cooldown_ticks: number;
+};
+
 export type AgentProfile = {
   id: string;
   name: string;
@@ -79,6 +96,8 @@ export type AgentProfile = {
   color: string;
   action_space: string[];
   hidden: boolean;
+  animation: AgentAnimation | null;
+  dialogue_policy: DialoguePolicy;
 };
 
 export type AgentState = {
@@ -91,6 +110,7 @@ export type AgentState = {
   pending_model: boolean;
   last_model_tick: number;
   cooldowns: Record<string, number>;
+  held_item_id: string | null;
 };
 
 export type WorldEvent = {
@@ -101,6 +121,19 @@ export type WorldEvent = {
   timestamp: number;
   agent_id?: string | null;
   payload: Record<string, unknown>;
+};
+
+export type DecisionEvent = {
+  id: string;
+  tick: number;
+  agent_id: string;
+  provider: string;
+  model: string;
+  observation: Record<string, unknown>;
+  text: string;
+  actions: Record<string, unknown>[];
+  results: Record<string, unknown>[];
+  timestamp: number;
 };
 
 export type WorldSnapshot = {
@@ -123,6 +156,7 @@ export type WorldSnapshot = {
     timestamp: number;
   }[];
   events: WorldEvent[];
+  decision_events: DecisionEvent[];
   tick: number;
   running: boolean;
   model_tasks?: Record<string, { done: boolean }>;

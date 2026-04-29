@@ -59,6 +59,22 @@ class ProjectStore:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS decision_events (
+                  id TEXT PRIMARY KEY,
+                  tick INTEGER NOT NULL,
+                  agent_id TEXT NOT NULL,
+                  provider TEXT NOT NULL,
+                  model TEXT NOT NULL,
+                  observation TEXT NOT NULL,
+                  text TEXT NOT NULL,
+                  actions TEXT NOT NULL,
+                  results TEXT NOT NULL,
+                  timestamp REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS relationships (
                   from_agent TEXT NOT NULL,
                   to_agent TEXT NOT NULL,
@@ -101,6 +117,28 @@ class ProjectStore:
                         "timestamp": event["timestamp"],
                     }
                     for event in snapshot["events"]
+                ],
+            )
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO decision_events
+                (id, tick, agent_id, provider, model, observation, text, actions, results, timestamp)
+                VALUES (:id, :tick, :agent_id, :provider, :model, :observation, :text, :actions, :results, :timestamp)
+                """,
+                [
+                    {
+                        "id": event["id"],
+                        "tick": event["tick"],
+                        "agent_id": event.get("agent_id") or "",
+                        "provider": event.get("provider", ""),
+                        "model": event.get("model", ""),
+                        "observation": json.dumps(event.get("observation", {})),
+                        "text": event.get("text", ""),
+                        "actions": json.dumps(event.get("actions", [])),
+                        "results": json.dumps(event.get("results", [])),
+                        "timestamp": event["timestamp"],
+                    }
+                    for event in snapshot.get("decision_events", [])
                 ],
             )
             conn.commit()

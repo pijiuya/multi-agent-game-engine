@@ -36,6 +36,22 @@ class MockProvider(ModelProvider):
     async def generate(self, request: ModelRequest) -> ModelResponse:
         agent_name = request.observation.get("agent_name", request.agent_id)
         tick = int(request.observation.get("tick", 0))
+        dialogue_candidates = request.observation.get("dialogue_candidates") or []
+        if "social" in request.action_space and dialogue_candidates and tick % 10 == 0:
+            target = dialogue_candidates[0]
+            target_name = target.get("name", target.get("id", "there"))
+            return ModelResponse(
+                text=f"{agent_name} notices {target_name} nearby.",
+                actions=[
+                    {
+                        "type": "social",
+                        "payload": {
+                            "target_agent_id": target.get("id"),
+                            "text": f"Hi {target_name}, what are you noticing here?",
+                        },
+                    }
+                ],
+            )
         if "say" in request.action_space and tick % 8 == 0:
             return ModelResponse(
                 text=f"{agent_name} shares a quick thought.",
@@ -132,4 +148,3 @@ def _parse_model_json(content: str, raw: dict[str, Any]) -> ModelResponse:
     if not isinstance(actions, list):
         actions = []
     return ModelResponse(text=str(parsed.get("text", "")), actions=actions, raw=raw)
-

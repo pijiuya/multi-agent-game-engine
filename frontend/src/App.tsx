@@ -1232,6 +1232,7 @@ export default function App() {
               onSelect={setSelection}
               onLocateAgent={locateAgent}
               onRenameAgent={(agentId, name) => void updateAgentProfile(agentId, { name })}
+              onUpdateAgent={(agentId, patch) => void updateAgentProfile(agentId, patch)}
               onCreateAgent={(name, role, point) => void createAgent(name, role, point)}
               onRefresh={() => void refreshWorld()}
             />

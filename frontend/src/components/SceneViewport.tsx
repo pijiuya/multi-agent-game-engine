@@ -3,7 +3,7 @@ import type { CSSProperties, MouseEvent, PointerEvent, WheelEvent } from "react"
 import { useRef, useState } from "react";
 import { screenToWorld, snapWorldPointToGrid, worldToScreen } from "../lib/canvasCoords";
 import { assetUrl } from "../lib/api";
-import type { CanvasPoint, CanvasViewState, EditTool, MapRegionFunction, Point, SelectionState, WorldItem, WorldSnapshot } from "../types";
+import type { AgentProfile, CanvasPoint, CanvasViewState, EditTool, MapRegionFunction, Point, SelectionState, WorldItem, WorldSnapshot } from "../types";
 
 type Props = {
   world: WorldSnapshot;
@@ -90,6 +90,9 @@ export function SceneViewport({
         return showAllRegionLayers || layer.function === activeRegionFunction;
       })
     : [];
+  const dialogueEvents = world.events
+    .filter((event) => (event.type === "speech" || event.type === "dialogue") && event.agent_id && world.agent_states[event.agent_id])
+    .slice(-4);
 
   function handleWheel(event: WheelEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -497,7 +500,11 @@ export function SceneViewport({
                 style={{ ...screenPointStyle(state.position, canvasView), "--agent-color": agent.color } as CSSProperties}
                 title={agent.name}
               >
-                <span />
+                {agentAnimationSource(agent, world.tick) ? (
+                  <img alt="" className="world-agent-sprite" draggable={false} src={agentAnimationSource(agent, world.tick) ?? ""} />
+                ) : (
+                  <span />
+                )}
               </button>
             );
           })}
@@ -545,6 +552,22 @@ export function SceneViewport({
               >
               {agent.name}
             </button>
+            );
+          })}
+          {dialogueEvents.map((event) => {
+            const state = event.agent_id ? world.agent_states[event.agent_id] : null;
+            if (!state) {
+              return null;
+            }
+            return (
+              <div
+                className="world-dialogue-bubble"
+                data-testid={`world-dialogue-${event.id}`}
+                key={event.id}
+                style={screenPointStyle(state.position, canvasView)}
+              >
+                {dialogueText(event.message)}
+              </div>
             );
           })}
           {selectedItem ? (
@@ -612,6 +635,27 @@ function itemStyle(item: WorldItem, aspect: number | null | undefined) {
     height: `${dimensions.height}px`,
     transform: `translate(-50%, -50%) rotate(${item.rotation}deg)`
   } as CSSProperties;
+}
+
+function agentAnimationSource(agent: AgentProfile, tick: number) {
+  const animation = agent.animation;
+  if (!animation) {
+    return null;
+  }
+  if (animation.kind === "gif") {
+    return assetUrl(animation.url) ?? animation.url;
+  }
+  if (!animation.frames.length) {
+    return null;
+  }
+  const frameIndex = Math.floor((tick / 10) * Math.max(1, animation.fps)) % animation.frames.length;
+  const frame = animation.frames[frameIndex];
+  return assetUrl(frame) ?? frame;
+}
+
+function dialogueText(message: string) {
+  const [, text] = message.split(": ");
+  return (text || message).slice(0, 90);
 }
 
 function screenItemTransformStyle(item: WorldItem, view: CanvasViewState, aspect: number | null | undefined) {

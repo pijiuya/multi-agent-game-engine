@@ -37,7 +37,8 @@ export function addItemToMap(map: WorldMap, point: Point): WorldMap {
         description: "",
         tags: [],
         state: {},
-        hidden: false
+        hidden: false,
+        movable: true
       }
     ]
   };
@@ -82,8 +83,10 @@ export function addAgentLocal(world: WorldSnapshot, name: string, role: string, 
     identity: `${name} is a ${role} in this simulation.`,
     model_provider: "mock",
     color: randomAgentColor(),
-    action_space: ["move_to", "say", "interact", "use", "observe", "wait"],
-    hidden: false
+    action_space: ["move_to", "say", "interact", "use", "observe", "wait", "stop", "social", "pick_up", "drop_item", "move_item"],
+    hidden: false,
+    animation: null,
+    dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 20 }
   };
   const state: AgentState = {
     id,
@@ -94,7 +97,8 @@ export function addAgentLocal(world: WorldSnapshot, name: string, role: string, 
     action_queue: [],
     pending_model: false,
     last_model_tick: -999,
-    cooldowns: {}
+    cooldowns: {},
+    held_item_id: null
   };
   return {
     ...world,

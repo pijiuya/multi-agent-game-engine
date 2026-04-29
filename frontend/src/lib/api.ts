@@ -1,5 +1,6 @@
 import { fallbackWorld } from "./fallbackWorld";
 import type {
+  AgentAnimation,
   AgentProfile,
   MapGenerationState,
   MapRegion,
@@ -486,7 +487,8 @@ export function normalizeWorldSnapshot(snapshot: WorldSnapshot): WorldSnapshot {
         description: item.description ?? "",
         tags: item.tags ?? [],
         state: item.state ?? {},
-        hidden: Boolean(item.hidden)
+        hidden: Boolean(item.hidden),
+        movable: item.movable !== false
       })),
       triggers: map.triggers ?? [],
       spawn_points: map.spawn_points ?? []
@@ -494,9 +496,57 @@ export function normalizeWorldSnapshot(snapshot: WorldSnapshot): WorldSnapshot {
     agent_profiles: Object.fromEntries(
       Object.entries(snapshot.agent_profiles ?? {}).map(([agentId, profile]) => [
         agentId,
-        { ...profile, hidden: Boolean(profile.hidden) }
+        {
+          ...profile,
+          hidden: Boolean(profile.hidden),
+          action_space: normalizeActionSpace(profile.action_space),
+          animation: normalizeAgentAnimation(profile.animation),
+          dialogue_policy: normalizeDialoguePolicy(profile.dialogue_policy)
+        }
       ])
-    )
+    ),
+    agent_states: Object.fromEntries(
+      Object.entries(snapshot.agent_states ?? {}).map(([agentId, state]) => [
+        agentId,
+        { ...state, held_item_id: state.held_item_id ?? null }
+      ])
+    ),
+    decision_events: snapshot.decision_events ?? []
+  };
+}
+
+function normalizeActionSpace(actions: unknown) {
+  const defaults = ["move_to", "say", "interact", "use", "observe", "wait", "stop", "social", "pick_up", "drop_item", "move_item"];
+  const current = Array.isArray(actions) ? actions.filter((action): action is string => typeof action === "string") : [];
+  return Array.from(new Set([...current, ...defaults]));
+}
+
+function normalizeAgentAnimation(value: unknown): AgentAnimation | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const animation = value as Record<string, unknown>;
+  const kind = animation.kind === "gif" || animation.kind === "png_sequence" ? animation.kind : null;
+  if (!kind) {
+    return null;
+  }
+  return {
+    kind,
+    url: typeof animation.url === "string" ? animation.url : "",
+    frames: Array.isArray(animation.frames) ? animation.frames.filter((frame): frame is string => typeof frame === "string") : [],
+    fps: Math.max(1, Number(animation.fps ?? 8)),
+    max_pixels: Math.max(0, Number(animation.max_pixels ?? 0)),
+    width: Math.max(0, Number(animation.width ?? 0)),
+    height: Math.max(0, Number(animation.height ?? 0))
+  };
+}
+
+function normalizeDialoguePolicy(value: unknown) {
+  const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  return {
+    enabled: raw.enabled !== false,
+    distance: Math.max(1, Number(raw.distance ?? 180)),
+    cooldown_ticks: Math.max(1, Math.round(Number(raw.cooldown_ticks ?? 20)))
   };
 }
 
