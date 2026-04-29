@@ -1,15 +1,19 @@
 import { useEffect, useRef } from "react";
+import type { WheelEvent } from "react";
 import { Application, Graphics, Rectangle, Sprite, Text, Texture } from "pixi.js";
 import { assetUrl } from "../lib/api";
-import type { EditTool, Point, WorldSnapshot } from "../types";
+import type { CanvasViewState, EditTool, Point, SelectionState, WorldSnapshot } from "../types";
 
 type Props = {
   world: WorldSnapshot;
   editTool: EditTool;
   draftPoints: Point[];
   selectedAgentId: string | null;
+  viewState: CanvasViewState;
+  onViewChange: (view: CanvasViewState) => void;
   onWorldClick: (point: Point) => void;
   onSelectAgent: (agentId: string) => void;
+  onSelectElement: (selection: SelectionState) => void;
 };
 
 export function WorldCanvas2D({
@@ -17,22 +21,29 @@ export function WorldCanvas2D({
   editTool,
   draftPoints,
   selectedAgentId,
+  viewState,
+  onViewChange,
   onWorldClick,
-  onSelectAgent
+  onSelectAgent,
+  onSelectElement
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const appRef = useRef<Application | null>(null);
   const transformRef = useRef({ scale: 1, offsetX: 0, offsetY: 0 });
+  const worldRef = useRef(world);
+  const viewRef = useRef(viewState);
   const callbacksRef = useRef({ onWorldClick, onSelectAgent });
 
   callbacksRef.current = { onWorldClick, onSelectAgent };
+  worldRef.current = world;
+  viewRef.current = viewState;
 
   useEffect(() => {
     if (!containerRef.current) {
       return;
     }
     const app = new Application({
-      backgroundColor: 0xf8fafc,
+      backgroundAlpha: 0,
       antialias: true,
       preserveDrawingBuffer: true,
       resizeTo: containerRef.current
@@ -46,11 +57,12 @@ export function WorldCanvas2D({
         x: (event.global.x - offsetX) / scale,
         y: (event.global.y - offsetY) / scale
       };
+      const currentWorld = worldRef.current;
       if (
         point.x >= 0 &&
         point.y >= 0 &&
-        point.x <= world.map.width &&
-        point.y <= world.map.height
+        point.x <= currentWorld.map.width &&
+        point.y <= currentWorld.map.height
       ) {
         callbacksRef.current.onWorldClick(point);
       }
@@ -67,7 +79,14 @@ export function WorldCanvas2D({
 
   useEffect(() => {
     renderWorld();
-  }, [world, editTool, draftPoints, selectedAgentId]);
+  }, [world, editTool, draftPoints, selectedAgentId, viewState]);
+
+  function handleWheel(event: WheelEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const direction = event.deltaY > 0 ? -1 : 1;
+    const nextZoom = clamp(viewRef.current.zoom * (direction > 0 ? 1.12 : 0.88), 0.35, 4);
+    onViewChange({ ...viewRef.current, zoom: nextZoom, fitMode: false });
+  }
 
   function renderWorld() {
     const app = appRef.current;
@@ -80,9 +99,10 @@ export function WorldCanvas2D({
 
     const width = container.clientWidth || 1;
     const height = container.clientHeight || 1;
-    const scale = Math.min(width / world.map.width, height / world.map.height) * 0.96;
-    const offsetX = (width - world.map.width * scale) / 2;
-    const offsetY = (height - world.map.height * scale) / 2;
+    const baseScale = Math.min(width / world.map.width, height / world.map.height) * 0.96;
+    const scale = baseScale * viewState.zoom;
+    const offsetX = (width - world.map.width * scale) / 2 + viewState.pan.x;
+    const offsetY = (height - world.map.height * scale) / 2 + viewState.pan.y;
     transformRef.current = { scale, offsetX, offsetY };
 
     const layer = new Graphics();
@@ -90,13 +110,10 @@ export function WorldCanvas2D({
     layer.scale.set(scale);
     app.stage.addChild(layer);
 
-    const background = new Graphics();
-    background.beginFill(0xffffff);
-    background.drawRoundedRect(0, 0, world.map.width, world.map.height, 8);
-    background.endFill();
-    background.lineStyle(2, 0xCBD5E1, 1);
-    background.drawRoundedRect(0, 0, world.map.width, world.map.height, 8);
-    layer.addChild(background);
+    const mapFrame = new Graphics();
+    mapFrame.lineStyle(1, 0x050505, 0.34);
+    mapFrame.drawRoundedRect(0, 0, world.map.width, world.map.height, 8);
+    layer.addChild(mapFrame);
 
     const backgroundUrl = assetUrl(world.map.background_image);
     if (backgroundUrl) {
@@ -113,10 +130,16 @@ export function WorldCanvas2D({
     world.map.spawn_points.forEach((point) => drawMarker(layer, point, 0xf59e0b));
     world.map.items.forEach((item) => {
       const marker = new Graphics();
+      marker.eventMode = "static";
+      marker.cursor = "pointer";
       marker.beginFill(0xfacc15, 0.95);
       marker.lineStyle(3, 0x854d0e, 1);
       marker.drawCircle(item.position.x, item.position.y, item.radius);
       marker.endFill();
+      marker.on("pointertap", (event) => {
+        event.stopPropagation();
+        onSelectElement({ kind: "item", id: item.id });
+      });
       layer.addChild(marker);
     });
 
@@ -142,7 +165,7 @@ export function WorldCanvas2D({
       agent.eventMode = "static";
       agent.cursor = "pointer";
       agent.beginFill(parseInt(profile.color.replace("#", ""), 16), 1);
-      agent.lineStyle(selectedAgentId === profile.id ? 6 : 3, selectedAgentId === profile.id ? 0x111827 : 0xffffff, 1);
+      agent.lineStyle(selectedAgentId === profile.id ? 6 : 3, selectedAgentId === profile.id ? 0xf5f5f5 : 0x111111, 1);
       agent.drawCircle(state.position.x, state.position.y, 19);
       agent.endFill();
       agent.on("pointertap", (event) => {
@@ -154,9 +177,11 @@ export function WorldCanvas2D({
       const label = new Text(profile.name, {
         fontFamily: "Inter, Arial",
         fontSize: 18,
-        fill: 0x111827,
+        fill: 0x050505,
         fontWeight: "600",
-        align: "center"
+        align: "center",
+        stroke: 0xf5f5f5,
+        strokeThickness: 3
       });
       label.anchor.set(0.5, 0);
       label.x = state.position.x;
@@ -176,7 +201,7 @@ export function WorldCanvas2D({
     });
   }
 
-  return <div className="world-surface" data-testid="world-2d" ref={containerRef} />;
+  return <div className="world-surface" data-testid="world-2d" ref={containerRef} onWheel={handleWheel} />;
 }
 
 function drawPolygon(layer: Graphics, points: Point[], fill: number, alpha: number, stroke: number) {
@@ -209,4 +234,8 @@ function toolColor(tool: EditTool) {
     return 0x0ea5e9;
   }
   return 0x16a34a;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
 }

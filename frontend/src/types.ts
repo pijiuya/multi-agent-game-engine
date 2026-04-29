@@ -95,3 +95,27 @@ export type ViewMode = "2d" | "3d";
 
 export type EditTool = "select" | "walkable" | "obstacle" | "zone" | "item" | "spawn" | "move";
 
+export type PanelState = {
+  id: "tools" | "scene" | "agents" | "properties";
+  title: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  minimized: boolean;
+  dockedTo: string | null;
+  zIndex: number;
+};
+
+export type SelectionState =
+  | { kind: "map"; id: string }
+  | { kind: "agent"; id: string }
+  | { kind: "item"; id: string }
+  | { kind: "area"; id: string };
+
+export type CanvasViewState = {
+  zoom: number;
+  pan: Point;
+  fitMode: boolean;
+};
+

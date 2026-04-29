@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
+    "electron:dev": "concurrently -k \"npm run dev -- --port 5173\" \"wait-on http://127.0.0.1:5173 && cross-env ELECTRON_START_URL=http://127.0.0.1:5173 electron electron/main.cjs\"",
+    "electron:preview": "npm run build && electron electron/main.cjs",
     "preview": "vite preview --host 127.0.0.1",
     "test:e2e": "playwright test"
   },
@@ -25,7 +27,11 @@
     "@types/react": "^18.3.26",
     "@types/react-dom": "^18.3.7",
     "@types/three": "^0.182.0",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^39.2.7",
     "pngjs": "^7.0.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "wait-on": "^9.0.3"
   }
 }

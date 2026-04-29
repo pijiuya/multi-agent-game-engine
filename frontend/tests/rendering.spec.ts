@@ -1,55 +1,60 @@
-import { expect, test, type Locator } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 import { PNG } from "pngjs";
 
-test.describe("canvas rendering", () => {
+test.describe("transparent workstation rendering", () => {
   for (const viewport of [
     { name: "desktop", width: 1280, height: 820 },
     { name: "mobile", width: 390, height: 820 }
   ]) {
-    test(`2D and 3D canvases are nonblank on ${viewport.name}`, async ({ page }) => {
+    test(`workspace surface has rectangular fade on ${viewport.name}`, async ({ page }) => {
       await page.setViewportSize({ width: viewport.width, height: viewport.height });
       await page.goto("/");
 
-      await expect(page.getByTestId("world-2d")).toBeVisible();
-      await expectCanvasHasInk(page.getByTestId("world-2d").locator("canvas"));
-
-      await page.getByRole("button", { name: "3D" }).click();
-      await expect(page.getByTestId("world-3d")).toBeVisible();
-      await expectCanvasHasInk(page.getByTestId("world-3d").locator("canvas"));
+      await expect(page.getByTestId("scene-viewport")).toBeVisible();
+      await expect(page.getByTestId("workspace-surface")).toBeVisible();
+      await expect(page.getByTestId("world-2d")).toHaveCount(0);
+      await expectRectangularFade(page);
     });
   }
 });
 
-async function expectCanvasHasInk(canvas: Locator) {
-  await expect(canvas).toBeVisible();
-  await canvas.page().waitForTimeout(250);
-  let image: Buffer | null = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      image = await canvas.screenshot();
-      break;
-    } catch (error) {
-      if (attempt === 2) {
-        throw error;
+async function expectRectangularFade(page: import("@playwright/test").Page) {
+  await page.addStyleTag({
+    content: `
+      .floating-panel,
+      .transport-controls,
+      .scene-header,
+      .scene-footer {
+        visibility: hidden !important;
       }
-      await canvas.page().waitForTimeout(250);
-    }
+    `
+  });
+  await page.waitForTimeout(250);
+  const scene = await page.getByTestId("scene-viewport").boundingBox();
+  expect(scene).not.toBeNull();
+  if (!scene) {
+    return;
   }
-  if (!image) {
-    throw new Error("canvas screenshot was not captured");
-  }
+
+  const image = await page.screenshot({ omitBackground: true });
   const png = PNG.sync.read(image);
-  let varied = 0;
-  for (let y = 0; y < png.height; y += Math.max(1, Math.floor(png.height / 24))) {
-    for (let x = 0; x < png.width; x += Math.max(1, Math.floor(png.width / 24))) {
-      const index = (png.width * y + x) * 4;
-      const r = png.data[index];
-      const g = png.data[index + 1];
-      const b = png.data[index + 2];
-      if (Math.abs(r - 248) + Math.abs(g - 250) + Math.abs(b - 252) > 20) {
-        varied += 1;
-      }
-    }
-  }
-  expect(varied).toBeGreaterThan(12);
+  const center = alphaAt(png, scene.x + scene.width * 0.5, scene.y + scene.height * 0.5);
+  const leftEdge = alphaAt(png, scene.x + scene.width * 0.03, scene.y + scene.height * 0.5);
+  const topEdge = alphaAt(png, scene.x + scene.width * 0.5, scene.y + scene.height * 0.03);
+  const corner = alphaAt(png, scene.x + scene.width * 0.03, scene.y + scene.height * 0.03);
+
+  expect(center).toBeGreaterThan(150);
+  expect(center).toBeGreaterThan(leftEdge + 8);
+  expect(center).toBeGreaterThan(topEdge + 8);
+  expect(center).toBeGreaterThan(corner + 16);
+}
+
+function alphaAt(png: PNG, x: number, y: number) {
+  const px = clamp(Math.round(x), 0, png.width - 1);
+  const py = clamp(Math.round(y), 0, png.height - 1);
+  return png.data[(png.width * py + px) * 4 + 3];
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
 }
