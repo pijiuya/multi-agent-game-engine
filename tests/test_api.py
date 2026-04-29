@@ -74,6 +74,46 @@ def test_api_patch_editor_entities():
     assert item["image"] == "/api/assets/test.png"
     assert item["description"] == "patched"
 
+    hidden_item = client.patch("/api/map/items/item_patch_test", json={"hidden": True})
+    assert hidden_item.status_code == 200
+    item = next(item for item in hidden_item.json()["map"]["items"] if item["id"] == "item_patch_test")
+    assert item["hidden"] is True
+    deleted_item = client.delete("/api/map/items/item_patch_test")
+    assert deleted_item.status_code == 200
+    assert all(item["id"] != "item_patch_test" for item in deleted_item.json()["map"]["items"])
+
+    created_agent = client.post(
+        "/api/agents",
+        json={"name": "Delete Me", "role": "test", "position": {"x": 200, "y": 200}},
+    )
+    agent_id = created_agent.json()["agent_profiles"]
+    agent_id = next(key for key, profile in agent_id.items() if profile["name"] == "Delete Me")
+    hidden_agent = client.patch(f"/api/agents/{agent_id}", json={"hidden": True})
+    assert hidden_agent.status_code == 200
+    assert hidden_agent.json()["agent_profiles"][agent_id]["hidden"] is True
+    deleted_agent = client.delete(f"/api/agents/{agent_id}")
+    assert deleted_agent.status_code == 200
+    assert agent_id not in deleted_agent.json()["agent_profiles"]
+    assert agent_id not in deleted_agent.json()["agent_states"]
+
+    created_region = client.post(
+        "/api/map/regions",
+        json={
+            "name": "可删除区域",
+            "function": "walkable",
+            "points": [{"x": 10, "y": 10}, {"x": 80, "y": 10}, {"x": 80, "y": 80}, {"x": 10, "y": 80}],
+        },
+    )
+    region_id = next(region["id"] for region in created_region.json()["map"]["regions"] if region["name"] == "可删除区域")
+    hidden_region = client.patch(f"/api/map/regions/{region_id}", json={"hidden": True})
+    assert hidden_region.status_code == 200
+    region = next(region for region in hidden_region.json()["map"]["regions"] if region["id"] == region_id)
+    assert region["hidden"] is True
+    assert region_id not in next(layer for layer in hidden_region.json()["map"]["region_layers"] if layer["function"] == "walkable")["region_ids"]
+    deleted_region = client.delete(f"/api/map/regions/{region_id}")
+    assert deleted_region.status_code == 200
+    assert all(region["id"] != region_id for region in deleted_region.json()["map"]["regions"])
+
 
 def test_api_models_generation_and_region_semantics():
     client = TestClient(app)
@@ -206,6 +246,206 @@ def test_api_models_generation_and_region_semantics():
     assert regenerated.status_code == 200
     region = next(region for region in regenerated.json()["map"]["regions"] if region["id"] == region_id)
     assert region["image_prompt"] == "重绘为花园入口"
+
+
+def test_api_manual_region_create_and_boolean_operations():
+    client = TestClient(app)
+    api_main.runtime.world = api_main.GameWorld.default()
+    api_main.runtime.world.map.regions = []
+    api_main.runtime.world.map.walkable_areas = []
+    api_main.runtime.world.map.obstacles = []
+    api_main.runtime.world.map.interaction_zones = []
+
+    created = client.post(
+        "/api/map/regions",
+        json={
+            "name": "手绘道路",
+            "function": "walkable",
+            "points": [
+                {"x": 0, "y": 0},
+                {"x": 120, "y": 0},
+                {"x": 120, "y": 120},
+                {"x": 0, "y": 120},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    region = created.json()["map"]["regions"][0]
+    assert region["source"] == "manual"
+    assert any(area["metadata"].get("region_id") == region["id"] for area in created.json()["map"]["walkable_areas"])
+    walkable_layer = next(layer for layer in created.json()["map"]["region_layers"] if layer["function"] == "walkable")
+    assert region["id"] in walkable_layer["region_ids"]
+    assert len(walkable_layer["polygons"]) == 1
+
+    subtracted = client.post(
+        "/api/map/regions/boolean",
+        json={
+            "target_ids": [region["id"]],
+            "operation": "subtract",
+            "points": [
+                {"x": 40, "y": 40},
+                {"x": 80, "y": 40},
+                {"x": 80, "y": 80},
+                {"x": 40, "y": 80},
+            ],
+        },
+    )
+    assert subtracted.status_code == 200
+    region = next(item for item in subtracted.json()["map"]["regions"] if item["id"] == region["id"])
+    assert len(region["holes"]) == 1
+    assert subtracted.json()["map"]["walkable_areas"][0]["holes"] == region["holes"]
+
+    expanded = client.post(
+        "/api/map/regions/boolean",
+        json={
+            "target_ids": [region["id"]],
+            "operation": "union",
+            "points": [
+                {"x": 120, "y": 20},
+                {"x": 180, "y": 20},
+                {"x": 180, "y": 100},
+                {"x": 120, "y": 100},
+            ],
+        },
+    )
+    assert expanded.status_code == 200
+    region = next(item for item in expanded.json()["map"]["regions"] if item["id"] == region["id"])
+    assert max(point["x"] for point in region["points"]) == 180
+
+    action = client.post(
+        "/api/map/regions/boolean",
+        json={
+            "target_function": "action",
+            "operation": "union",
+            "points": [
+                {"x": 220, "y": 20},
+                {"x": 280, "y": 20},
+                {"x": 280, "y": 100},
+                {"x": 220, "y": 100},
+            ],
+        },
+    )
+    assert action.status_code == 200
+    action_world = action.json()["map"]
+    action_layer = next(layer for layer in action_world["region_layers"] if layer["function"] == "action")
+    assert len(action_layer["polygons"]) == 1
+    assert any(area["metadata"].get("function") == "action" for area in action_world["walkable_areas"])
+
+    action_subtract = client.post(
+        "/api/map/regions/boolean",
+        json={
+            "target_function": "action",
+            "operation": "subtract",
+            "points": [
+                {"x": 240, "y": 40},
+                {"x": 260, "y": 40},
+                {"x": 260, "y": 80},
+                {"x": 240, "y": 80},
+            ],
+        },
+    )
+    assert action_subtract.status_code == 200
+    action_region = next(region for region in action_subtract.json()["map"]["regions"] if region["function"] == "action")
+    assert len(action_region["holes"]) == 1
+
+
+def test_api_region_boolean_target_wins_over_overlaps():
+    client = TestClient(app)
+    api_main.runtime.world = api_main.GameWorld.default()
+    api_main.runtime.world.map.walkable_areas = []
+    api_main.runtime.world.map.obstacles = []
+    api_main.runtime.world.map.interaction_zones = []
+    api_main.runtime.world.map.regions = [
+        api_main.MapRegion(
+            id="region_target",
+            name="目标区域",
+            source="manual",
+            function="walkable",
+            points=[
+                api_main.Point(0, 0),
+                api_main.Point(100, 0),
+                api_main.Point(100, 100),
+                api_main.Point(0, 100),
+            ],
+        ),
+        api_main.MapRegion(
+            id="region_other",
+            name="相邻区域",
+            source="manual",
+            function="custom",
+            points=[
+                api_main.Point(80, 0),
+                api_main.Point(180, 0),
+                api_main.Point(180, 100),
+                api_main.Point(80, 100),
+            ],
+        ),
+    ]
+    api_main.runtime.world.map.sync_functional_regions()
+
+    response = client.post(
+        "/api/map/regions/boolean",
+        json={
+            "target_ids": ["region_target"],
+            "operation": "union",
+            "points": [
+                {"x": 100, "y": 0},
+                {"x": 140, "y": 0},
+                {"x": 140, "y": 100},
+                {"x": 100, "y": 100},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    regions = response.json()["map"]["regions"]
+    target = next(region for region in regions if region["id"] == "region_target")
+    other = next(region for region in regions if region["id"] == "region_other")
+    assert max(point["x"] for point in target["points"]) == 140
+    assert min(point["x"] for point in other["points"]) >= 140
+
+
+def test_api_region_boolean_subtract_can_remove_target_region():
+    client = TestClient(app)
+    api_main.runtime.world = api_main.GameWorld.default()
+    api_main.runtime.world.map.walkable_areas = []
+    api_main.runtime.world.map.obstacles = []
+    api_main.runtime.world.map.interaction_zones = []
+    api_main.runtime.world.map.regions = [
+        api_main.MapRegion(
+            id="region_target",
+            name="目标区域",
+            source="manual",
+            function="walkable",
+            points=[
+                api_main.Point(0, 0),
+                api_main.Point(40, 0),
+                api_main.Point(40, 40),
+                api_main.Point(0, 40),
+            ],
+        )
+    ]
+    api_main.runtime.world.map.sync_functional_regions()
+
+    response = client.post(
+        "/api/map/regions/boolean",
+        json={
+            "target_ids": ["region_target"],
+            "operation": "subtract",
+            "points": [
+                {"x": -10, "y": -10},
+                {"x": 50, "y": -10},
+                {"x": 50, "y": 50},
+                {"x": -10, "y": 50},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    world_map = response.json()["map"]
+    assert all(region["id"] != "region_target" for region in world_map["regions"])
+    walkable_layer = next(layer for layer in world_map["region_layers"] if layer["function"] == "walkable")
+    assert "region_target" not in walkable_layer["region_ids"]
 
 
 def test_api_model_capability_status_and_one_click_config(monkeypatch):

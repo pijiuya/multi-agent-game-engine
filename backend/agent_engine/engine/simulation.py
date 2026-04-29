@@ -82,6 +82,11 @@ class SimulationRuntime:
 
     def _move_agents(self, dt: float) -> None:
         for agent_id, state in self.world.agent_states.items():
+            profile = self.world.agent_profiles.get(agent_id)
+            if profile is None or profile.hidden:
+                state.target = None
+                state.status = "idle"
+                continue
             if state.target is None:
                 if state.status == "moving":
                     state.status = "idle"
@@ -94,7 +99,7 @@ class SimulationRuntime:
                 state.position = state.target
                 state.target = None
                 state.status = "idle"
-                name = self.world.agent_profiles[agent_id].name
+                name = profile.name
                 self.world.add_event("movement", f"{name} arrived.", agent_id=agent_id)
             else:
                 state.position = Point.from_dict(lerp_point(current, target, step / remaining))
@@ -102,6 +107,8 @@ class SimulationRuntime:
 
     def _schedule_agent_decisions(self) -> None:
         for agent_id, profile in self.world.agent_profiles.items():
+            if profile.hidden:
+                continue
             state = self.world.agent_states[agent_id]
             if state.pending_model or state.status == "moving":
                 continue
@@ -152,4 +159,3 @@ class SimulationRuntime:
             "nearby_agents": [agent.name for agent in self.world.nearby_agents(agent_id, 220)],
             "recent_events": [event.to_dict() for event in self.world.events[-8:]],
         }
-

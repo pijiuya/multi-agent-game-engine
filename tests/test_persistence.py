@@ -50,6 +50,19 @@ def test_project_store_loads_legacy_maps_without_regions(tmp_path):
     store = ProjectStore(tmp_path / "project")
     world = GameWorld.default()
     snapshot = world.to_dict()
+    snapshot["map"]["walkable_areas"] = [
+        {
+            "id": "legacy_walkable",
+            "name": "Legacy Walkable",
+            "kind": "walkable",
+            "points": [
+                {"x": 0, "y": 0},
+                {"x": 80, "y": 0},
+                {"x": 80, "y": 80},
+                {"x": 0, "y": 80},
+            ],
+        }
+    ]
     del snapshot["map"]["regions"]
     store.initialize()
     with store.connect() as conn:
@@ -57,7 +70,10 @@ def test_project_store_loads_legacy_maps_without_regions(tmp_path):
         conn.commit()
 
     loaded = store.load_world()
-    assert loaded.map.regions == []
+    assert len(loaded.map.regions) == 1
+    assert loaded.map.regions[0].source == "manual"
+    assert loaded.map.regions[0].name == "Legacy Walkable"
+    assert loaded.map.walkable_areas[0].metadata["region_id"] == loaded.map.regions[0].id
 
 
 def test_region_function_mirroring_and_model_configs(tmp_path):

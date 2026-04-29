@@ -8,6 +8,8 @@ import type {
   ModelCapabilityStatus,
   ModelCapabilityTask,
   ModelConfig,
+  Point,
+  PolygonArea,
   WorldItem,
   WorldMap,
   WorldSnapshot
@@ -23,7 +25,7 @@ export async function getWorld(): Promise<WorldSnapshot> {
     }
     return normalizeWorldSnapshot(await response.json());
   } catch {
-    return structuredClone(fallbackWorld);
+    return normalizeWorldSnapshot(structuredClone(fallbackWorld));
   }
 }
 
@@ -246,6 +248,67 @@ export async function patchMapRegion(regionId: string, patch: Partial<Omit<MapRe
   }
 }
 
+export async function deleteMapRegion(regionId: string): Promise<WorldSnapshot | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/map/regions/${regionId}`, { method: "DELETE" });
+    return response.ok ? normalizeWorldSnapshot(await response.json()) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function createMapRegion(payload: {
+  name: string;
+  points: Point[];
+  holes?: Point[][];
+  function?: MapRegion["function"];
+  notes?: string;
+  tags?: string[];
+}): Promise<WorldSnapshot | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/map/regions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: payload.name,
+        points: payload.points,
+        holes: payload.holes ?? [],
+        function: payload.function ?? "unassigned",
+        notes: payload.notes ?? "",
+        tags: payload.tags ?? []
+      })
+    });
+    return response.ok ? normalizeWorldSnapshot(await response.json()) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function booleanMapRegions(payload: {
+  targetIds?: string[];
+  targetFunction?: MapRegion["function"];
+  operation: "union" | "subtract";
+  points: Point[];
+  holes?: Point[][];
+}): Promise<WorldSnapshot | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/map/regions/boolean`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        target_ids: payload.targetIds ?? [],
+        target_function: payload.targetFunction ?? null,
+        operation: payload.operation,
+        points: payload.points,
+        holes: payload.holes ?? []
+      })
+    });
+    return response.ok ? normalizeWorldSnapshot(await response.json()) : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function regenerateMapRegion(regionId: string, prompt: string): Promise<WorldSnapshot | null> {
   try {
     const response = await fetch(`${apiBase}/api/map/regions/${regionId}/regenerate`, {
@@ -283,6 +346,15 @@ export async function patchAgent(agentId: string, patch: Partial<Omit<AgentProfi
   }
 }
 
+export async function deleteAgent(agentId: string): Promise<WorldSnapshot | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/agents/${agentId}`, { method: "DELETE" });
+    return response.ok ? normalizeWorldSnapshot(await response.json()) : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function patchMapItem(itemId: string, patch: Partial<Omit<WorldItem, "id">>) {
   try {
     const response = await fetch(`${apiBase}/api/map/items/${itemId}`, {
@@ -290,6 +362,15 @@ export async function patchMapItem(itemId: string, patch: Partial<Omit<WorldItem
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch)
     });
+    return response.ok ? normalizeWorldSnapshot(await response.json()) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteMapItem(itemId: string): Promise<WorldSnapshot | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/map/items/${itemId}`, { method: "DELETE" });
     return response.ok ? normalizeWorldSnapshot(await response.json()) : null;
   } catch {
     return null;
@@ -391,16 +472,12 @@ export function assetUrl(path: string | null) {
 }
 
 export function normalizeWorldSnapshot(snapshot: WorldSnapshot): WorldSnapshot {
+  const map = normalizeMap(snapshot.map ?? fallbackWorld.map);
   return {
     ...snapshot,
     map: {
-      ...fallbackWorld.map,
-      ...snapshot.map,
-      regions: snapshot.map?.regions ?? [],
-      walkable_areas: snapshot.map?.walkable_areas ?? [],
-      obstacles: snapshot.map?.obstacles ?? [],
-      interaction_zones: snapshot.map?.interaction_zones ?? [],
-      items: (snapshot.map?.items ?? []).map((item) => ({
+      ...map,
+      items: (map.items ?? []).map((item) => ({
         ...item,
         radius: item.radius ?? 32,
         scale: item.scale ?? 1,
@@ -408,12 +485,172 @@ export function normalizeWorldSnapshot(snapshot: WorldSnapshot): WorldSnapshot {
         image: item.image ?? null,
         description: item.description ?? "",
         tags: item.tags ?? [],
-        state: item.state ?? {}
+        state: item.state ?? {},
+        hidden: Boolean(item.hidden)
       })),
-      triggers: snapshot.map?.triggers ?? [],
-      spawn_points: snapshot.map?.spawn_points ?? []
+      triggers: map.triggers ?? [],
+      spawn_points: map.spawn_points ?? []
+    },
+    agent_profiles: Object.fromEntries(
+      Object.entries(snapshot.agent_profiles ?? {}).map(([agentId, profile]) => [
+        agentId,
+        { ...profile, hidden: Boolean(profile.hidden) }
+      ])
+    )
+  };
+}
+
+function normalizeMap(input: WorldMap): WorldMap {
+  const map = {
+    ...fallbackWorld.map,
+    ...input,
+    walkable_areas: normalizeAreas(input.walkable_areas ?? []),
+    obstacles: normalizeAreas(input.obstacles ?? []),
+    interaction_zones: normalizeAreas(input.interaction_zones ?? []),
+    regions: normalizeRegions(input.regions ?? []),
+    region_layers: normalizeRegionLayers(input.region_layers ?? [])
+  };
+  const regions = importLegacyAreasAsRegions(map);
+  return syncFunctionalRegions({
+    ...map,
+    regions,
+    region_layers: hasRegionLayerData(map.region_layers) ? map.region_layers : buildFallbackRegionLayers(regions)
+  });
+}
+
+function normalizeAreas(areas: WorldMap["walkable_areas"]) {
+  return areas.map((area) => ({ ...area, holes: area.holes ?? [] }));
+}
+
+function normalizeRegions(regions: MapRegion[]) {
+  return regions.map((region) => ({
+    ...region,
+    function: normalizeRegionFunction(region.function),
+    holes: region.holes ?? [],
+    hidden: Boolean(region.hidden)
+  }));
+}
+
+function normalizeRegionFunction(value: string): MapRegion["function"] {
+  return ["walkable", "obstacle", "action", "residential", "social", "custom", "unassigned"].includes(value)
+    ? (value as MapRegion["function"])
+    : "unassigned";
+}
+
+function normalizeRegionLayers(layers: WorldMap["region_layers"]) {
+  return (layers ?? []).map((layer) => ({
+    ...layer,
+    function: normalizeRegionFunction(layer.function),
+    polygons: (layer.polygons ?? []).map((polygon) => ({
+      points: polygon.points ?? [],
+      holes: polygon.holes ?? []
+    }))
+  }));
+}
+
+function importLegacyAreasAsRegions(map: WorldMap): MapRegion[] {
+  const regions = [...map.regions];
+  const existing = new Set(regions.map((region) => region.id));
+  const groups: { areas: WorldMap["walkable_areas"]; fn: MapRegion["function"] }[] = [
+    { areas: map.walkable_areas, fn: "walkable" },
+    { areas: map.obstacles, fn: "obstacle" },
+    { areas: map.interaction_zones, fn: "social" }
+  ];
+  for (const group of groups) {
+    for (const area of group.areas) {
+      if (area.metadata?.generated || area.points.length < 3) {
+        continue;
+      }
+      const id = String(area.metadata?.region_id ?? `region_${area.id}`);
+      if (existing.has(id)) {
+        continue;
+      }
+      existing.add(id);
+      regions.push({
+        id,
+        name: area.name,
+        points: area.points,
+        holes: area.holes ?? [],
+        source: "manual",
+        function: group.fn,
+        image_prompt: "",
+        notes: "从旧几何区域迁移为统一区域。",
+        confidence: 1,
+        tags: ["手绘"],
+        hidden: false
+      });
+    }
+  }
+  return regions;
+}
+
+function syncFunctionalRegions(map: WorldMap): WorldMap {
+  const walkable_areas: PolygonArea[] = [];
+  const obstacles: PolygonArea[] = [];
+  const interaction_zones: PolygonArea[] = [];
+  for (const region of map.regions) {
+    if (region.hidden) {
+      continue;
+    }
+    if (region.function === "walkable" || region.function === "action") {
+      walkable_areas.push(regionToArea(region));
+    }
+    if (region.function === "obstacle") {
+      obstacles.push(regionToArea(region));
+    }
+    if (region.function === "social") {
+      interaction_zones.push(regionToArea(region));
+    }
+  }
+  return {
+    ...map,
+    walkable_areas,
+    obstacles,
+    interaction_zones,
+    region_layers: hasRegionLayerData(map.region_layers) ? map.region_layers : buildFallbackRegionLayers(map.regions)
+  };
+}
+
+function regionToArea(region: MapRegion): PolygonArea {
+  return {
+    id: `area_${region.id}`,
+    name: region.name,
+    kind: region.function === "social" ? "zone" : region.function === "action" ? "walkable" : region.function,
+    points: region.points,
+    holes: region.holes,
+    metadata: {
+      generated: true,
+      region_id: region.id,
+      function: region.function,
+      source: region.source,
+      notes: region.notes
     }
   };
+}
+
+function buildFallbackRegionLayers(regions: MapRegion[]): WorldMap["region_layers"] {
+  const labels: Record<MapRegion["function"], string> = {
+    walkable: "道路",
+    obstacle: "不可通过",
+    action: "行动区",
+    residential: "居住区",
+    social: "社交区",
+    custom: "自定义",
+    unassigned: "未设定"
+  };
+  return (Object.keys(labels) as MapRegion["function"][]).map((fn) => {
+    const matches = regions.filter((region) => region.function === fn && !region.hidden);
+    return {
+      function: fn,
+      label: labels[fn],
+      region_ids: matches.map((region) => region.id),
+      polygons: matches.map((region) => ({ points: region.points, holes: region.holes ?? [] }))
+    };
+  });
+}
+
+function hasRegionLayerData(layers: WorldMap["region_layers"]) {
+  return layers.some((layer) => layer.region_ids.length > 0 || layer.polygons.length > 0);
 }
 
 function normalizeSegmentation(data: Partial<MapSegmentationState> | undefined, world: WorldSnapshot): MapSegmentationState {

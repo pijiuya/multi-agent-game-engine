@@ -149,7 +149,14 @@ export function FloatingPanel({
           <PanelsTopLeft size={15} />
           <span>{panel.title}</span>
         </div>
-        <button aria-label={`折叠 ${panel.title}`} onClick={() => onToggleMinimized(panel.id)}>
+        <button
+          aria-label={`${panel.minimized ? "展开" : "折叠"} ${panel.title}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleMinimized(panel.id);
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
           <Minus size={15} />
         </button>
       </header>

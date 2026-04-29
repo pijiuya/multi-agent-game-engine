@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AgentPanel } from "./components/AgentPanel";
 import { FloatingPanel } from "./components/FloatingPanel";
-import { MapStudioPanel } from "./components/MapStudioPanel";
+import { MapStudioPanel, type MapStudioStep } from "./components/MapStudioPanel";
 import { ModelManagerPanel } from "./components/ModelManagerPanel";
 import { PropertiesPanel } from "./components/PropertiesPanel";
+import { RegionDrawPanel } from "./components/RegionDrawPanel";
+import { RegionPanel } from "./components/RegionPanel";
 import { SceneElementsPanel } from "./components/SceneElementsPanel";
 import { SceneViewport } from "./components/SceneViewport";
 import { ToolPanel } from "./components/ToolPanel";
@@ -15,7 +17,12 @@ import {
 } from "./lib/canvasCoords";
 import {
   autoLabelMapRegion,
+  booleanMapRegions,
+  createMapRegion,
   createAgent as createAgentRemote,
+  deleteAgent,
+  deleteMapItem,
+  deleteMapRegion,
   createMapGeneration,
   configureLocalCapability,
   configureRemoteCapability,
@@ -41,7 +48,7 @@ import {
   uploadMapImage,
   wsUrl
 } from "./lib/api";
-import { addAgentLocal, addAreaToMap, addItemToMap, addSpawnToMap, makeId, moveAgentLocal } from "./lib/worldOps";
+import { addAgentLocal, addItemToMap, addRegionToMap, addSpawnToMap, makeId, moveAgentLocal } from "./lib/worldOps";
 import type {
   AgentProfile,
   CanvasPoint,
@@ -50,7 +57,9 @@ import type {
   MapGenerationState,
   MapRatioPreset,
   MapRegion,
+  MapRegionFunction,
   MapSegmentationState,
+  RegionDrawOperation,
   ModelCapabilityId,
   ModelCapabilityStatus,
   ModelCapabilityTask,
@@ -70,15 +79,22 @@ type AnchorMenuState = {
   point: Point;
 };
 
+type ObjectMenuTarget = { kind: "agent" | "item" | "region"; id: string };
+type ObjectMenuState = ObjectMenuTarget & { x: number; y: number };
+
 type ItemPatch = Partial<Omit<WorldItem, "id">>;
 type MapPatch = Partial<Pick<WorldMap, "name" | "width" | "height" | "background_image">>;
 type AgentPatch = Partial<Omit<AgentProfile, "id">>;
-const PANEL_LAYOUT_STORAGE_KEY = "agent-workstation.panel-layout.v1";
+const PANEL_LAYOUT_STORAGE_KEY = "agent-workstation.panel-layout.v2";
 
 export default function App() {
   const [world, setWorld] = useState<WorldSnapshot | null>(null);
   const [selection, setSelection] = useState<SelectionState>({ kind: "map", id: "map_default" });
   const [editTool, setEditTool] = useState<EditTool>("select");
+  const [regionDrawOperation, setRegionDrawOperation] = useState<RegionDrawOperation>("add");
+  const [regionDrawTargetFunction, setRegionDrawTargetFunction] = useState<MapRegionFunction>("walkable");
+  const [activeRegionId, setActiveRegionId] = useState<string | null>(null);
+  const [mapStudioStep, setMapStudioStep] = useState<MapStudioStep>("background");
   const [draftPoints, setDraftPoints] = useState<Point[]>([]);
   const [status, setStatus] = useState("载入中");
   const [appearanceMode, setAppearanceMode] = useState<"light" | "dark">("light");
@@ -90,6 +106,7 @@ export default function App() {
   const [canvasPoints, setCanvasPoints] = useState<CanvasPoint[]>([]);
   const [anchorPoint, setAnchorPoint] = useState<Point | null>(null);
   const [anchorMenu, setAnchorMenu] = useState<AnchorMenuState | null>(null);
+  const [objectMenu, setObjectMenu] = useState<ObjectMenuState | null>(null);
   const [models, setModels] = useState<ModelConfig[]>([]);
   const [modelCapabilityStatuses, setModelCapabilityStatuses] = useState<ModelCapabilityStatus[]>([]);
   const [modelCapabilityTasks, setModelCapabilityTasks] = useState<Partial<Record<ModelCapabilityId, ModelCapabilityTask>>>({});
@@ -103,6 +120,21 @@ export default function App() {
   const pendingLocalItemsRef = useRef<Record<string, WorldItem>>({});
 
   const selectedAgentId = selection.kind === "agent" ? selection.id : null;
+  const activeRegionFunction = useMemo(() => {
+    if (!world) {
+      return regionDrawTargetFunction;
+    }
+    if (editTool === "region") {
+      return regionDrawTargetFunction;
+    }
+    if (selection.kind === "regionLayer") {
+      return selection.id;
+    }
+    if (selection.kind === "region") {
+      return world.map.regions.find((region) => region.id === selection.id)?.function ?? regionDrawTargetFunction;
+    }
+    return regionDrawTargetFunction;
+  }, [editTool, regionDrawTargetFunction, selection, world]);
   const selectedAgentExists = useMemo(() => {
     if (!world || !selectedAgentId) {
       return false;
@@ -175,10 +207,38 @@ export default function App() {
     if (selection.kind === "region" && !world.map.regions.some((region) => region.id === selection.id)) {
       setSelection({ kind: "map", id: world.map.id });
     }
+    if (selection.kind === "regions" && world.map.regions.length === 0) {
+      setSelection({ kind: "map", id: world.map.id });
+    }
+    if (activeRegionId && !world.map.regions.some((region) => region.id === activeRegionId)) {
+      setActiveRegionId(world.map.regions[0]?.id ?? null);
+    }
     if (selection.kind === "point" && !canvasPoints.some((point) => point.id === selection.id)) {
       setSelection({ kind: "map", id: world.map.id });
     }
-  }, [canvasPoints, selection, selectedAgentExists, world]);
+  }, [activeRegionId, canvasPoints, selection, selectedAgentExists, world]);
+
+  useEffect(() => {
+    if (editTool !== "region") {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input, textarea, select")) {
+        return;
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void finalizePolygon();
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setDraftPoints([]);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [draftPoints, editTool, regionDrawOperation, regionDrawTargetFunction, world]);
 
   async function refreshWorld() {
     const snapshot = await getWorld();
@@ -258,6 +318,7 @@ export default function App() {
       return;
     }
     setAnchorMenu(null);
+    setObjectMenu(null);
     if (editTool === "anchor") {
       const snapped = snapWorldPointToGrid(point, canvasView.zoom);
       setAnchorPoint(snapped);
@@ -267,7 +328,7 @@ export default function App() {
       setSelection({ kind: "map", id: world.map.id });
       return;
     }
-    if (editTool === "walkable" || editTool === "obstacle" || editTool === "zone") {
+    if (editTool === "region") {
       setDraftPoints((points) => [...points, snapWorldPointToGrid(point, canvasView.zoom)]);
       return;
     }
@@ -313,13 +374,82 @@ export default function App() {
     if (!world || draftPoints.length < 3) {
       return;
     }
-    const map = addAreaToMap(world.map, editTool, draftPoints);
-    setWorld({ ...world, map });
-    const snapshot = await saveMap(map);
+    if (editTool !== "region") {
+      setDraftPoints([]);
+      return;
+    }
+    setMapStudioStep("layers");
+    const targetLayer = world.map.region_layers.find((layer) => layer.function === regionDrawTargetFunction);
+    const targetRegion = activeRegionId
+      ? world.map.regions.find((region) => region.id === activeRegionId && region.function === regionDrawTargetFunction && !region.hidden) ?? null
+      : null;
+    const booleanTarget = targetRegion
+      ? { targetIds: [targetRegion.id] }
+      : { targetFunction: regionDrawTargetFunction };
+    if (regionDrawOperation === "subtract" && !targetRegion && !targetLayer?.region_ids.length) {
+      setStatus("目标功能层没有可扣减区域");
+      return;
+    }
+    if (regionDrawOperation === "subtract" || targetRegion || targetLayer?.region_ids.length) {
+      const snapshot = await booleanMapRegions({
+        ...booleanTarget,
+        operation: regionDrawOperation === "subtract" ? "subtract" : "union",
+        points: draftPoints
+      });
+      if (snapshot) {
+        setWorld(snapshot);
+        const nextTargetRegion = targetRegion
+          ? snapshot.map.regions.find((region) => region.id === targetRegion.id)
+          : null;
+        if (nextTargetRegion) {
+          setActiveRegionId(nextTargetRegion.id);
+          setSelection({ kind: "region", id: nextTargetRegion.id });
+          setStatus(regionDrawOperation === "subtract" ? "选中区域已扣减" : "选中区域已扩展");
+        } else {
+          const nextLayer = snapshot.map.region_layers.find((layer) => layer.function === regionDrawTargetFunction);
+          const nextSelectedRegion = nextLayer?.region_ids[0]
+            ? snapshot.map.regions.find((region) => region.id === nextLayer.region_ids[0])
+            : null;
+          setActiveRegionId(nextSelectedRegion?.id ?? null);
+          setSelection({ kind: "regionLayer", id: regionDrawTargetFunction });
+          setStatus(regionDrawOperation === "subtract" ? "区域已扣减" : "区域已扩展");
+        }
+        setDraftPoints([]);
+      } else {
+        if (regionDrawOperation === "add" && !targetRegion) {
+          const result = addRegionToMap(world.map, draftPoints, regionDrawTargetFunction);
+          setWorld({ ...world, map: result.map });
+          setActiveRegionId(result.region.id);
+          setSelection({ kind: "regionLayer", id: regionDrawTargetFunction });
+          setStatus("本地手绘区域");
+          setDraftPoints([]);
+          return;
+        }
+        setStatus("区域布尔保存失败，草稿已保留");
+      }
+      return;
+    }
+    const snapshot = await createMapRegion({
+      name: `${regionFunctionLabel(regionDrawTargetFunction)}手绘区域`,
+      points: draftPoints,
+      function: regionDrawTargetFunction,
+      notes: `手绘增加到${regionFunctionLabel(regionDrawTargetFunction)}。`
+    });
     if (snapshot) {
       setWorld(snapshot);
+      const created = snapshot.map.regions.find((region) => region.function === regionDrawTargetFunction) ?? snapshot.map.regions[0];
+      setActiveRegionId(created?.id ?? null);
+      setSelection({ kind: "regionLayer", id: regionDrawTargetFunction });
+      setStatus("手绘区域已创建");
+      setDraftPoints([]);
+    } else {
+      const result = addRegionToMap(world.map, draftPoints, regionDrawTargetFunction);
+      setWorld({ ...world, map: result.map });
+      setActiveRegionId(result.region.id);
+      setSelection({ kind: "regionLayer", id: regionDrawTargetFunction });
+      setStatus("本地手绘区域");
+      setDraftPoints([]);
     }
-    setDraftPoints([]);
   }
 
   async function createAgent(name: string, role: string, point: Point) {
@@ -353,6 +483,35 @@ export default function App() {
     setCanvasView((view) => centerViewOnWorldPoint(view, point, center));
   }
 
+  function selectFromWorld(next: SelectionState) {
+    if (next.kind === "region") {
+      setActiveRegionId(next.id);
+      setMapStudioStep("layers");
+      const region = world?.map.regions.find((candidate) => candidate.id === next.id);
+      if (region) {
+        setRegionDrawTargetFunction(region.function);
+      }
+    }
+    if (next.kind === "regionLayer") {
+      setActiveRegionId(null);
+      setRegionDrawTargetFunction(next.id);
+    }
+    if (next.kind === "regions") {
+      setMapStudioStep("layers");
+    }
+    setSelection(next);
+  }
+
+  function activateRegion(regionId: string) {
+    const region = world?.map.regions.find((candidate) => candidate.id === regionId);
+    setActiveRegionId(regionId);
+    if (region) {
+      setRegionDrawTargetFunction(region.function);
+    }
+    setSelection({ kind: "region", id: regionId });
+    setMapStudioStep("layers");
+  }
+
   function locateAgent(agentId: string) {
     if (!world) {
       return;
@@ -366,8 +525,87 @@ export default function App() {
   }
 
   function openAnchorMenu(screen: Point, point: Point) {
+    setObjectMenu(null);
     setAnchorPoint(point);
     setAnchorMenu({ x: screen.x, y: screen.y, point });
+  }
+
+  function openObjectMenu(target: ObjectMenuTarget, screen: Point) {
+    setAnchorMenu(null);
+    if (target.kind === "agent") {
+      setSelection({ kind: "agent", id: target.id });
+    } else if (target.kind === "item") {
+      setSelection({ kind: "item", id: target.id });
+    } else {
+      activateRegion(target.id);
+    }
+    setObjectMenu({ ...target, x: screen.x, y: screen.y });
+  }
+
+  async function setObjectHidden(target: ObjectMenuTarget, hidden: boolean) {
+    setObjectMenu(null);
+    if (target.kind === "agent") {
+      await updateAgentProfile(target.id, { hidden });
+      setStatus(hidden ? "Agent 已隐藏" : "Agent 已显示");
+      return;
+    }
+    if (target.kind === "item") {
+      await updateItemPatch(target.id, { hidden });
+      setStatus(hidden ? "元素已隐藏" : "元素已显示");
+      return;
+    }
+    await updateRegion(target.id, { hidden });
+    setStatus(hidden ? "区域已隐藏" : "区域已显示");
+  }
+
+  async function deleteObject(target: ObjectMenuTarget) {
+    if (!world) {
+      return;
+    }
+    setObjectMenu(null);
+    if (target.kind === "agent") {
+      clearPendingAgent(target.id);
+      setWorld(deleteAgentLocal(world, target.id));
+      setSelection({ kind: "map", id: world.map.id });
+      const snapshot = await deleteAgent(target.id);
+      if (snapshot) {
+        setWorld(mergeSnapshotWithLocalState(snapshot, pendingState(pendingMapPatchRef, pendingAgentPatchesRef, pendingItemPatchesRef, pendingLocalItemsRef)));
+        setStatus("Agent 已删除");
+      } else {
+        setStatus("本地已删除 Agent");
+      }
+      return;
+    }
+    if (target.kind === "item") {
+      clearPendingItemPatch(pendingItemPatchesRef, target.id);
+      clearPendingLocalItem(pendingLocalItemsRef, target.id);
+      setWorld(deleteItemLocal(world, target.id));
+      setSelection({ kind: "map", id: world.map.id });
+      const snapshot = await deleteMapItem(target.id);
+      if (snapshot) {
+        setWorld(mergeSnapshotWithLocalState(snapshot, pendingState(pendingMapPatchRef, pendingAgentPatchesRef, pendingItemPatchesRef, pendingLocalItemsRef)));
+        setStatus("元素已删除");
+      } else {
+        setStatus("本地已删除元素");
+      }
+      return;
+    }
+    setWorld(deleteRegionLocal(world, target.id));
+    setActiveRegionId(null);
+    setSelection({ kind: "map", id: world.map.id });
+    const snapshot = await deleteMapRegion(target.id);
+    if (snapshot) {
+      setWorld(snapshot);
+      setStatus("区域已删除");
+    } else {
+      setStatus("本地已删除区域");
+    }
+  }
+
+  function clearPendingAgent(agentId: string) {
+    const next = { ...pendingAgentPatchesRef.current };
+    delete next[agentId];
+    pendingAgentPatchesRef.current = next;
   }
 
   async function generateAgentFromAnchor(point: Point) {
@@ -495,9 +733,11 @@ export default function App() {
       setSegmentation(result.segmentation);
       setSelection(
         result.world.map.regions[0]
-          ? { kind: "region", id: result.world.map.regions[0].id }
+          ? { kind: "regions", id: "all" }
           : { kind: "map", id: result.world.map.id }
       );
+      setActiveRegionId(result.world.map.regions[0]?.id ?? null);
+      setMapStudioStep("layers");
       const prefix = result.segmentation.mode === "mock" ? "测试 Mock SAM" : "SAM";
       setStatus(`${prefix} 分层完成`);
       return;
@@ -514,7 +754,9 @@ export default function App() {
           regions: createLocalRegions(current.map.width, current.map.height)
         });
         const nextWorld = { ...current, map: nextMap };
-        setSelection(nextMap.regions[0] ? { kind: "region", id: nextMap.regions[0].id } : { kind: "map", id: nextMap.id });
+        setSelection(nextMap.regions[0] ? { kind: "regions", id: "all" } : { kind: "map", id: nextMap.id });
+        setActiveRegionId(nextMap.regions[0]?.id ?? null);
+        setMapStudioStep("layers");
         setSegmentation({
           status: "done",
           progress: 100,
@@ -536,6 +778,8 @@ export default function App() {
 
   async function updateRegion(regionId: string, patch: Partial<Omit<MapRegion, "id" | "points" | "source">>) {
     setSelection({ kind: "region", id: regionId });
+    setActiveRegionId(regionId);
+    setMapStudioStep("layers");
     setWorld((current) => (current ? applyRegionPatch(current, regionId, patch) : current));
     const snapshot = await patchMapRegion(regionId, patch);
     if (snapshot) {
@@ -827,6 +1071,14 @@ export default function App() {
     );
   }
 
+  function openPanel(id: PanelState["id"]) {
+    setPanels((current) => {
+      const nextZ = maxPanelZ(current) + 1;
+      setZCursor(nextZ);
+      return current.map((panel) => (panel.id === id ? { ...panel, minimized: false, zIndex: nextZ } : panel));
+    });
+  }
+
   function setZoom(direction: 1 | -1) {
     setCanvasView((view) => ({
       ...view,
@@ -852,11 +1104,22 @@ export default function App() {
         selection={selection}
         canvasPoints={canvasPoints}
         anchorPoint={anchorPoint}
+        showRegions={
+          editTool === "region" ||
+          mapStudioStep === "layers" ||
+          selection.kind === "region" ||
+          selection.kind === "regionLayer" ||
+          selection.kind === "regions"
+        }
+        showAllRegionLayers={selection.kind === "regions"}
+        activeRegionFunction={activeRegionFunction}
+        activeRegionId={activeRegionId}
         status={status}
         onViewChange={setCanvasView}
         onWorldPoint={(point) => void handleWorldClick(point)}
-        onSelect={setSelection}
+        onSelect={(next) => selectFromWorld(next)}
         onAnchorContext={openAnchorMenu}
+        onObjectContext={(target, screen) => openObjectMenu(target, screen)}
         draftPoints={draftPoints}
         onRenameAgent={(agentId, name) => void updateAgentProfile(agentId, { name })}
         onPreviewItem={previewItemPatch}
@@ -886,6 +1149,16 @@ export default function App() {
         </div>
       ) : null}
 
+      {objectMenu ? (
+        <ObjectContextMenu
+          menu={objectMenu}
+          target={objectMenuTarget(world, objectMenu)}
+          onClose={() => setObjectMenu(null)}
+          onDelete={() => void deleteObject(objectMenu)}
+          onHidden={(hidden) => void setObjectHidden(objectMenu, hidden)}
+        />
+      ) : null}
+
       {panels.map((panel) => (
         <FloatingPanel
           key={panel.id}
@@ -899,25 +1172,58 @@ export default function App() {
           {panel.id === "tools" ? (
             <ToolPanel
               editTool={editTool}
-              draftCount={draftPoints.length}
               zoomPercent={Math.round(canvasView.zoom * 100)}
               onEditTool={(tool) => {
                 setEditTool(tool);
-                if (tool !== "walkable" && tool !== "obstacle" && tool !== "zone") {
+                if (tool !== "region") {
                   setDraftPoints([]);
+                }
+                if (tool === "region") {
+                  setMapStudioStep("layers");
+                  openPanel("regionDraw");
+                  openPanel("regions");
                 }
               }}
               onStep={() => void handleStep()}
               onSave={() => void handleSave()}
               onZoom={setZoom}
               onFit={() => setCanvasView({ zoom: 1, pan: { x: 0, y: 0 }, fitMode: true })}
-              onFinalizePolygon={() => void finalizePolygon()}
-              onClearDraft={() => setDraftPoints([])}
               onUpload={(file) => void handleUpload(file)}
             />
           ) : null}
           {panel.id === "scene" ? (
-            <SceneElementsPanel world={world} selection={selection} canvasPoints={canvasPoints} onSelect={setSelection} />
+            <SceneElementsPanel
+              world={world}
+              selection={selection}
+              canvasPoints={canvasPoints}
+              onSelect={selectFromWorld}
+              onObjectContext={(target, screen) => openObjectMenu(target, screen)}
+            />
+          ) : null}
+          {panel.id === "regions" ? (
+            <RegionPanel
+              world={world}
+              selection={selection}
+              onSelect={selectFromWorld}
+              onObjectContext={(target, screen) => openObjectMenu(target, screen)}
+            />
+          ) : null}
+          {panel.id === "regionDraw" ? (
+            <RegionDrawPanel
+              operation={regionDrawOperation}
+              targetFunction={regionDrawTargetFunction}
+              targetLayer={world.map.region_layers.find((layer) => layer.function === regionDrawTargetFunction) ?? null}
+              draftCount={draftPoints.length}
+              onOperation={setRegionDrawOperation}
+              onTargetFunction={(fn) => {
+                setRegionDrawTargetFunction(fn);
+                setActiveRegionId(null);
+                setSelection({ kind: "regionLayer", id: fn });
+              }}
+              onFinish={() => void finalizePolygon()}
+              onUndoPoint={() => setDraftPoints((points) => points.slice(0, -1))}
+              onClear={() => setDraftPoints([])}
+            />
           ) : null}
           {panel.id === "agents" ? (
             <AgentPanel
@@ -945,6 +1251,8 @@ export default function App() {
             <MapStudioPanel
               world={world}
               models={models}
+              activeStep={mapStudioStep}
+              activeRegionId={activeRegionId}
               selection={selection}
               generation={generation}
               segmentation={segmentation}
@@ -953,10 +1261,11 @@ export default function App() {
               onUploadMap={(file) => void handleUpload(file)}
               onSelectCandidate={(candidateId) => void selectMapCandidate(candidateId)}
               onSegment={() => void runMapSegmentation()}
-              onSelect={setSelection}
+              onSelect={selectFromWorld}
+              onActivateRegion={activateRegion}
+              onActiveStepChange={setMapStudioStep}
               onUpdateRegion={(regionId, patch) => void updateRegion(regionId, patch)}
               onRegenerateRegion={(regionId, prompt) => void regenerateRegion(regionId, prompt)}
-              onAutoLabelRegion={(regionId) => void autoLabelRegion(regionId)}
             />
           ) : null}
           {panel.id === "properties" ? (
@@ -980,6 +1289,61 @@ export default function App() {
   );
 }
 
+function ObjectContextMenu({
+  menu,
+  target,
+  onClose,
+  onDelete,
+  onHidden
+}: {
+  menu: ObjectMenuState;
+  target: { name: string; hidden: boolean; label: string } | null;
+  onClose: () => void;
+  onDelete: () => void;
+  onHidden: (hidden: boolean) => void;
+}) {
+  const hidden = Boolean(target?.hidden);
+  return (
+    <div
+      className="object-context-menu"
+      data-testid="object-context-menu"
+      onClick={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.preventDefault()}
+      style={{ left: menu.x, top: menu.y }}
+    >
+      <div className="context-menu-heading">
+        <span>{target?.name ?? "对象"}</span>
+        <small>{target?.label ?? objectKindLabel(menu.kind)}</small>
+      </div>
+      <button onClick={() => onHidden(!hidden)}>{hidden ? "显示" : "隐藏"}</button>
+      <button className="danger" onClick={onDelete}>删除</button>
+      <button onClick={onClose}>取消</button>
+    </div>
+  );
+}
+
+function objectMenuTarget(world: WorldSnapshot, menu: ObjectMenuTarget) {
+  if (menu.kind === "agent") {
+    const agent = world.agent_profiles[menu.id];
+    return agent ? { name: agent.name, hidden: agent.hidden, label: "Agent" } : null;
+  }
+  if (menu.kind === "item") {
+    const item = world.map.items.find((candidate) => candidate.id === menu.id);
+    return item ? { name: item.name, hidden: item.hidden, label: "元素" } : null;
+  }
+  const region = world.map.regions.find((candidate) => candidate.id === menu.id);
+  return region ? { name: region.name, hidden: region.hidden, label: "区域轮廓" } : null;
+}
+
+function objectKindLabel(kind: ObjectMenuTarget["kind"]) {
+  const labels: Record<ObjectMenuTarget["kind"], string> = {
+    agent: "Agent",
+    item: "元素",
+    region: "区域轮廓"
+  };
+  return labels[kind];
+}
+
 function createInitialPanels(): PanelState[] {
   const width = typeof window === "undefined" ? 1280 : window.innerWidth;
   const height = typeof window === "undefined" ? 820 : window.innerHeight;
@@ -987,6 +1351,8 @@ function createInitialPanels(): PanelState[] {
     return [
       makePanel("tools", "工具", 16, 84, 96, 552, 44),
       makePanel("scene", "场景列表", 16, 282, Math.min(340, width - 32), 220, 43),
+      makePanel("regions", "区域", 16, 522, Math.min(340, width - 32), 260, 46),
+      makePanel("regionDraw", "区域绘制", 16, 562, Math.min(340, width - 32), 260, 47),
       makePanel("agents", "Agent 面板", 16, 522, Math.min(340, width - 32), 220, 42),
       makePanel("mapStudio", "地图工作台", 16, Math.max(684, height - 152), Math.min(340, width - 32), 280, 45),
       makePanel("models", "模型管理", 16, Math.max(704, height - 152), Math.min(340, width - 32), 280, 41),
@@ -996,6 +1362,8 @@ function createInitialPanels(): PanelState[] {
   return [
     makePanel("tools", "工具", 42, 126, 96, 552, 44),
     makePanel("scene", "场景列表", 42, 348, 304, 340, 43),
+    makePanel("regions", "区域", 520, 92, 340, 236, 46),
+    makePanel("regionDraw", "区域绘制", 520, 350, 340, 250, 47),
     makePanel("agents", "Agent 面板", Math.max(380, width - 388), 92, 340, 316, 42),
     makePanel("mapStudio", "地图工作台", 154, Math.max(500, height - 312), 340, 296, 45),
     makePanel("models", "模型管理", 520, Math.max(500, height - 312), 360, 296, 41),
@@ -1010,9 +1378,10 @@ function makePanel(
   y: number,
   width: number,
   height: number,
-  zIndex: number
+  zIndex: number,
+  minimized = false
 ): PanelState {
-  return { id, title, x, y, width, height, minimized: false, dockedTo: null, zIndex };
+  return { id, title, x, y, width, height, minimized, dockedTo: null, zIndex };
 }
 
 function loadPanelLayout(defaultPanels: PanelState[]): PanelState[] {
@@ -1185,6 +1554,38 @@ function applyRegionPatch(world: WorldSnapshot, regionId: string, patch: Partial
   };
 }
 
+function deleteAgentLocal(world: WorldSnapshot, agentId: string): WorldSnapshot {
+  const { [agentId]: _profile, ...agentProfiles } = world.agent_profiles;
+  const { [agentId]: _state, ...agentStates } = world.agent_states;
+  return {
+    ...world,
+    agent_profiles: agentProfiles,
+    agent_states: agentStates,
+    relationships: world.relationships.filter((relationship) => relationship.from_agent !== agentId && relationship.to_agent !== agentId),
+    memories: world.memories.filter((memory) => memory.agent_id !== agentId)
+  };
+}
+
+function deleteItemLocal(world: WorldSnapshot, itemId: string): WorldSnapshot {
+  return {
+    ...world,
+    map: {
+      ...world.map,
+      items: world.map.items.filter((item) => item.id !== itemId)
+    }
+  };
+}
+
+function deleteRegionLocal(world: WorldSnapshot, regionId: string): WorldSnapshot {
+  return {
+    ...world,
+    map: syncFunctionalRegions({
+      ...world.map,
+      regions: world.map.regions.filter((region) => region.id !== regionId)
+    })
+  };
+}
+
 function mapPrompt(prompt: string, width: number, height: number, ratio: MapRatioPreset) {
   return [
     "生成稳定的 2D 游戏背景图，俯视或轻等距视角，无文字，无 UI，无角色，边界清晰，适合后续 SAM 分区。",
@@ -1200,6 +1601,19 @@ function enabledModelForCapability(models: ModelConfig[], capability: ModelConfi
     return matching.find((model) => model.provider === "embedded-mobile-sam") ?? matching[0] ?? null;
   }
   return matching[0] ?? null;
+}
+
+function regionFunctionLabel(value: MapRegionFunction) {
+  const labels: Record<MapRegionFunction, string> = {
+    walkable: "道路",
+    obstacle: "不可通过",
+    action: "行动区",
+    residential: "居住区",
+    social: "社交区",
+    custom: "自定义",
+    unassigned: "未设定"
+  };
+  return labels[value];
 }
 
 function mergeCapabilityStatus(statuses: ModelCapabilityStatus[], next: ModelCapabilityStatus): ModelCapabilityStatus[] {
@@ -1260,6 +1674,7 @@ function createLocalRegions(width: number, height: number): MapRegion[] {
       name: "主道路",
       function: "walkable",
       source: "local_mock_sam",
+      holes: [],
       points: [
         { x: width * 0.06, y: height * 0.58 },
         { x: width * 0.28, y: height * 0.47 },
@@ -1273,13 +1688,15 @@ function createLocalRegions(width: number, height: number): MapRegion[] {
       image_prompt: "",
       notes: "本地 mock 识别为主要移动路径。",
       confidence: 0.86,
-      tags: ["道路", "移动"]
+      tags: ["道路", "移动"],
+      hidden: false
     },
     {
       id: makeId("region"),
       name: "左上居住区",
       function: "residential",
       source: "local_mock_sam",
+      holes: [],
       points: [
         { x: width * 0.1, y: height * 0.12 },
         { x: width * 0.34, y: height * 0.12 },
@@ -1289,13 +1706,15 @@ function createLocalRegions(width: number, height: number): MapRegion[] {
       image_prompt: "",
       notes: "适合放置 agent 起居和身份相关物件。",
       confidence: 0.78,
-      tags: ["居住"]
+      tags: ["居住"],
+      hidden: false
     },
     {
       id: makeId("region"),
       name: "右侧社交广场",
       function: "social",
       source: "local_mock_sam",
+      holes: [],
       points: [
         { x: width * 0.62, y: height * 0.16 },
         { x: width * 0.87, y: height * 0.16 },
@@ -1305,13 +1724,15 @@ function createLocalRegions(width: number, height: number): MapRegion[] {
       image_prompt: "",
       notes: "开放区域，适合社交、对话和公共事件。",
       confidence: 0.82,
-      tags: ["社交", "公共"]
+      tags: ["社交", "公共"],
+      hidden: false
     },
     {
       id: makeId("region"),
       name: "中心景观障碍",
       function: "obstacle",
       source: "local_mock_sam",
+      holes: [],
       points: [
         { x: width * 0.41, y: height * 0.28 },
         { x: width * 0.51, y: height * 0.28 },
@@ -1323,42 +1744,45 @@ function createLocalRegions(width: number, height: number): MapRegion[] {
       image_prompt: "",
       notes: "中心实体结构，默认不可穿过。",
       confidence: 0.8,
-      tags: ["障碍"]
+      tags: ["障碍"],
+      hidden: false
     }
   ];
 }
 
 function syncFunctionalRegions(map: WorldMap): WorldMap {
-  const baseWalkable = map.walkable_areas.filter((area) => !area.metadata?.generated);
-  const baseObstacles = map.obstacles.filter((area) => !area.metadata?.generated);
-  const baseZones = map.interaction_zones.filter((area) => !area.metadata?.generated);
-  return map.regions.reduce(
-    (current, region) => {
-      const area = regionToArea(region);
-      if (!area) {
-        return current;
-      }
-      if (region.function === "walkable") {
-        return { ...current, walkable_areas: [...current.walkable_areas, area] };
-      }
-      if (region.function === "obstacle") {
-        return { ...current, obstacles: [...current.obstacles, area] };
-      }
-      return { ...current, interaction_zones: [...current.interaction_zones, area] };
-    },
-    { ...map, walkable_areas: baseWalkable, obstacles: baseObstacles, interaction_zones: baseZones }
-  );
+  const walkable_areas: PolygonArea[] = [];
+  const obstacles: PolygonArea[] = [];
+  const interaction_zones: PolygonArea[] = [];
+  for (const region of map.regions) {
+    if (region.hidden) {
+      continue;
+    }
+    const area = regionToArea(region);
+    if (!area) {
+      continue;
+    }
+    if (region.function === "walkable" || region.function === "action") {
+      walkable_areas.push(area);
+    } else if (region.function === "obstacle") {
+      obstacles.push(area);
+    } else if (region.function === "social") {
+      interaction_zones.push(area);
+    }
+  }
+  return { ...map, walkable_areas, obstacles, interaction_zones, region_layers: buildFallbackRegionLayers(map.regions) };
 }
 
 function regionToArea(region: MapRegion): PolygonArea | null {
-  if (!["walkable", "obstacle", "social"].includes(region.function)) {
+  if (!["walkable", "action", "obstacle", "social"].includes(region.function)) {
     return null;
   }
   return {
     id: `area_${region.id}`,
     name: region.name,
-    kind: region.function === "social" ? "zone" : region.function,
+    kind: region.function === "social" ? "zone" : region.function === "action" ? "walkable" : region.function,
     points: region.points,
+    holes: region.holes,
     metadata: {
       generated: true,
       region_id: region.id,
@@ -1367,6 +1791,27 @@ function regionToArea(region: MapRegion): PolygonArea | null {
       notes: region.notes
     }
   };
+}
+
+function buildFallbackRegionLayers(regions: MapRegion[]): WorldMap["region_layers"] {
+  const labels: Record<MapRegionFunction, string> = {
+    walkable: "道路",
+    obstacle: "不可通过",
+    action: "行动区",
+    residential: "居住区",
+    social: "社交区",
+    custom: "自定义",
+    unassigned: "未设定"
+  };
+  return (Object.keys(labels) as MapRegionFunction[]).map((fn) => {
+    const matches = regions.filter((region) => region.function === fn && !region.hidden);
+    return {
+      function: fn,
+      label: labels[fn],
+      region_ids: matches.map((region) => region.id),
+      polygons: matches.map((region) => ({ points: region.points, holes: region.holes ?? [] }))
+    };
+  });
 }
 
 type PendingState = {

@@ -102,6 +102,7 @@ class AgentPatch(BaseModel):
     color: str | None = None
     model_provider: str | None = None
     action_space: list[str] | None = None
+    hidden: bool | None = None
 
 
 class WorldItemPatch(BaseModel):
@@ -114,6 +115,7 @@ class WorldItemPatch(BaseModel):
     description: str | None = None
     tags: list[str] | None = None
     state: dict[str, Any] | None = None
+    hidden: bool | None = None
 
 
 class ModelConfigPayload(BaseModel):
@@ -165,6 +167,37 @@ class RegionPatch(BaseModel):
     notes: str | None = None
     tags: list[str] | None = None
     confidence: float | None = None
+    hidden: bool | None = None
+
+
+class RegionCreate(BaseModel):
+    name: str = "手绘区域"
+    points: list[dict[str, float]]
+    holes: list[list[dict[str, float]]] = Field(default_factory=list)
+    function: str = "unassigned"
+    image_prompt: str = ""
+    notes: str = ""
+    tags: list[str] = Field(default_factory=list)
+
+
+class RegionBooleanPayload(BaseModel):
+    target_ids: list[str] = Field(default_factory=list)
+    target_function: str | None = None
+    operation: str = "union"
+    points: list[dict[str, float]]
+    holes: list[list[dict[str, float]]] = Field(default_factory=list)
+
+
+REGION_FUNCTION_LABELS = {
+    "walkable": "道路",
+    "obstacle": "不可通过",
+    "action": "行动区",
+    "residential": "居住区",
+    "social": "社交区",
+    "custom": "自定义",
+    "unassigned": "未设定",
+}
+REGION_FUNCTIONS = set(REGION_FUNCTION_LABELS)
 
 
 generation_tasks: dict[str, dict[str, Any]] = {}
@@ -466,15 +499,135 @@ def segment_map() -> dict[str, Any]:
     return {"world": runtime.snapshot(), "segmentation": segmentation}
 
 
+@app.post("/api/map/regions")
+def create_region(payload: RegionCreate) -> dict[str, Any]:
+    points = [Point.from_dict(point) for point in payload.points]
+    holes = [
+        [Point.from_dict(point) for point in hole]
+        for hole in payload.holes
+    ]
+    if len(points) < 3:
+        raise HTTPException(status_code=400, detail="区域至少需要 3 个点")
+    if payload.function not in REGION_FUNCTIONS:
+        raise HTTPException(status_code=400, detail="未知区域功能")
+    region = MapRegion(
+        id=new_id("region"),
+        name=payload.name,
+        points=points,
+        holes=holes,
+        source="manual",
+        function=payload.function,
+        image_prompt=payload.image_prompt,
+        notes=payload.notes or "手绘区域。",
+        confidence=1.0,
+        tags=payload.tags or ["手绘"],
+    )
+    runtime.world.map.regions = _normalize_region_overlaps(
+        [region, *runtime.world.map.regions],
+        priority_functions=[region.function],
+        priority_ids=[region.id],
+    )
+    runtime.world.map.sync_functional_regions()
+    store.save_world(runtime.world)
+    return runtime.snapshot()
+
+
+@app.post("/api/map/regions/boolean")
+def boolean_regions(payload: RegionBooleanPayload) -> dict[str, Any]:
+    if payload.operation not in {"union", "subtract"}:
+        raise HTTPException(status_code=400, detail="区域布尔操作只支持 union/subtract")
+    brush = _polygon_from_points(
+        [Point.from_dict(point) for point in payload.points],
+        [
+            [Point.from_dict(point) for point in hole]
+            for hole in payload.holes
+        ],
+    )
+    if brush.is_empty:
+        raise HTTPException(status_code=400, detail="绘制区域无效")
+    if payload.target_function:
+        if payload.target_function not in REGION_FUNCTIONS:
+            raise HTTPException(status_code=400, detail="未知区域功能")
+        if payload.operation == "union":
+            label = REGION_FUNCTION_LABELS[payload.target_function]
+            region = MapRegion(
+                id=new_id("region"),
+                name=f"{label}手绘区域",
+                points=[Point.from_dict(point) for point in payload.points],
+                holes=[
+                    [Point.from_dict(point) for point in hole]
+                    for hole in payload.holes
+                ],
+                source="manual",
+                function=payload.target_function,
+                notes=f"手绘增加到{label}。",
+                confidence=1.0,
+                tags=["手绘", label],
+            )
+            runtime.world.map.regions = _normalize_region_overlaps(
+                [region, *runtime.world.map.regions],
+                priority_functions=[payload.target_function],
+                priority_ids=[region.id],
+            )
+        else:
+            target_ids = [region.id for region in runtime.world.map.regions if region.function == payload.target_function and not region.hidden]
+            if not target_ids:
+                raise HTTPException(status_code=404, detail="目标功能层没有可扣减区域")
+            runtime.world.map.regions = _apply_region_boolean(
+                runtime.world.map.regions,
+                target_ids=target_ids,
+                brush=brush,
+                operation="subtract",
+                priority_functions=[payload.target_function],
+            )
+        runtime.world.map.sync_functional_regions()
+        store.save_world(runtime.world)
+        return runtime.snapshot()
+    target_ids = [region_id for region_id in payload.target_ids if runtime.world.map.region_by_id(region_id)]
+    if not target_ids:
+        raise HTTPException(status_code=404, detail="没有找到可编辑区域")
+    target_region = runtime.world.map.region_by_id(target_ids[0])
+    runtime.world.map.regions = _apply_region_boolean(
+        runtime.world.map.regions,
+        target_ids=target_ids,
+        brush=brush,
+        operation=payload.operation,
+        priority_functions=[target_region.function] if target_region else None,
+    )
+    runtime.world.map.sync_functional_regions()
+    store.save_world(runtime.world)
+    return runtime.snapshot()
+
+
 @app.patch("/api/map/regions/{region_id}")
 def patch_region(region_id: str, payload: RegionPatch) -> dict[str, Any]:
     region = runtime.world.map.region_by_id(region_id)
     if region is None:
         raise HTTPException(status_code=404, detail="Region not found")
     data = _payload_data(payload)
+    if "function" in data and data["function"] not in REGION_FUNCTIONS:
+        raise HTTPException(status_code=400, detail="未知区域功能")
     for field_name, value in data.items():
         setattr(region, field_name, value)
+    if "function" in data:
+        runtime.world.map.regions = _normalize_region_overlaps(
+            runtime.world.map.regions,
+            priority_functions=[region.function],
+            priority_ids=[region.id],
+        )
     runtime.world.map.sync_functional_regions()
+    store.save_world(runtime.world)
+    return runtime.snapshot()
+
+
+@app.delete("/api/map/regions/{region_id}")
+def delete_region(region_id: str) -> dict[str, Any]:
+    region = runtime.world.map.region_by_id(region_id)
+    if region is None:
+        raise HTTPException(status_code=404, detail="Region not found")
+    runtime.world.map.regions = [candidate for candidate in runtime.world.map.regions if candidate.id != region_id]
+    runtime.world.map.sync_functional_regions()
+    runtime.world.add_event("system", f"区域 {region.name} 已删除。")
     store.save_world(runtime.world)
     return runtime.snapshot()
 
@@ -567,6 +720,24 @@ def patch_agent(agent_id: str, payload: AgentPatch) -> dict[str, Any]:
     return runtime.snapshot()
 
 
+@app.delete("/api/agents/{agent_id}")
+def delete_agent(agent_id: str) -> dict[str, Any]:
+    profile = runtime.world.agent_profiles.get(agent_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    runtime.world.agent_profiles.pop(agent_id, None)
+    runtime.world.agent_states.pop(agent_id, None)
+    runtime.world.relationships = [
+        relationship
+        for relationship in runtime.world.relationships
+        if relationship.from_agent != agent_id and relationship.to_agent != agent_id
+    ]
+    runtime.world.memories = [memory for memory in runtime.world.memories if memory.agent_id != agent_id]
+    runtime.world.add_event("system", f"Agent {profile.name} 已删除。", agent_id=agent_id)
+    store.save_world(runtime.world)
+    return runtime.snapshot()
+
+
 @app.patch("/api/map/items/{item_id}")
 def patch_item(item_id: str, payload: WorldItemPatch) -> dict[str, Any]:
     item = runtime.world.map.item_by_id(item_id)
@@ -577,6 +748,17 @@ def patch_item(item_id: str, payload: WorldItemPatch) -> dict[str, Any]:
         item.position = Point.from_dict(data.pop("position"))
     for field_name, value in data.items():
         setattr(item, field_name, value)
+    store.save_world(runtime.world)
+    return runtime.snapshot()
+
+
+@app.delete("/api/map/items/{item_id}")
+def delete_item(item_id: str) -> dict[str, Any]:
+    item = runtime.world.map.item_by_id(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    runtime.world.map.items = [candidate for candidate in runtime.world.map.items if candidate.id != item_id]
+    runtime.world.add_event("system", f"元素 {item.name} 已删除。")
     store.save_world(runtime.world)
     return runtime.snapshot()
 
@@ -1370,6 +1552,11 @@ def _regions_from_provider_response(data: Any, config: dict[str, Any]) -> list[M
                 function=str(raw.get("function") or "unassigned"),
                 source=str(raw.get("source") or config.get("id") or "sam_http"),
                 points=points,
+                holes=[
+                    [Point.from_dict(point) for point in hole]
+                    for hole in raw.get("holes", [])
+                    if isinstance(hole, list)
+                ],
                 image_prompt=str(raw.get("image_prompt") or raw.get("imagePrompt") or ""),
                 notes=str(raw.get("notes") or raw.get("description") or ""),
                 confidence=float(raw.get("confidence") or 0),
@@ -1400,7 +1587,168 @@ def _postprocess_regions(regions: list[MapRegion]) -> list[MapRegion]:
         region.points = _remove_near_duplicate_points(region.points, min_distance=1.0)
         if len(region.points) >= 3 and _polygon_area(region.points) >= 64:
             next_regions.append(region)
+    return _normalize_region_overlaps(next_regions)
+
+
+def _apply_region_boolean(
+    regions: list[MapRegion],
+    target_ids: list[str],
+    brush: Any,
+    operation: str,
+    priority_functions: list[str] | None = None,
+) -> list[MapRegion]:
+    targets = [region for region in regions if region.id in set(target_ids)]
+    if not targets:
+        return regions
+    untouched = [region for region in regions if region.id not in set(target_ids)]
+    if operation == "union":
+        base = _unary_union([_region_to_geometry(region) for region in targets])
+        result_geometry = base.union(brush)
+        replacement = _regions_from_geometry(targets[0], result_geometry)
+        if not replacement:
+            raise HTTPException(status_code=400, detail="区域合并后没有可保存的有效范围")
+        return _normalize_region_overlaps(
+            [*replacement, *untouched],
+            priority_functions=priority_functions,
+            priority_ids=[region.id for region in replacement],
+        )
+    replacements: list[MapRegion] = []
+    for target in targets:
+        replacements.extend(_regions_from_geometry(target, _region_to_geometry(target).difference(brush)))
+    if not replacements:
+        return _normalize_region_overlaps(
+            untouched,
+            priority_functions=priority_functions,
+        )
+    return _normalize_region_overlaps(
+        [*replacements, *untouched],
+        priority_functions=priority_functions,
+        priority_ids=[region.id for region in replacements],
+    )
+
+
+def _normalize_region_overlaps(
+    regions: list[MapRegion],
+    priority_functions: list[str] | None = None,
+    priority_ids: list[str] | None = None,
+) -> list[MapRegion]:
+    priority_functions = priority_functions or []
+    priority_ids = priority_ids or []
+    seen: set[str] = set()
+    ordered = [
+        *[
+            region
+            for function in priority_functions
+            for region in regions
+            if region.function == function and not region.hidden and not (region.id in seen or seen.add(region.id))
+        ],
+        *[
+            region
+            for region_id in priority_ids
+            for region in regions
+            if region.id == region_id and not region.hidden and not (region.id in seen or seen.add(region.id))
+        ],
+        *[region for region in regions if not region.hidden and not (region.id in seen or seen.add(region.id))],
+        *[region for region in regions if region.hidden and not (region.id in seen or seen.add(region.id))],
+    ]
+    occupied_by_function: dict[str, Any] = {}
+    normalized: list[MapRegion] = []
+    for region in ordered:
+        if region.hidden:
+            normalized.append(region)
+            continue
+        geometry = _region_to_geometry(region)
+        if geometry.is_empty:
+            continue
+        blockers = [
+            occupied
+            for function, occupied in occupied_by_function.items()
+            if function != region.function and not occupied.is_empty
+        ]
+        residual = geometry if not blockers else geometry.difference(_unary_union(blockers))
+        pieces = _regions_from_geometry(region, residual)
+        if not pieces:
+            continue
+        normalized.extend(pieces)
+        piece_geometry = _unary_union([_region_to_geometry(piece) for piece in pieces])
+        existing = occupied_by_function.get(region.function)
+        occupied_by_function[region.function] = piece_geometry if existing is None else existing.union(piece_geometry)
+    return normalized
+
+
+def _polygon_from_points(points: list[Point], holes: list[list[Point]] | None = None) -> Any:
+    try:
+        from shapely.geometry import Polygon
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail="区域布尔需要安装 shapely") from exc
+    if len(points) < 3:
+        return Polygon()
+    polygon = Polygon(
+        [(point.x, point.y) for point in points],
+        [[(point.x, point.y) for point in hole] for hole in holes or [] if len(hole) >= 3],
+    )
+    if not polygon.is_valid:
+        polygon = polygon.buffer(0)
+    return polygon
+
+
+def _region_to_geometry(region: MapRegion) -> Any:
+    return _polygon_from_points(region.points, region.holes)
+
+
+def _unary_union(geometries: list[Any]) -> Any:
+    try:
+        from shapely.ops import unary_union
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail="区域布尔需要安装 shapely") from exc
+    valid = [geometry for geometry in geometries if not geometry.is_empty]
+    return unary_union(valid) if valid else unary_union([])
+
+
+def _regions_from_geometry(template: MapRegion, geometry: Any) -> list[MapRegion]:
+    polygons = _geometry_polygons(geometry)
+    next_regions: list[MapRegion] = []
+    for index, polygon in enumerate(polygons):
+        if polygon.area < 64:
+            continue
+        exterior = [Point(float(x), float(y)) for x, y in list(polygon.exterior.coords)[:-1]]
+        holes = [
+            [Point(float(x), float(y)) for x, y in list(interior.coords)[:-1]]
+            for interior in polygon.interiors
+            if len(interior.coords) >= 4
+        ]
+        if len(exterior) < 3:
+            continue
+        region_id = template.id if index == 0 else new_id("region")
+        suffix = "" if index == 0 else f" {index + 1}"
+        next_regions.append(
+            MapRegion(
+                id=region_id,
+                name=template.name if index == 0 else f"{template.name}{suffix}",
+                points=exterior,
+                holes=holes,
+                source=template.source,
+                function=template.function,
+                image_prompt=template.image_prompt,
+                notes=template.notes,
+                confidence=template.confidence,
+                tags=list(template.tags),
+                hidden=template.hidden,
+            )
+        )
     return next_regions
+
+
+def _geometry_polygons(geometry: Any) -> list[Any]:
+    if geometry.is_empty:
+        return []
+    geometry_type = getattr(geometry, "geom_type", "")
+    if geometry_type == "Polygon":
+        return [geometry]
+    if geometry_type in {"MultiPolygon", "GeometryCollection"}:
+        polygons = [item for item in geometry.geoms if getattr(item, "geom_type", "") == "Polygon"]
+        return sorted(polygons, key=lambda item: item.area, reverse=True)
+    return []
 
 
 def _remove_near_duplicate_points(points: list[Point], min_distance: float = 2.0) -> list[Point]:

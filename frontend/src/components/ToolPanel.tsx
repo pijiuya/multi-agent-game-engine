@@ -8,10 +8,8 @@ import {
   Move,
   Save,
   Scan,
-  Square,
   SquareDashedMousePointer,
   StepForward,
-  Triangle,
   ZoomIn,
   ZoomOut
 } from "lucide-react";
@@ -19,29 +17,23 @@ import type { EditTool } from "../types";
 
 type Props = {
   editTool: EditTool;
-  draftCount: number;
   zoomPercent: number;
   onEditTool: (tool: EditTool) => void;
   onStep: () => void;
   onSave: () => void;
   onZoom: (direction: 1 | -1) => void;
   onFit: () => void;
-  onFinalizePolygon: () => void;
-  onClearDraft: () => void;
   onUpload: (file: File) => void;
 };
 
 export function ToolPanel({
   editTool,
-  draftCount,
   zoomPercent,
   onEditTool,
   onStep,
   onSave,
   onZoom,
   onFit,
-  onFinalizePolygon,
-  onClearDraft,
   onUpload
 }: Props) {
   return (
@@ -94,28 +86,12 @@ export function ToolPanel({
           <Move size={18} />
         </button>
         <button
-          aria-label="可行走区"
-          title="可行走区"
-          className={editTool === "walkable" ? "active" : ""}
-          onClick={() => onEditTool("walkable")}
+          aria-label="区域绘制"
+          title="区域绘制"
+          className={editTool === "region" ? "active" : ""}
+          onClick={() => onEditTool("region")}
         >
           <SquareDashedMousePointer size={18} />
-        </button>
-        <button
-          aria-label="障碍区"
-          title="障碍区"
-          className={editTool === "obstacle" ? "active" : ""}
-          onClick={() => onEditTool("obstacle")}
-        >
-          <Square size={18} />
-        </button>
-        <button
-          aria-label="互动区"
-          title="互动区"
-          className={editTool === "zone" ? "active" : ""}
-          onClick={() => onEditTool("zone")}
-        >
-          <Triangle size={18} />
         </button>
         <button
           aria-label="元素"
@@ -153,12 +129,6 @@ export function ToolPanel({
             }}
           />
         </label>
-        <button aria-label="完成多边形" disabled={draftCount < 3} onClick={onFinalizePolygon}>
-          完成
-        </button>
-        <button aria-label="清空草稿" disabled={draftCount === 0} onClick={onClearDraft}>
-          清空
-        </button>
       </div>
     </div>
   );

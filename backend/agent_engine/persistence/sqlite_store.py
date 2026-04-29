@@ -78,6 +78,7 @@ class ProjectStore:
     def save_world(self, world: GameWorld) -> None:
         self.initialize()
         snapshot = world.to_dict()
+        snapshot.get("map", {}).pop("region_layers", None)
         with self.connect() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)",

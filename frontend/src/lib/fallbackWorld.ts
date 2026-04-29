@@ -21,7 +21,8 @@ export const fallbackWorld: WorldSnapshot = {
           { x: 1120, y: 80 },
           { x: 1120, y: 720 },
           { x: 80, y: 720 }
-        ]
+        ],
+        holes: []
       }
     ],
     obstacles: [
@@ -34,7 +35,8 @@ export const fallbackWorld: WorldSnapshot = {
           { x: 690, y: 330 },
           { x: 690, y: 450 },
           { x: 520, y: 450 }
-        ]
+        ],
+        holes: []
       }
     ],
     interaction_zones: [
@@ -47,10 +49,20 @@ export const fallbackWorld: WorldSnapshot = {
           { x: 1040, y: 160 },
           { x: 1040, y: 260 },
           { x: 850, y: 260 }
-        ]
+        ],
+        holes: []
       }
     ],
     regions: [],
+    region_layers: [
+      { function: "walkable", label: "道路", region_ids: [], polygons: [] },
+      { function: "obstacle", label: "不可通过", region_ids: [], polygons: [] },
+      { function: "action", label: "行动区", region_ids: [], polygons: [] },
+      { function: "residential", label: "居住区", region_ids: [], polygons: [] },
+      { function: "social", label: "社交区", region_ids: [], polygons: [] },
+      { function: "custom", label: "自定义", region_ids: [], polygons: [] },
+      { function: "unassigned", label: "未设定", region_ids: [], polygons: [] }
+    ],
     items: [
       {
         id: "item_lamp",
@@ -62,7 +74,8 @@ export const fallbackWorld: WorldSnapshot = {
         image: null,
         description: "A warm scene element.",
         tags: ["light"],
-        state: { mood: "warm" }
+        state: { mood: "warm" },
+        hidden: false
       }
     ],
     triggers: [],
@@ -80,7 +93,8 @@ export const fallbackWorld: WorldSnapshot = {
       identity: "Mira is a mediator with a distinct social point of view.",
       model_provider: "mock",
       color: "#ef4444",
-      action_space: ["move_to", "say", "interact", "use", "observe", "wait"]
+      action_space: ["move_to", "say", "interact", "use", "observe", "wait"],
+      hidden: false
     },
     agent_tao: {
       id: "agent_tao",
@@ -89,7 +103,8 @@ export const fallbackWorld: WorldSnapshot = {
       identity: "Tao is a builder with a practical temperament.",
       model_provider: "mock",
       color: "#10b981",
-      action_space: ["move_to", "say", "interact", "use", "observe", "wait"]
+      action_space: ["move_to", "say", "interact", "use", "observe", "wait"],
+      hidden: false
     },
     agent_ren: {
       id: "agent_ren",
@@ -98,7 +113,8 @@ export const fallbackWorld: WorldSnapshot = {
       identity: "Ren notices patterns before speaking.",
       model_provider: "mock",
       color: "#8b5cf6",
-      action_space: ["move_to", "say", "interact", "use", "observe", "wait"]
+      action_space: ["move_to", "say", "interact", "use", "observe", "wait"],
+      hidden: false
     }
   },
   agent_states: {

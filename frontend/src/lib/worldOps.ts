@@ -1,24 +1,24 @@
-import type { AgentProfile, AgentState, EditTool, Point, PolygonArea, WorldMap, WorldSnapshot } from "../types";
+import type { AgentProfile, AgentState, MapRegion, MapRegionFunction, Point, PolygonArea, WorldMap, WorldSnapshot } from "../types";
 
 export function makeId(prefix: string) {
   return `${prefix}_${Math.random().toString(16).slice(2, 10)}`;
 }
 
-export function addAreaToMap(map: WorldMap, tool: EditTool, points: Point[]): WorldMap {
-  const kind = tool === "walkable" ? "walkable" : tool === "obstacle" ? "obstacle" : "zone";
-  const area: PolygonArea = {
-    id: makeId(kind),
-    name: kind === "walkable" ? "Walkable Area" : kind === "obstacle" ? "Obstacle" : "Interaction Zone",
-    kind,
-    points
+export function addRegionToMap(map: WorldMap, points: Point[], fn: MapRegionFunction = "unassigned"): { map: WorldMap; region: MapRegion } {
+  const region: MapRegion = {
+    id: makeId("region"),
+    name: "手绘区域",
+    points,
+    holes: [],
+    source: "manual",
+    function: fn,
+    image_prompt: "",
+    notes: "手绘区域。",
+    confidence: 1,
+    tags: ["手绘"],
+    hidden: false
   };
-  if (kind === "walkable") {
-    return { ...map, walkable_areas: [...map.walkable_areas, area] };
-  }
-  if (kind === "obstacle") {
-    return { ...map, obstacles: [...map.obstacles, area] };
-  }
-  return { ...map, interaction_zones: [...map.interaction_zones, area] };
+  return { map: syncFunctionalRegions({ ...map, regions: [region, ...map.regions] }), region };
 }
 
 export function addItemToMap(map: WorldMap, point: Point): WorldMap {
@@ -36,7 +36,8 @@ export function addItemToMap(map: WorldMap, point: Point): WorldMap {
         image: null,
         description: "",
         tags: [],
-        state: {}
+        state: {},
+        hidden: false
       }
     ]
   };
@@ -81,7 +82,8 @@ export function addAgentLocal(world: WorldSnapshot, name: string, role: string, 
     identity: `${name} is a ${role} in this simulation.`,
     model_provider: "mock",
     color: randomAgentColor(),
-    action_space: ["move_to", "say", "interact", "use", "observe", "wait"]
+    action_space: ["move_to", "say", "interact", "use", "observe", "wait"],
+    hidden: false
   };
   const state: AgentState = {
     id,
@@ -99,6 +101,66 @@ export function addAgentLocal(world: WorldSnapshot, name: string, role: string, 
     agent_profiles: { ...world.agent_profiles, [id]: profile },
     agent_states: { ...world.agent_states, [id]: state }
   };
+}
+
+function syncFunctionalRegions(map: WorldMap): WorldMap {
+  const walkable_areas: PolygonArea[] = [];
+  const obstacles: PolygonArea[] = [];
+  const interaction_zones: PolygonArea[] = [];
+  for (const region of map.regions) {
+    if (region.hidden) {
+      continue;
+    }
+    const area = regionToArea(region);
+    if (region.function === "walkable") {
+      walkable_areas.push(area);
+    } else if (region.function === "action") {
+      walkable_areas.push(area);
+    } else if (region.function === "obstacle") {
+      obstacles.push(area);
+    } else if (region.function === "social") {
+      interaction_zones.push(area);
+    }
+  }
+  return { ...map, walkable_areas, obstacles, interaction_zones, region_layers: buildFallbackRegionLayers(map.regions) };
+}
+
+function regionToArea(region: MapRegion): PolygonArea {
+  return {
+    id: `area_${region.id}`,
+    name: region.name,
+    kind: region.function === "social" ? "zone" : region.function === "action" ? "walkable" : region.function,
+    points: region.points,
+    holes: region.holes,
+    metadata: {
+      generated: true,
+      region_id: region.id,
+      function: region.function,
+      source: region.source,
+      notes: region.notes
+    }
+  };
+}
+
+function buildFallbackRegionLayers(regions: MapRegion[]): WorldMap["region_layers"] {
+  const labels: Record<MapRegion["function"], string> = {
+    walkable: "道路",
+    obstacle: "不可通过",
+    action: "行动区",
+    residential: "居住区",
+    social: "社交区",
+    custom: "自定义",
+    unassigned: "未设定"
+  };
+  return (Object.keys(labels) as MapRegion["function"][]).map((fn) => {
+    const matches = regions.filter((region) => region.function === fn && !region.hidden);
+    return {
+      function: fn,
+      label: labels[fn],
+      region_ids: matches.map((region) => region.id),
+      polygons: matches.map((region) => ({ points: region.points, holes: region.holes ?? [] }))
+    };
+  });
 }
 
 function randomAgentColor() {

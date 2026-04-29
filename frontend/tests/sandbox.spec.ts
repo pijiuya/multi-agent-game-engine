@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { fallbackWorld } from "../src/lib/fallbackWorld";
 
 test.describe.configure({ mode: "serial" });
 
@@ -24,12 +25,17 @@ test("renders the transparent 2D workstation with floating panels", async ({ pag
 
   await expect(page.getByTestId("panel-tools")).toBeVisible();
   await expect(page.getByTestId("panel-scene")).toBeVisible();
+  await expect(page.getByTestId("panel-regions")).toBeVisible();
+  await expect(page.getByTestId("panel-regionDraw")).toBeVisible();
+  await expect(page.getByTestId("region-draw-panel")).toBeVisible();
   await expect(page.getByTestId("panel-agents")).toBeVisible();
   await expect(page.getByTestId("panel-models")).toBeVisible();
   await expect(page.getByTestId("panel-mapStudio")).toBeVisible();
   await expect(page.getByTestId("panel-properties")).toBeVisible();
   await expect(page.getByTestId("panel-title-tools")).toContainText("工具");
   await expect(page.getByTestId("panel-title-scene")).toContainText("场景列表");
+  await expect(page.getByTestId("panel-title-regions")).toContainText("区域");
+  await expect(page.getByTestId("panel-title-regionDraw")).toContainText("区域绘制");
   await expect(page.getByTestId("panel-title-models")).toContainText("模型管理");
   await expect(page.getByTestId("panel-title-mapStudio")).toContainText("地图工作台");
   await expect(page.getByTestId("panel-title-properties")).toContainText("属性");
@@ -62,6 +68,20 @@ test("floating panels drag and snap to the scene edge", async ({ page }) => {
   expect(after).not.toBeNull();
   expect(after!.x).not.toBe(before!.x);
   await expect(panel).toHaveAttribute("data-docked", /scene-/);
+});
+
+test("floating panels minimize and expand from the titlebar button", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.goto("/");
+
+  const panel = page.getByTestId("panel-scene");
+  await expect(panel.locator(".floating-panel-body")).toBeVisible();
+  await page.getByRole("button", { name: "折叠 场景列表" }).click();
+  await expect(panel).toHaveClass(/minimized/);
+  await expect(panel.locator(".floating-panel-body")).toHaveCount(0);
+  await page.getByRole("button", { name: "展开 场景列表" }).click();
+  await expect(panel).not.toHaveClass(/minimized/);
+  await expect(panel.locator(".floating-panel-body")).toBeVisible();
 });
 
 test("scene window keeps an outer margin", async ({ page }) => {
@@ -184,7 +204,7 @@ test("floating panels resize from edges and scroll clipped content", async ({ pa
 test("floating panel layout persists across reloads", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 820 });
   await page.goto("/");
-  await page.evaluate(() => window.localStorage.removeItem("agent-workstation.panel-layout.v1"));
+  await page.evaluate(() => window.localStorage.removeItem("agent-workstation.panel-layout.v2"));
   await page.reload();
 
   const panel = page.getByTestId("panel-scene");
@@ -478,6 +498,59 @@ test("agent panel context menu and scene double click can rename agents", async 
   await expect(page.locator('[data-testid^="world-agent-label-"]').filter({ hasText: `场景Agent ${suffix}` })).toBeVisible();
 });
 
+test("scene objects can be hidden, shown, and deleted from right click menus", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.goto("/");
+
+  const scenePanel = page.getByTestId("panel-scene");
+  const firstAgentRow = scenePanel.getByRole("button", { name: /Mira/ });
+  await firstAgentRow.click({ button: "right" });
+  await expect(page.getByTestId("object-context-menu")).toContainText("Mira");
+  await expect(page.getByTestId("object-context-menu")).toHaveCSS("z-index", "2147483000");
+  await page.getByTestId("object-context-menu").getByRole("button", { name: "隐藏" }).click();
+  await expect(page.locator('[data-testid="world-agent-agent_mira"]')).toHaveCount(0);
+  await expect(firstAgentRow).toContainText("已隐藏");
+
+  await firstAgentRow.click({ button: "right" });
+  await page.getByTestId("object-context-menu").getByRole("button", { name: "显示" }).click();
+  await expect(page.locator('[data-testid="world-agent-agent_mira"]')).toBeVisible();
+
+  const itemCountBefore = await page.locator(".world-item-marker").count();
+  await page.locator(".world-item-marker").first().dispatchEvent("contextmenu", {
+    button: 2,
+    clientX: 620,
+    clientY: 360
+  });
+  await expect(page.getByTestId("object-context-menu")).toContainText("Lamp");
+  await page.getByTestId("object-context-menu").getByRole("button", { name: "删除" }).click();
+  await expect(page.locator(".world-item-marker")).toHaveCount(itemCountBefore - 1);
+  await expect(scenePanel.getByRole("button", { name: /Lamp/ })).toHaveCount(0);
+
+  const surface = page.getByTestId("workspace-surface");
+  const box = await surface.boundingBox();
+  expect(box).not.toBeNull();
+  await page.getByTestId("panel-tools").getByRole("button", { name: "区域绘制" }).click();
+  await page.mouse.click(box!.x + 320, box!.y + 230);
+  await page.mouse.click(box!.x + 420, box!.y + 230);
+  await page.mouse.click(box!.x + 420, box!.y + 310);
+  await page.getByRole("button", { name: "完成区域绘制" }).click();
+  const regionRow = page.getByTestId("panel-regions").getByRole("button", { name: /手绘区域/ }).first();
+  await expect(regionRow).toBeVisible();
+
+  await regionRow.click({ button: "right" });
+  await expect(page.getByTestId("object-context-menu")).toContainText("手绘区域");
+  await page.getByTestId("object-context-menu").getByRole("button", { name: "隐藏" }).click();
+  await expect(regionRow).toContainText("已隐藏");
+
+  await regionRow.click({ button: "right" });
+  await page.getByTestId("object-context-menu").getByRole("button", { name: "显示" }).click();
+  await expect(regionRow).not.toContainText("已隐藏");
+
+  await regionRow.click({ button: "right" });
+  await page.getByTestId("object-context-menu").getByRole("button", { name: "删除" }).click();
+  await expect(page.getByTestId("panel-regions").getByRole("button", { name: /手绘区域/ })).toHaveCount(0);
+});
+
 test("drawing tools create vector areas and item transform handles edit items", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 820 });
   await page.goto("/");
@@ -485,21 +558,126 @@ test("drawing tools create vector areas and item transform handles edit items", 
   const surface = page.getByTestId("workspace-surface");
   const box = await surface.boundingBox();
   expect(box).not.toBeNull();
+  const unselectedItemVisualState = await page.locator(".world-item-marker:not(.active)").first().evaluate((element) => {
+    const style = getComputedStyle(element as HTMLElement);
+    return {
+      background: style.backgroundColor,
+      borderColor: style.borderColor,
+      borderRadius: style.borderRadius,
+      boxShadow: style.boxShadow
+    };
+  });
+  expect(unselectedItemVisualState.background).toBe("rgba(0, 0, 0, 0)");
+  expect(unselectedItemVisualState.borderColor).toBe("rgba(0, 0, 0, 0)");
+  expect(unselectedItemVisualState.borderRadius).toBe("0px");
+  expect(unselectedItemVisualState.boxShadow).toBe("none");
 
-  await page.getByRole("button", { name: "障碍区" }).click();
-  await page.mouse.click(box!.x + 440, box!.y + 260);
-  await page.mouse.click(box!.x + 520, box!.y + 260);
-  await page.mouse.click(box!.x + 520, box!.y + 330);
+  await page.getByTestId("panel-tools").getByRole("button", { name: "区域绘制" }).click();
+  await expect(page.getByTestId("panel-regionDraw")).not.toHaveClass(/minimized/);
+  await expect(page.getByTestId("region-draw-operation").getByRole("button", { name: "增加区域" })).toHaveClass(/active/);
+  await expect(page.getByTestId("region-target-grid").getByRole("button", { name: "道路" })).toHaveClass(/active/);
+  await expect(page.locator('[data-testid^="world-region-layer-walkable"]')).toBeVisible();
+  await page.mouse.click(box!.x + 320, box!.y + 230);
+  await page.mouse.click(box!.x + 420, box!.y + 230);
+  await page.mouse.click(box!.x + 420, box!.y + 310);
   await expect(page.getByTestId("world-draft-area")).toBeVisible();
-  const areaCountBefore = await page.locator('[data-testid^="world-area-"]').count();
-  await page.getByRole("button", { name: "完成多边形" }).click();
-  await expect(page.locator('[data-testid^="world-area-"]')).toHaveCount(areaCountBefore + 1);
+  const layerCountBefore = await page.locator('[data-testid^="world-region-layer-walkable"]').count();
+  await page.getByRole("button", { name: "完成区域绘制" }).click();
+  await expect(page.locator('[data-testid^="world-region-layer-walkable"]')).toHaveCount(layerCountBefore + 1);
+  await expect(page.getByTestId("world-draft-area")).toHaveCount(0);
+  await expect(page.getByTestId("panel-regions").getByText("手绘区域", { exact: true })).toBeVisible();
+  const activeRegionPath = await page.locator(".world-region-layer.active").first().getAttribute("d");
+  expect(activeRegionPath).toBeTruthy();
+
+  const subtractRequests: Array<Record<string, unknown>> = [];
+  await page.route("**/api/map/regions/boolean", async (route) => {
+    const body = JSON.parse(route.request().postData() || "{}") as Record<string, unknown>;
+    subtractRequests.push(body);
+    const targetId = String((body.target_ids as string[] | undefined)?.[0] ?? "region_mock");
+    const points = [
+      { x: 324, y: 234 },
+      { x: 414, y: 234 },
+      { x: 414, y: 306 },
+      { x: 324, y: 306 }
+    ];
+    const snapshot = JSON.parse(JSON.stringify(fallbackWorld));
+    snapshot.map.regions = [
+      {
+        id: targetId,
+        name: "手绘区域",
+        points,
+        holes: [],
+        source: "manual",
+        function: "walkable",
+        image_prompt: "",
+        notes: "手绘区域。",
+        confidence: 1,
+        tags: ["手绘"],
+        hidden: false
+      }
+    ];
+    snapshot.map.walkable_areas = [
+      {
+        id: `area_${targetId}`,
+        name: "手绘区域",
+        kind: "walkable",
+        points,
+        holes: [],
+        metadata: { region_id: targetId, function: "walkable", source: "manual" }
+      }
+    ];
+    snapshot.map.obstacles = [];
+    snapshot.map.interaction_zones = [];
+    snapshot.map.region_layers = snapshot.map.region_layers.map((layer: { function: string; label: string }) =>
+      layer.function === "walkable"
+        ? { ...layer, region_ids: [targetId], polygons: [{ points, holes: [] }] }
+        : { ...layer, region_ids: [], polygons: [] }
+    );
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(snapshot)
+    });
+  });
+  await page.getByRole("button", { name: "减少区域" }).click();
+  await page.mouse.click(box!.x + 340, box!.y + 250);
+  await page.mouse.click(box!.x + 390, box!.y + 250);
+  await page.mouse.click(box!.x + 390, box!.y + 300);
+  await page.keyboard.press("Enter");
+  await expect(page.getByTestId("world-draft-area")).toHaveCount(0);
+  await expect(page.locator(".scene-header")).toContainText("区域已扣减");
+  const subtractRequestBody = subtractRequests[0];
+  expect((subtractRequestBody?.target_ids as unknown[] | undefined)?.length).toBe(1);
+  expect(subtractRequestBody?.target_function).toBeNull();
 
   await page.getByTestId("panel-tools").getByRole("button", { name: "元素" }).click();
   const itemCountBefore = await page.locator(".world-item-marker").count();
-  await page.mouse.click(box!.x + 620, box!.y + 360);
+  await page.mouse.click(box!.x + 450, box!.y + 420);
   await expect(page.locator(".world-item-marker")).toHaveCount(itemCountBefore + 1);
   await expect(page.getByTestId("item-transform-box")).toBeVisible();
+  const itemVisualState = await page.locator(".world-item-marker.active").evaluate((element) => {
+    const style = getComputedStyle(element as HTMLElement);
+    return { background: style.backgroundColor, borderRadius: style.borderRadius };
+  });
+  expect(itemVisualState.background).toBe("rgba(0, 0, 0, 0)");
+  expect(itemVisualState.borderRadius).toBe("0px");
+  const wideImage = Buffer.from(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60"><rect width="120" height="60" fill="#111"/><rect x="6" y="6" width="108" height="48" fill="#fff"/></svg>'
+  );
+  await page.getByTestId("panel-properties").locator('input[type="file"]').setInputFiles({
+    name: "wide.svg",
+    mimeType: "image/svg+xml",
+    buffer: wideImage
+  });
+  const itemImage = page.locator(".world-item-marker.active img");
+  await expect(itemImage).toBeVisible();
+  await expect
+    .poll(async () => {
+      const itemImageBox = await page.locator(".world-item-marker.active").boundingBox();
+      return itemImageBox ? itemImageBox.width / itemImageBox.height : 0;
+    })
+    .toBeGreaterThan(1.5);
+  await expect(itemImage).toHaveCSS("object-fit", "contain");
   const transformLayerState = await page.getByTestId("item-transform-box").evaluate((element) => ({
     inScaledLayer: Boolean(element.closest(".world-coordinate-layer")),
     scaleWidth: (element.querySelector(".item-transform-handle.scale") as HTMLElement).getBoundingClientRect().width,
@@ -542,6 +720,21 @@ test("drawing tools create vector areas and item transform handles edit items", 
     .getByRole("spinbutton")
     .inputValue();
   expect(Number(scaleValue)).toBeGreaterThanOrEqual(1);
+  await page
+    .getByTestId("panel-properties")
+    .locator(".property-edit-row")
+    .filter({ hasText: "缩放" })
+    .getByRole("spinbutton")
+    .fill("1.35");
+  await page
+    .getByTestId("panel-properties")
+    .locator(".property-edit-row")
+    .filter({ hasText: "缩放" })
+    .getByRole("spinbutton")
+    .press("Enter");
+  await expect(
+    page.getByTestId("panel-properties").locator(".property-edit-row").filter({ hasText: "缩放" }).getByRole("spinbutton")
+  ).toHaveValue("1.35");
 });
 
 test("sam capability starts embedded MobileSAM install without service address", async ({ page }) => {
@@ -777,7 +970,7 @@ test("configured local model actions show inline confirmation", async ({ page })
 test("map studio separates model management and runs gated SAM flow", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 820 });
   await page.goto("/");
-  await page.evaluate(() => window.localStorage.removeItem("agent-workstation.panel-layout.v1"));
+  await page.evaluate(() => window.localStorage.removeItem("agent-workstation.panel-layout.v2"));
   await page.reload();
 
   const modelsPanel = page.getByTestId("panel-models");
@@ -853,24 +1046,33 @@ test("map studio separates model management and runs gated SAM flow", async ({ p
   );
   await mapStudioPanel.getByTestId("segment-map-button").click();
   await expect(mapStudioPanel.getByTestId("segmentation-status")).toContainText("未配置 SAM 分层模型");
-  await expect(page.locator('[data-testid^="world-region-"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid^="world-region-layer-"]')).toHaveCount(0);
 
   await page.evaluate(() => window.localStorage.setItem("agent-workstation.enable-mock-sam", "1"));
   await mapStudioPanel.getByTestId("segment-map-button").click();
-  await expect(page.locator('[data-testid^="world-region-"]')).toHaveCount(4);
-  await expect(mapStudioPanel.getByTestId("segmentation-status")).toContainText("测试 Mock SAM");
-  await expect(mapStudioPanel.getByTestId("segmentation-progress")).toContainText("完成");
-  await expect(page.getByTestId("panel-properties").locator(".property-heading strong")).toHaveText("SAM 分区");
-  await expect(page.getByTestId("panel-scene").getByText("主道路", { exact: true })).toBeVisible();
+  await expect(page.locator('[data-testid^="world-region-layer-"]')).toHaveCount(4);
+  await expect(mapStudioPanel.getByTestId("map-step-body-layers")).toBeVisible();
+  await expect(page.getByTestId("panel-properties").locator(".property-heading strong")).toHaveText("区域集合");
+  await expect(page.getByTestId("panel-regions").getByText("主道路", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("panel-scene").getByText("主道路", { exact: true })).toHaveCount(0);
+  await mapStudioPanel.getByTestId("map-step-background").click();
+  await expect(page.locator('[data-testid^="world-region-layer-"]')).toHaveCount(4);
+  await page.getByTestId("panel-scene").getByRole("button", { name: /地图/ }).click();
+  await expect(page.locator('[data-testid^="world-region-layer-"]')).toHaveCount(0);
 
   await mapStudioPanel.getByTestId("map-step-layers").click();
   await expect(mapStudioPanel.getByTestId("map-step-body-layers")).toBeVisible();
+  await expect(page.locator('[data-testid^="world-region-layer-"]')).toHaveCount(4);
+  await mapStudioPanel.getByTestId("sam-layer-list").getByRole("button").nth(1).click();
+  await expect(page.locator('[data-testid^="world-region-layer-"]')).toHaveCount(1);
+  await expect(page.locator(".world-region-layer.active")).toHaveCount(1);
+  await expect(page.locator('[data-testid^="world-region-source-"]')).toHaveCount(1);
   await expect(mapStudioPanel.getByTestId("layer-action-controls")).toBeVisible();
   await expect(mapStudioPanel.getByLabel("图层名称")).toBeVisible();
-  await expect(mapStudioPanel.getByRole("button", { name: "未配置图像识别模型" })).toBeVisible();
+  await expect(mapStudioPanel.getByText("自动命名先不启用")).toBeVisible();
   await mapStudioPanel.getByTestId("layer-action-controls").getByRole("button", { name: "功能分区", exact: true }).click();
   await mapStudioPanel.getByRole("button", { name: "不可穿过", exact: true }).click();
-  await expect(page.getByTestId("panel-scene").getByText("不可穿过").first()).toBeVisible();
+  await expect(page.getByTestId("panel-regions").getByText("不可通过").first()).toBeVisible();
 });
 
 test("agent labels and origin icons stay crisp at a fixed screen size during zoom", async ({ page }) => {

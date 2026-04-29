@@ -3,7 +3,7 @@ import type { CSSProperties, MouseEvent, PointerEvent, WheelEvent } from "react"
 import { useRef, useState } from "react";
 import { screenToWorld, snapWorldPointToGrid, worldToScreen } from "../lib/canvasCoords";
 import { assetUrl } from "../lib/api";
-import type { CanvasPoint, CanvasViewState, EditTool, Point, SelectionState, WorldItem, WorldSnapshot } from "../types";
+import type { CanvasPoint, CanvasViewState, EditTool, MapRegionFunction, Point, SelectionState, WorldItem, WorldSnapshot } from "../types";
 
 type Props = {
   world: WorldSnapshot;
@@ -12,12 +12,17 @@ type Props = {
   selection: SelectionState;
   canvasPoints: CanvasPoint[];
   anchorPoint: Point | null;
+  showRegions: boolean;
+  showAllRegionLayers: boolean;
+  activeRegionFunction: MapRegionFunction | null;
+  activeRegionId: string | null;
   draftPoints: Point[];
   status: string;
   onViewChange: (view: CanvasViewState) => void;
   onWorldPoint: (point: Point) => void;
   onSelect: (selection: SelectionState) => void;
   onAnchorContext: (screen: Point, world: Point) => void;
+  onObjectContext: (target: { kind: "agent" | "item" | "region"; id: string }, screen: Point) => void;
   onRenameAgent: (agentId: string, name: string) => void;
   onPreviewItem: (itemId: string, patch: Partial<Omit<WorldItem, "id">>) => void;
   onCommitItem: (itemId: string, patch: Partial<Omit<WorldItem, "id">>) => void;
@@ -48,12 +53,17 @@ export function SceneViewport({
   selection,
   canvasPoints,
   anchorPoint,
+  showRegions,
+  showAllRegionLayers,
+  activeRegionFunction,
+  activeRegionId,
   draftPoints,
   status,
   onViewChange,
   onWorldPoint,
   onSelect,
   onAnchorContext,
+  onObjectContext,
   onRenameAgent,
   onPreviewItem,
   onCommitItem
@@ -62,12 +72,24 @@ export function SceneViewport({
   const transformRef = useRef<ItemTransform | null>(null);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const [isPanning, setIsPanning] = useState(false);
+  const [itemImageAspects, setItemImageAspects] = useState<Record<string, number>>({});
   const gridStyle = getGridStyle(canvasView);
   const density = getGridDensity(canvasView.zoom);
   const worldLayerStyle = {
     transform: `translate(${canvasView.pan.x}px, ${canvasView.pan.y}px) scale(${canvasView.zoom})`
   } as CSSProperties;
-  const selectedItem = selection.kind === "item" ? world.map.items.find((item) => item.id === selection.id) : null;
+  const visibleItems = world.map.items.filter((item) => !item.hidden);
+  const visibleAgents = Object.values(world.agent_profiles).filter((agent) => !agent.hidden);
+  const selectedItem = selection.kind === "item" ? world.map.items.find((item) => item.id === selection.id && !item.hidden) : null;
+  const selectedRegion = selection.kind === "region" ? world.map.regions.find((region) => region.id === selection.id && !region.hidden) : null;
+  const visibleRegionLayers = showRegions
+    ? world.map.region_layers.filter((layer) => {
+        if (!layer.polygons.length) {
+          return false;
+        }
+        return showAllRegionLayers || layer.function === activeRegionFunction;
+      })
+    : [];
 
   function handleWheel(event: WheelEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -166,6 +188,12 @@ export function SceneViewport({
     onAnchorContext({ x: event.clientX, y: event.clientY }, point);
   }
 
+  function openObjectMenu(event: MouseEvent<Element>, target: { kind: "agent" | "item" | "region"; id: string }) {
+    event.preventDefault();
+    event.stopPropagation();
+    onObjectContext(target, { x: event.clientX, y: event.clientY });
+  }
+
   function localWorldPoint(event: PointerEvent<HTMLDivElement> | MouseEvent<HTMLDivElement>): Point {
     const rect = event.currentTarget.getBoundingClientRect();
     return screenToWorld(
@@ -255,8 +283,8 @@ export function SceneViewport({
           </span>
         </div>
         <div className="scene-metrics">
-          <span>{Object.keys(world.agent_profiles).length} 个 agent</span>
-          <span>{world.map.items.length} 个元素</span>
+          <span>{visibleAgents.length} 个 agent</span>
+          <span>{visibleItems.length} 个元素</span>
           <span>{world.events.length} 条事件</span>
         </div>
         <div className="window-controls">
@@ -332,36 +360,39 @@ export function SceneViewport({
             data-testid="world-vector-layer"
             style={{ width: world.map.width, height: world.map.height }}
           >
-            {[...world.map.walkable_areas, ...world.map.obstacles, ...world.map.interaction_zones]
-              .filter((area) => !area.metadata?.generated)
-              .map((area) => (
-                <polygon
-                  className={`world-area world-area-${area.kind} ${
-                    selection.kind === "area" && selection.id === area.id ? "active" : ""
-                  }`}
-                  data-testid={`world-area-${area.id}`}
-                  key={area.id}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onSelect({ kind: "area", id: area.id });
-                  }}
-                  points={area.points.map((point) => `${point.x},${point.y}`).join(" ")}
-                />
-              ))}
-            {world.map.regions.map((region) => (
-              <polygon
-                className={`world-region world-region-${region.function} ${
-                  selection.kind === "region" && selection.id === region.id ? "active" : ""
-                }`}
-                data-testid={`world-region-${region.id}`}
-                key={region.id}
+            {visibleRegionLayers.map((layer) =>
+              layer.polygons.map((polygon, index) => (
+                  <path
+                    className={`world-region-layer world-region-${layer.function} ${activeRegionFunction === layer.function ? "active" : ""}`}
+                    data-testid={`world-region-layer-${layer.function}-${index}`}
+                    d={polygonPath(polygon.points, polygon.holes)}
+                    fillRule="evenodd"
+                    key={`${layer.function}-${index}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onSelect({ kind: "regionLayer", id: layer.function });
+                    }}
+                    onContextMenu={(event) => {
+                      if (layer.region_ids.length === 1) {
+                        openObjectMenu(event, { kind: "region", id: layer.region_ids[0] });
+                      }
+                    }}
+                  />
+                ))
+            )}
+            {showRegions && selectedRegion ? (
+              <path
+                className="world-region-source active"
+                data-testid={`world-region-source-${selectedRegion.id}`}
+                d={polygonPath(selectedRegion.points, selectedRegion.holes)}
+                fillRule="evenodd"
                 onClick={(event) => {
                   event.stopPropagation();
-                  onSelect({ kind: "region", id: region.id });
+                  onSelect({ kind: "region", id: selectedRegion.id });
                 }}
-                points={region.points.map((point) => `${point.x},${point.y}`).join(" ")}
+                onContextMenu={(event) => openObjectMenu(event, { kind: "region", id: selectedRegion.id })}
               />
-            ))}
+            ) : null}
             {draftPoints.length > 0 ? (
               <g className="world-draft-area" data-testid="world-draft-area">
                 <polyline points={draftPoints.map((point) => `${point.x},${point.y}`).join(" ")} />
@@ -374,7 +405,7 @@ export function SceneViewport({
           <div className="world-origin-marker" data-testid="origin-marker" style={pointStyle({ x: 0, y: 0 })}>
             <span />
           </div>
-          {world.map.items.map((item) => (
+          {visibleItems.map((item) => (
             <button
               className={selection.kind === "item" && selection.id === item.id ? "world-item-marker active" : "world-item-marker"}
               data-testid={`world-item-${item.id}`}
@@ -383,12 +414,29 @@ export function SceneViewport({
               data-world-object="item"
               key={item.id}
               onClick={() => onSelect({ kind: "item", id: item.id })}
+              onContextMenu={(event) => openObjectMenu(event, { kind: "item", id: item.id })}
               onPointerDown={(event) => startItemTransform("move", item, event)}
-              style={itemStyle(item)}
+              style={itemStyle(item, item.image ? itemImageAspects[item.id] : null)}
               title={item.name}
-              >
-                {item.image ? <img alt="" draggable={false} src={assetUrl(item.image) ?? item.image} /> : item.name.slice(0, 1)}
-              </button>
+            >
+              {item.image ? (
+                <img
+                  alt=""
+                  draggable={false}
+                  onLoad={(event) => {
+                    const image = event.currentTarget;
+                    if (!image.naturalWidth || !image.naturalHeight) {
+                      return;
+                    }
+                    const aspect = image.naturalWidth / image.naturalHeight;
+                    setItemImageAspects((current) => (current[item.id] === aspect ? current : { ...current, [item.id]: aspect }));
+                  }}
+                  src={assetUrl(item.image) ?? item.image}
+                />
+              ) : (
+                item.name.slice(0, 1)
+              )}
+            </button>
           ))}
           {canvasPoints.map((point) => (
               <button
@@ -421,7 +469,7 @@ export function SceneViewport({
           ) : null}
         </div>
         <div className="world-label-layer" data-testid="world-label-layer">
-          {Object.values(world.agent_profiles).map((agent) => {
+          {visibleAgents.map((agent) => {
             const state = world.agent_states[agent.id];
             if (!state) {
               return null;
@@ -444,6 +492,7 @@ export function SceneViewport({
                   event.stopPropagation();
                   renameAgent(agent.id, agent.name);
                 }}
+                onContextMenu={(event) => openObjectMenu(event, { kind: "agent", id: agent.id })}
                 onPointerDown={stopMarkerPointer}
                 style={{ ...screenPointStyle(state.position, canvasView), "--agent-color": agent.color } as CSSProperties}
                 title={agent.name}
@@ -452,7 +501,7 @@ export function SceneViewport({
               </button>
             );
           })}
-          {world.map.items.map((item) => (
+          {visibleItems.map((item) => (
             <button
               className={selection.kind === "item" && selection.id === item.id ? "world-item-label active" : "world-item-label"}
               data-testid={`world-item-label-${item.id}`}
@@ -461,6 +510,7 @@ export function SceneViewport({
                 event.stopPropagation();
                 onSelect({ kind: "item", id: item.id });
               }}
+              onContextMenu={(event) => openObjectMenu(event, { kind: "item", id: item.id })}
               onPointerDown={(event) => event.stopPropagation()}
               style={screenPointStyle(item.position, canvasView)}
               title={item.name}
@@ -468,7 +518,7 @@ export function SceneViewport({
               {item.name}
             </button>
           ))}
-          {Object.values(world.agent_profiles).map((agent) => {
+          {visibleAgents.map((agent) => {
             const state = world.agent_states[agent.id];
             if (!state) {
               return null;
@@ -488,6 +538,7 @@ export function SceneViewport({
                   event.stopPropagation();
                   renameAgent(agent.id, agent.name);
                 }}
+                onContextMenu={(event) => openObjectMenu(event, { kind: "agent", id: agent.id })}
                 onPointerDown={(event) => event.stopPropagation()}
                 style={screenPointStyle(state.position, canvasView)}
                 title={agent.name}
@@ -497,7 +548,11 @@ export function SceneViewport({
             );
           })}
           {selectedItem ? (
-            <div className="item-transform-box" data-testid="item-transform-box" style={screenItemTransformStyle(selectedItem, canvasView)}>
+            <div
+              className="item-transform-box"
+              data-testid="item-transform-box"
+              style={screenItemTransformStyle(selectedItem, canvasView, selectedItem.image ? itemImageAspects[selectedItem.id] : null)}
+            >
               <button
                 aria-label="移动元素"
                 className="item-transform-center"
@@ -548,26 +603,38 @@ function screenPointStyle(point: Point, view: CanvasViewState) {
   } as CSSProperties;
 }
 
-function itemStyle(item: WorldItem) {
+function itemStyle(item: WorldItem, aspect: number | null | undefined) {
   const size = item.radius * 2 * item.scale;
+  const dimensions = itemDimensions(size, aspect);
   return {
     ...pointStyle(item.position),
-    width: `${size}px`,
-    height: `${size}px`,
+    width: `${dimensions.width}px`,
+    height: `${dimensions.height}px`,
     transform: `translate(-50%, -50%) rotate(${item.rotation}deg)`
   } as CSSProperties;
 }
 
-function screenItemTransformStyle(item: WorldItem, view: CanvasViewState) {
+function screenItemTransformStyle(item: WorldItem, view: CanvasViewState, aspect: number | null | undefined) {
   const screen = worldToScreen(item.position, view);
   const size = Math.max(18, item.radius * 2 * item.scale * view.zoom);
+  const dimensions = itemDimensions(size, aspect);
   return {
     left: `${screen.x}px`,
     top: `${screen.y}px`,
-    width: `${size}px`,
-    height: `${size}px`,
+    width: `${dimensions.width}px`,
+    height: `${dimensions.height}px`,
     transform: `translate(-50%, -50%) rotate(${item.rotation}deg)`
   } as CSSProperties;
+}
+
+function itemDimensions(maxSide: number, aspect: number | null | undefined) {
+  if (!aspect || !Number.isFinite(aspect) || aspect <= 0) {
+    return { width: maxSide, height: maxSide };
+  }
+  if (aspect >= 1) {
+    return { width: maxSide, height: maxSide / aspect };
+  }
+  return { width: maxSide * aspect, height: maxSide };
 }
 
 function itemPatchFromDrag(transform: ItemTransform, point: Point, zoom: number): Partial<Omit<WorldItem, "id">> {
@@ -629,15 +696,20 @@ function getGridDensity(zoom: number) {
 function toolLabel(tool: EditTool) {
   const labels: Record<EditTool, string> = {
     select: "选择",
-    walkable: "可行走区",
-    obstacle: "障碍区",
-    zone: "互动区",
+    region: "区域绘制",
     item: "元素",
     spawn: "出生点",
     move: "移动",
     anchor: "锚点"
   };
   return labels[tool];
+}
+
+function polygonPath(points: Point[], holes: Point[][] = []) {
+  return [points, ...holes]
+    .filter((ring) => ring.length >= 3)
+    .map((ring) => `M ${ring.map((point) => `${point.x} ${point.y}`).join(" L ")} Z`)
+    .join(" ");
 }
 
 function displayName(name: string) {

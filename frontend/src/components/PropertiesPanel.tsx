@@ -129,30 +129,10 @@ function renderEditor(props: Props) {
     );
   }
 
-  if (selection.kind === "area") {
-    const area = [
-      ...world.map.walkable_areas,
-      ...world.map.obstacles,
-      ...world.map.interaction_zones
-    ].find((candidate) => candidate.id === selection.id);
-    if (!area) {
-      return <Missing label="没有找到区域" />;
-    }
-    return (
-      <div className="property-grid">
-        <Readonly label="名称" value={area.name} />
-        <Readonly label="类型" value={areaKindLabel(area.kind)} />
-        <Readonly label="点位" value={String(area.points.length)} />
-        <Readonly label="比例" value="地图单位" />
-        <Readonly label="简介" value={JSON.stringify(area.metadata ?? {})} />
-      </div>
-    );
-  }
-
   if (selection.kind === "region") {
     const region = world.map.regions.find((candidate) => candidate.id === selection.id);
     if (!region) {
-      return <Missing label="没有找到 SAM 分区" />;
+      return <Missing label="没有找到区域" />;
     }
     return (
       <div className="property-grid">
@@ -171,6 +151,28 @@ function renderEditor(props: Props) {
             onRegenerateRegion(region.id, image_prompt);
           }}
         />
+      </div>
+    );
+  }
+
+  if (selection.kind === "regions") {
+    return (
+      <div className="property-grid">
+        <Readonly label="名称" value="全部区域" />
+        <Readonly label="数量" value={String(world.map.regions.length)} />
+        <Readonly label="绘制" value="区域绘制工具会对全部区域集合执行添加或扣减。" />
+      </div>
+    );
+  }
+
+  if (selection.kind === "regionLayer") {
+    const layer = world.map.region_layers.find((candidate) => candidate.function === selection.id);
+    return (
+      <div className="property-grid">
+        <Readonly label="名称" value={layer?.label ?? functionLabel(selection.id)} />
+        <Readonly label="来源块" value={String(layer?.region_ids.length ?? 0)} />
+        <Readonly label="整体轮廓" value={String(layer?.polygons.length ?? 0)} />
+        <Readonly label="绘制" value="区域绘制面板会对这个功能层执行增加或扣减。" />
       </div>
     );
   }
@@ -298,17 +300,32 @@ function selectionKindLabel(kind: SelectionState["kind"]) {
     map: "地图",
     agent: "Agent",
     item: "元素",
-    area: "区域",
-    region: "SAM 分区",
+    region: "区域",
+    regionLayer: "区域层",
+    regions: "区域集合",
     point: "空点"
   };
   return labels[kind];
+}
+
+function functionLabel(value: MapRegionFunction) {
+  const labels: Record<MapRegionFunction, string> = {
+    walkable: "道路",
+    obstacle: "不可穿过",
+    action: "行动区",
+    residential: "居住区",
+    social: "社交区",
+    custom: "自定义",
+    unassigned: "未设定"
+  };
+  return labels[value];
 }
 
 function FunctionButtons({ value, onCommit }: { value: MapRegionFunction; onCommit: (value: MapRegionFunction) => void }) {
   const options: { value: MapRegionFunction; label: string }[] = [
     { value: "walkable", label: "道路" },
     { value: "obstacle", label: "不可穿过" },
+    { value: "action", label: "行动区" },
     { value: "residential", label: "居住区" },
     { value: "social", label: "社交区" },
     { value: "custom", label: "自定义" },
@@ -331,15 +348,6 @@ function FunctionButtons({ value, onCommit }: { value: MapRegionFunction; onComm
       </div>
     </div>
   );
-}
-
-function areaKindLabel(kind: string) {
-  const labels: Record<string, string> = {
-    walkable: "可行走区",
-    obstacle: "障碍区",
-    zone: "互动区"
-  };
-  return labels[kind] ?? kind;
 }
 
 function ratioFromSize(width: number, height: number) {

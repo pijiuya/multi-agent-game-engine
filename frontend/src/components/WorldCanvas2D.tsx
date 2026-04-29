@@ -227,11 +227,8 @@ function drawMarker(layer: Graphics, point: Point, color: number) {
 }
 
 function toolColor(tool: EditTool) {
-  if (tool === "obstacle") {
-    return 0xef4444;
-  }
-  if (tool === "zone") {
-    return 0x0ea5e9;
+  if (tool === "region") {
+    return 0x111827;
   }
   return 0x16a34a;
 }

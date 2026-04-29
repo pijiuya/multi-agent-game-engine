@@ -8,6 +8,18 @@ from uuid import uuid4
 from .geometry import distance, point_in_polygon
 
 
+REGION_FUNCTION_ORDER = ["walkable", "obstacle", "action", "residential", "social", "custom", "unassigned"]
+REGION_FUNCTION_LABELS = {
+    "walkable": "道路",
+    "obstacle": "不可通过",
+    "action": "行动区",
+    "residential": "居住区",
+    "social": "社交区",
+    "custom": "自定义",
+    "unassigned": "未设定",
+}
+
+
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex[:10]}"
 
@@ -31,10 +43,14 @@ class PolygonArea:
     name: str
     points: list[Point]
     kind: str = "walkable"
+    holes: list[list[Point]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def contains(self, point: Point) -> bool:
-        return point_in_polygon(point.to_dict(), [p.to_dict() for p in self.points])
+        payload = point.to_dict()
+        if not point_in_polygon(payload, [p.to_dict() for p in self.points]):
+            return False
+        return not any(point_in_polygon(payload, [p.to_dict() for p in hole]) for hole in self.holes)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -42,6 +58,7 @@ class PolygonArea:
             "name": self.name,
             "kind": self.kind,
             "points": [p.to_dict() for p in self.points],
+            "holes": [[point.to_dict() for point in hole] for hole in self.holes],
             "metadata": self.metadata,
         }
 
@@ -52,6 +69,10 @@ class PolygonArea:
             name=data.get("name", data["id"]),
             kind=data.get("kind", "walkable"),
             points=[Point.from_dict(point) for point in data.get("points", [])],
+            holes=[
+                [Point.from_dict(point) for point in hole]
+                for hole in data.get("holes", [])
+            ],
             metadata=data.get("metadata", {}),
         )
 
@@ -61,20 +82,23 @@ class MapRegion:
     id: str
     name: str
     points: list[Point]
+    holes: list[list[Point]] = field(default_factory=list)
     source: str = "sam"
     function: str = "unassigned"
     image_prompt: str = ""
     notes: str = ""
     confidence: float = 0.0
     tags: list[str] = field(default_factory=list)
+    hidden: bool = False
 
     def to_area(self) -> PolygonArea:
-        kind = "zone" if self.function == "social" else self.function
+        kind = "zone" if self.function == "social" else "walkable" if self.function == "action" else self.function
         return PolygonArea(
             id=f"area_{self.id}",
             name=self.name,
             kind=kind,
             points=self.points,
+            holes=self.holes,
             metadata={
                 "region_id": self.id,
                 "source": self.source,
@@ -89,12 +113,14 @@ class MapRegion:
             "id": self.id,
             "name": self.name,
             "points": [point.to_dict() for point in self.points],
+            "holes": [[point.to_dict() for point in hole] for hole in self.holes],
             "source": self.source,
             "function": self.function,
             "image_prompt": self.image_prompt,
             "notes": self.notes,
             "confidence": self.confidence,
             "tags": self.tags,
+            "hidden": self.hidden,
         }
 
     @classmethod
@@ -103,12 +129,17 @@ class MapRegion:
             id=data["id"],
             name=data.get("name", data["id"]),
             points=[Point.from_dict(point) for point in data.get("points", [])],
+            holes=[
+                [Point.from_dict(point) for point in hole]
+                for hole in data.get("holes", [])
+            ],
             source=data.get("source", "sam"),
             function=data.get("function", "unassigned"),
             image_prompt=data.get("image_prompt", data.get("imagePrompt", "")),
             notes=data.get("notes", ""),
             confidence=float(data.get("confidence", 0)),
             tags=list(data.get("tags", [])),
+            hidden=bool(data.get("hidden", False)),
         )
 
 
@@ -124,6 +155,7 @@ class WorldItem:
     description: str = ""
     tags: list[str] = field(default_factory=list)
     state: dict[str, Any] = field(default_factory=dict)
+    hidden: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -137,6 +169,7 @@ class WorldItem:
             "description": self.description,
             "tags": self.tags,
             "state": self.state,
+            "hidden": self.hidden,
         }
 
     @classmethod
@@ -152,6 +185,7 @@ class WorldItem:
             description=str(data.get("description", "")),
             tags=list(data.get("tags", [])),
             state=dict(data.get("state", {})),
+            hidden=bool(data.get("hidden", False)),
         )
 
 
@@ -193,22 +227,48 @@ class WorldMap:
         return next((region for region in self.regions if region.id == region_id), None)
 
     def sync_functional_regions(self) -> None:
-        self.walkable_areas = [
-            area for area in self.walkable_areas if not area.metadata.get("generated")
-        ]
-        self.obstacles = [
-            area for area in self.obstacles if not area.metadata.get("generated")
-        ]
-        self.interaction_zones = [
-            area for area in self.interaction_zones if not area.metadata.get("generated")
-        ]
+        self.import_legacy_areas_as_regions()
+        self.walkable_areas = []
+        self.obstacles = []
+        self.interaction_zones = []
         for region in self.regions:
-            if region.function == "walkable":
+            if region.hidden:
+                continue
+            if region.function in {"walkable", "action"}:
                 self.walkable_areas.append(region.to_area())
             elif region.function == "obstacle":
                 self.obstacles.append(region.to_area())
             elif region.function == "social":
                 self.interaction_zones.append(region.to_area())
+
+    def import_legacy_areas_as_regions(self) -> None:
+        existing_ids = {region.id for region in self.regions}
+        legacy_groups = [
+            (self.walkable_areas, "walkable"),
+            (self.obstacles, "obstacle"),
+            (self.interaction_zones, "social"),
+        ]
+        for areas, function in legacy_groups:
+            for area in areas:
+                if area.metadata.get("generated") or len(area.points) < 3:
+                    continue
+                region_id = str(area.metadata.get("region_id") or f"region_{area.id}")
+                if region_id in existing_ids:
+                    continue
+                existing_ids.add(region_id)
+                self.regions.append(
+                    MapRegion(
+                        id=region_id,
+                        name=area.name,
+                        points=area.points,
+                        holes=area.holes,
+                        source="manual",
+                        function=function,
+                        notes="从旧几何区域迁移为统一区域。",
+                        confidence=1.0,
+                        tags=["手绘"],
+                    )
+                )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -224,11 +284,26 @@ class WorldMap:
             "triggers": [trigger.to_dict() for trigger in self.triggers],
             "spawn_points": [point.to_dict() for point in self.spawn_points],
             "regions": [region.to_dict() for region in self.regions],
+            "region_layers": self.region_layers(),
         }
+
+    def region_layers(self) -> list[dict[str, Any]]:
+        layers: list[dict[str, Any]] = []
+        for function in REGION_FUNCTION_ORDER:
+            regions = [region for region in self.regions if region.function == function and not region.hidden]
+            layers.append(
+                {
+                    "function": function,
+                    "label": REGION_FUNCTION_LABELS[function],
+                    "region_ids": [region.id for region in regions],
+                    "polygons": _layer_polygons(regions),
+                }
+            )
+        return layers
 
     @classmethod
     def default(cls) -> "WorldMap":
-        return cls(
+        world_map = cls(
             id="map_default",
             name="Untitled Map",
             width=1200,
@@ -247,10 +322,12 @@ class WorldMap:
             ],
             spawn_points=[Point(240, 220), Point(320, 260), Point(400, 240)],
         )
+        world_map.sync_functional_regions()
+        return world_map
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "WorldMap":
-        return cls(
+        world_map = cls(
             id=data["id"],
             name=data.get("name", data["id"]),
             width=int(data.get("width", 1200)),
@@ -266,6 +343,8 @@ class WorldMap:
             spawn_points=[Point.from_dict(point) for point in data.get("spawn_points", [])],
             regions=[MapRegion.from_dict(region) for region in data.get("regions", [])],
         )
+        world_map.sync_functional_regions()
+        return world_map
 
 
 DEFAULT_ACTION_SPACE = ["move_to", "say", "interact", "use", "observe", "wait"]
@@ -280,6 +359,7 @@ class AgentProfile:
     model_provider: str = "mock"
     color: str = "#3b82f6"
     action_space: list[str] = field(default_factory=lambda: list(DEFAULT_ACTION_SPACE))
+    hidden: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -294,6 +374,7 @@ class AgentProfile:
             model_provider=data.get("model_provider", "mock"),
             color=data.get("color", "#3b82f6"),
             action_space=list(data.get("action_space", DEFAULT_ACTION_SPACE)),
+            hidden=bool(data.get("hidden", False)),
         )
 
 
@@ -472,6 +553,8 @@ class GameWorld:
         for other_id, other_state in self.agent_states.items():
             if other_id == agent_id:
                 continue
+            if self.agent_profiles.get(other_id) and self.agent_profiles[other_id].hidden:
+                continue
             if distance(state.position.to_dict(), other_state.position.to_dict()) <= radius:
                 nearby.append(self.agent_profiles[other_id])
         return nearby
@@ -538,3 +621,52 @@ class GameWorld:
             tick=int(data.get("tick", 0)),
             running=bool(data.get("running", False)),
         )
+
+
+def _layer_polygons(regions: list[MapRegion]) -> list[dict[str, Any]]:
+    if not regions:
+        return []
+    try:
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+    except ImportError:
+        return [
+            {
+                "points": [point.to_dict() for point in region.points],
+                "holes": [[point.to_dict() for point in hole] for hole in region.holes],
+            }
+            for region in regions
+            if len(region.points) >= 3
+        ]
+
+    geometries = []
+    for region in regions:
+        if len(region.points) < 3:
+            continue
+        polygon = Polygon(
+            [(point.x, point.y) for point in region.points],
+            [[(point.x, point.y) for point in hole] for hole in region.holes if len(hole) >= 3],
+        )
+        if not polygon.is_valid:
+            polygon = polygon.buffer(0)
+        if not polygon.is_empty:
+            geometries.append(polygon)
+    if not geometries:
+        return []
+    unioned = unary_union(geometries)
+    polygons = [unioned] if getattr(unioned, "geom_type", "") == "Polygon" else list(getattr(unioned, "geoms", []))
+    result: list[dict[str, Any]] = []
+    for polygon in polygons:
+        if getattr(polygon, "is_empty", True) or polygon.area < 1:
+            continue
+        result.append(
+            {
+                "points": [{"x": float(x), "y": float(y)} for x, y in list(polygon.exterior.coords)[:-1]],
+                "holes": [
+                    [{"x": float(x), "y": float(y)} for x, y in list(interior.coords)[:-1]]
+                    for interior in polygon.interiors
+                    if len(interior.coords) >= 4
+                ],
+            }
+        )
+    return result

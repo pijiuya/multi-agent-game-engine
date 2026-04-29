@@ -8,10 +8,8 @@ import {
   MousePointer2,
   Play,
   Save,
-  Square,
   SquareDashedMousePointer,
   StepForward,
-  Triangle
 } from "lucide-react";
 import type { EditTool, ViewMode } from "../types";
 
@@ -79,14 +77,8 @@ export function MapTools({
         <button aria-label="Select" className={editTool === "select" ? "active" : ""} onClick={() => onEditTool("select")}>
           <MousePointer2 size={19} />
         </button>
-        <button aria-label="Walkable" className={editTool === "walkable" ? "active" : ""} onClick={() => onEditTool("walkable")}>
+        <button aria-label="Region" className={editTool === "region" ? "active" : ""} onClick={() => onEditTool("region")}>
           <SquareDashedMousePointer size={19} />
-        </button>
-        <button aria-label="Obstacle" className={editTool === "obstacle" ? "active" : ""} onClick={() => onEditTool("obstacle")}>
-          <Square size={19} />
-        </button>
-        <button aria-label="Zone" className={editTool === "zone" ? "active" : ""} onClick={() => onEditTool("zone")}>
-          <Triangle size={19} />
         </button>
         <button aria-label="Item" className={editTool === "item" ? "active" : ""} onClick={() => onEditTool("item")}>
           <Box size={19} />
@@ -124,4 +116,3 @@ export function MapTools({
     </aside>
   );
 }
-

@@ -1,4 +1,5 @@
-import { CircleDot, Image, MapPin, Package, Shapes, UserRound } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleDot, Image, MapPin, Package, UserRound } from "lucide-react";
+import { useEffect, useState } from "react";
 import type { CanvasPoint, SelectionState, WorldSnapshot } from "../types";
 
 type Props = {
@@ -6,14 +7,19 @@ type Props = {
   selection: SelectionState;
   canvasPoints: CanvasPoint[];
   onSelect: (selection: SelectionState) => void;
+  onObjectContext: (target: { kind: "agent" | "item"; id: string }, screen: { x: number; y: number }) => void;
 };
 
-export function SceneElementsPanel({ world, selection, canvasPoints, onSelect }: Props) {
-  const areas = [
-    ...world.map.walkable_areas.map((area) => ({ ...area, group: "可行走" })),
-    ...world.map.obstacles.map((area) => ({ ...area, group: "障碍" })),
-    ...world.map.interaction_zones.map((area) => ({ ...area, group: "互动" }))
-  ].filter((area) => !area.metadata?.generated);
+export function SceneElementsPanel({ world, selection, canvasPoints, onSelect, onObjectContext }: Props) {
+  const [openSections, setOpenSections] = useState<Record<string, boolean>>(() => loadOpenSections());
+
+  useEffect(() => {
+    window.localStorage.setItem(SCENE_SECTION_STORAGE_KEY, JSON.stringify(openSections));
+  }, [openSections]);
+
+  function toggle(section: string) {
+    setOpenSections((current) => ({ ...current, [section]: !(current[section] ?? true) }));
+  }
 
   return (
     <div className="scene-list">
@@ -26,97 +32,98 @@ export function SceneElementsPanel({ world, selection, canvasPoints, onSelect }:
         <small>地图</small>
       </button>
 
-      <div className="panel-section-label">Agent</div>
-      {Object.values(world.agent_profiles).map((agent) => (
-        <button
-          key={agent.id}
-          className={selection.kind === "agent" && selection.id === agent.id ? "scene-list-row active" : "scene-list-row"}
-          onClick={() => onSelect({ kind: "agent", id: agent.id })}
-        >
-          <UserRound size={16} />
-          <span>{agent.name}</span>
-          <small>{agent.role}</small>
-        </button>
-      ))}
+      <SectionHeader count={Object.keys(world.agent_profiles).length} label="Agent" open={openSections.agents ?? true} onToggle={() => toggle("agents")} />
+      {openSections.agents !== false
+        ? Object.values(world.agent_profiles).map((agent) => (
+            <button
+              key={agent.id}
+              className={`${selection.kind === "agent" && selection.id === agent.id ? "scene-list-row active" : "scene-list-row"}${agent.hidden ? " hidden-object" : ""}`}
+              onClick={() => onSelect({ kind: "agent", id: agent.id })}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                onSelect({ kind: "agent", id: agent.id });
+                onObjectContext({ kind: "agent", id: agent.id }, { x: event.clientX, y: event.clientY });
+              }}
+            >
+              <UserRound size={16} />
+              <span>{agent.name}</span>
+              <small>{agent.hidden ? "已隐藏" : agent.role}</small>
+            </button>
+          ))
+        : null}
 
-      <div className="panel-section-label">几何区域</div>
-      {areas.map((area) => (
-        <button
-          key={area.id}
-          className={selection.kind === "area" && selection.id === area.id ? "scene-list-row active" : "scene-list-row"}
-          onClick={() => onSelect({ kind: "area", id: area.id })}
-        >
-          <Shapes size={16} />
-          <span>{area.name}</span>
-          <small>{area.group}</small>
-        </button>
-      ))}
+      <SectionHeader count={world.map.items.length} label="元素" open={openSections.items ?? true} onToggle={() => toggle("items")} />
+      {openSections.items !== false
+        ? world.map.items.map((item) => (
+            <button
+              key={item.id}
+              className={`${selection.kind === "item" && selection.id === item.id ? "scene-list-row active" : "scene-list-row"}${item.hidden ? " hidden-object" : ""}`}
+              onClick={() => onSelect({ kind: "item", id: item.id })}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                onSelect({ kind: "item", id: item.id });
+                onObjectContext({ kind: "item", id: item.id }, { x: event.clientX, y: event.clientY });
+              }}
+            >
+              <Package size={16} />
+              <span>{item.name}</span>
+              <small>{item.hidden ? "已隐藏" : item.tags.join(", ") || "元素"}</small>
+            </button>
+          ))
+        : null}
 
-      <div className="panel-section-label">SAM 分层</div>
-      {world.map.regions.map((region) => (
-        <button
-          key={region.id}
-          className={selection.kind === "region" && selection.id === region.id ? "scene-list-row active" : "scene-list-row"}
-          onClick={() => onSelect({ kind: "region", id: region.id })}
-        >
-          <Shapes size={16} />
-          <span>{region.name}</span>
-          <small>{regionFunctionLabel(region.function)}</small>
-        </button>
-      ))}
+      <SectionHeader count={canvasPoints.length} label="空点" open={openSections.points ?? true} onToggle={() => toggle("points")} />
+      {openSections.points !== false
+        ? canvasPoints.map((point) => (
+            <button
+              key={point.id}
+              className={selection.kind === "point" && selection.id === point.id ? "scene-list-row active" : "scene-list-row"}
+              onClick={() => onSelect({ kind: "point", id: point.id })}
+            >
+              <CircleDot size={16} />
+              <span>{point.name}</span>
+              <small>
+                {Math.round(point.position.x)}, {Math.round(point.position.y)}
+              </small>
+            </button>
+          ))
+        : null}
 
-      <div className="panel-section-label">元素</div>
-      {world.map.items.map((item) => (
-        <button
-          key={item.id}
-          className={selection.kind === "item" && selection.id === item.id ? "scene-list-row active" : "scene-list-row"}
-          onClick={() => onSelect({ kind: "item", id: item.id })}
-        >
-          <Package size={16} />
-          <span>{item.name}</span>
-          <small>{item.tags.join(", ") || "元素"}</small>
-        </button>
-      ))}
-
-      <div className="panel-section-label">空点</div>
-      {canvasPoints.map((point) => (
-        <button
-          key={point.id}
-          className={selection.kind === "point" && selection.id === point.id ? "scene-list-row active" : "scene-list-row"}
-          onClick={() => onSelect({ kind: "point", id: point.id })}
-        >
-          <CircleDot size={16} />
-          <span>{point.name}</span>
-          <small>
-            {Math.round(point.position.x)}, {Math.round(point.position.y)}
-          </small>
-        </button>
-      ))}
-
-      <div className="panel-section-label">出生点</div>
-      {world.map.spawn_points.map((point, index) => (
-        <div className="scene-list-row readonly" key={`${point.x}-${point.y}-${index}`}>
-          <MapPin size={16} />
-          <span>出生点 {index + 1}</span>
-          <small>
-            {Math.round(point.x)}, {Math.round(point.y)}
-          </small>
-        </div>
-      ))}
+      <SectionHeader count={world.map.spawn_points.length} label="出生点" open={openSections.spawns ?? true} onToggle={() => toggle("spawns")} />
+      {openSections.spawns !== false
+        ? world.map.spawn_points.map((point, index) => (
+            <div className="scene-list-row readonly" key={`${point.x}-${point.y}-${index}`}>
+              <MapPin size={16} />
+              <span>出生点 {index + 1}</span>
+              <small>
+                {Math.round(point.x)}, {Math.round(point.y)}
+              </small>
+            </div>
+          ))
+        : null}
     </div>
   );
 }
 
-function regionFunctionLabel(value: string) {
-  const labels: Record<string, string> = {
-    unassigned: "未设定",
-    walkable: "道路",
-    obstacle: "不可穿过",
-    residential: "居住区",
-    social: "社交区",
-    custom: "自定义"
-  };
-  return labels[value] ?? value;
+const SCENE_SECTION_STORAGE_KEY = "agent-workstation.scene-sections.v1";
+
+function SectionHeader({ count, label, open, onToggle }: { count: number; label: string; open: boolean; onToggle: () => void }) {
+  return (
+    <button className="panel-section-toggle" onClick={onToggle} type="button">
+      {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+      <span>{label}</span>
+      <small>{count} 个</small>
+    </button>
+  );
+}
+
+function loadOpenSections() {
+  const defaults = { agents: true, items: true, points: true, spawns: true };
+  try {
+    return { ...defaults, ...JSON.parse(window.localStorage.getItem(SCENE_SECTION_STORAGE_KEY) ?? "{}") };
+  } catch {
+    return defaults;
+  }
 }
 
 function displayName(name: string) {

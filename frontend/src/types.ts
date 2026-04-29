@@ -8,21 +8,36 @@ export type PolygonArea = {
   name: string;
   kind: string;
   points: Point[];
+  holes: Point[][];
   metadata?: Record<string, unknown>;
 };
 
-export type MapRegionFunction = "unassigned" | "walkable" | "obstacle" | "residential" | "social" | "custom";
+export type MapRegionFunction = "unassigned" | "walkable" | "obstacle" | "action" | "residential" | "social" | "custom";
 
 export type MapRegion = {
   id: string;
   name: string;
   points: Point[];
+  holes: Point[][];
   source: string;
   function: MapRegionFunction;
   image_prompt: string;
   notes: string;
   confidence: number;
   tags: string[];
+  hidden: boolean;
+};
+
+export type RegionLayerPolygon = {
+  points: Point[];
+  holes: Point[][];
+};
+
+export type RegionLayer = {
+  function: MapRegionFunction;
+  label: string;
+  region_ids: string[];
+  polygons: RegionLayerPolygon[];
 };
 
 export type WorldItem = {
@@ -36,6 +51,7 @@ export type WorldItem = {
   description: string;
   tags: string[];
   state: Record<string, unknown>;
+  hidden: boolean;
 };
 
 export type WorldMap = {
@@ -51,6 +67,7 @@ export type WorldMap = {
   triggers: PolygonArea[];
   spawn_points: Point[];
   regions: MapRegion[];
+  region_layers: RegionLayer[];
 };
 
 export type AgentProfile = {
@@ -61,6 +78,7 @@ export type AgentProfile = {
   model_provider: string;
   color: string;
   action_space: string[];
+  hidden: boolean;
 };
 
 export type AgentState = {
@@ -112,10 +130,12 @@ export type WorldSnapshot = {
 
 export type ViewMode = "2d" | "3d";
 
-export type EditTool = "select" | "walkable" | "obstacle" | "zone" | "item" | "spawn" | "move" | "anchor";
+export type EditTool = "select" | "region" | "item" | "spawn" | "move" | "anchor";
+
+export type RegionDrawOperation = "add" | "subtract";
 
 export type PanelState = {
-  id: "tools" | "scene" | "agents" | "properties" | "models" | "mapStudio";
+  id: "tools" | "scene" | "agents" | "properties" | "models" | "mapStudio" | "regions" | "regionDraw";
   title: string;
   x: number;
   y: number;
@@ -130,8 +150,9 @@ export type SelectionState =
   | { kind: "map"; id: string }
   | { kind: "agent"; id: string }
   | { kind: "item"; id: string }
-  | { kind: "area"; id: string }
   | { kind: "region"; id: string }
+  | { kind: "regionLayer"; id: MapRegionFunction }
+  | { kind: "regions"; id: "all" }
   | { kind: "point"; id: string };
 
 export type CanvasViewState = {

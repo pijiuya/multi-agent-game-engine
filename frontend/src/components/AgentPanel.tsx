@@ -36,7 +36,7 @@ export function AgentPanel({ world, selection, onSelect, onLocateAgent, onRename
           const state = world.agent_states[agent.id];
           return (
             <button
-              className={selection.kind === "agent" && selection.id === agent.id ? "agent-card active" : "agent-card"}
+              className={`${selection.kind === "agent" && selection.id === agent.id ? "agent-card active" : "agent-card"}${agent.hidden ? " hidden-object" : ""}`}
               key={agent.id}
               onClick={() => onSelect({ kind: "agent", id: agent.id })}
               onDoubleClick={() => onLocateAgent(agent.id)}
@@ -50,7 +50,7 @@ export function AgentPanel({ world, selection, onSelect, onLocateAgent, onRename
               <span>
                 <strong>{agent.name}</strong>
                 <small>
-                  {state?.pending_model ? "思考中" : stateLabel(state?.status)} / {agent.role}
+                  {agent.hidden ? "已隐藏" : state?.pending_model ? "思考中" : stateLabel(state?.status)} / {agent.role}
                 </small>
               </span>
             </button>

@@ -12,12 +12,14 @@ import type {
   WorldSnapshot
 } from "../types";
 
-type StudioStep = "background" | "segment" | "layers";
+export type MapStudioStep = "background" | "segment" | "layers";
 type LayerAction = "name" | "regenerate" | "function";
 
 type Props = {
   world: WorldSnapshot;
   models: ModelConfig[];
+  activeStep: MapStudioStep;
+  activeRegionId: string | null;
   selection: SelectionState;
   generation: MapGenerationState | null;
   segmentation: MapSegmentationState;
@@ -27,14 +29,15 @@ type Props = {
   onSelectCandidate: (candidateId: string) => void;
   onSegment: () => void;
   onSelect: (selection: SelectionState) => void;
+  onActivateRegion: (regionId: string) => void;
+  onActiveStepChange: (step: MapStudioStep) => void;
   onUpdateRegion: (regionId: string, patch: Partial<Omit<MapRegion, "id" | "points" | "source">>) => void;
   onRegenerateRegion: (regionId: string, prompt: string) => void;
-  onAutoLabelRegion: (regionId: string) => void;
 };
 
 const DEFAULT_PROMPT = "一个适合多 agent 生活和社交的俯视 2D 小镇工作站，有清晰道路、居住区、公共社交空间和不可穿过的景观结构";
 
-const STEPS: { id: StudioStep; label: string }[] = [
+const STEPS: { id: MapStudioStep; label: string }[] = [
   { id: "background", label: "背景生成/导入" },
   { id: "segment", label: "SAM 分层" },
   { id: "layers", label: "图层处理" }
@@ -43,6 +46,8 @@ const STEPS: { id: StudioStep; label: string }[] = [
 export function MapStudioPanel({
   world,
   models,
+  activeStep,
+  activeRegionId,
   selection,
   generation,
   segmentation,
@@ -52,11 +57,11 @@ export function MapStudioPanel({
   onSelectCandidate,
   onSegment,
   onSelect,
+  onActivateRegion,
+  onActiveStepChange,
   onUpdateRegion,
-  onRegenerateRegion,
-  onAutoLabelRegion
+  onRegenerateRegion
 }: Props) {
-  const [activeStep, setActiveStep] = useState<StudioStep>("background");
   const [layerAction, setLayerAction] = useState<LayerAction>("name");
   const [ratio, setRatio] = useState<MapRatioPreset>(() => ratioFromSize(world.map.width, world.map.height));
   const [width, setWidth] = useState(world.map.width || 1920);
@@ -65,8 +70,7 @@ export function MapStudioPanel({
   const [regionPrompt, setRegionPrompt] = useState("");
 
   const segmentationProvider = useMemo(() => enabledModelForCapability(models, "segmentation"), [models]);
-  const visionProvider = useMemo(() => enabledModelForCapability(models, "vision_labeling"), [models]);
-  const selectedRegion = selection.kind === "region" ? world.map.regions.find((region) => region.id === selection.id) ?? null : null;
+  const selectedRegion = activeRegionId ? world.map.regions.find((region) => region.id === activeRegionId) ?? null : null;
   const hasValidSize = width >= 128 && height >= 128;
   const hasBackground = Boolean(world.map.background_image);
   const isSegmenting = segmentation.status === "running";
@@ -81,12 +85,11 @@ export function MapStudioPanel({
 
   useEffect(() => {
     if (activeStep === "layers") {
-      const nextRegion = selectedRegion ?? world.map.regions[0] ?? null;
-      if (nextRegion && selection.kind !== "region") {
-        onSelect({ kind: "region", id: nextRegion.id });
+      if (world.map.regions.length > 0 && selection.kind === "map") {
+        onSelect({ kind: "regions", id: "all" });
       }
     }
-  }, [activeStep, onSelect, selectedRegion, selection.kind, world.map.regions]);
+  }, [activeStep, onSelect, selection.kind, world.map.regions]);
 
   function setPreset(next: MapRatioPreset) {
     setRatio(next);
@@ -115,13 +118,6 @@ export function MapStudioPanel({
     }
   }
 
-  function nameWithVisionModel() {
-    if (!selectedRegion || !visionProvider) {
-      return;
-    }
-    onAutoLabelRegion(selectedRegion.id);
-  }
-
   return (
     <div className="map-studio-panel" data-testid="map-studio-panel">
       <div className="panel-section-label">地图工作台</div>
@@ -131,7 +127,7 @@ export function MapStudioPanel({
             className={stepButtonClass(step.id, activeStep, stepState(step.id, world, generation, segmentation))}
             data-testid={`map-step-${step.id}`}
             key={step.id}
-            onClick={() => setActiveStep(step.id)}
+            onClick={() => onActiveStepChange(step.id)}
             type="button"
           >
             <span>{stepState(step.id, world, generation, segmentation) === "done" ? <CheckCircle2 size={12} /> : index + 1}</span>
@@ -238,7 +234,7 @@ export function MapStudioPanel({
 
       {activeStep === "layers" ? (
         <section className="map-step-body" data-testid="map-step-body-layers">
-          <RegionList world={world} selection={selection} onSelect={onSelect} />
+          <RegionList activeRegionId={activeRegionId} world={world} onActivateRegion={onActivateRegion} />
           {selectedRegion ? (
             <>
               <div className="ratio-row" data-testid="layer-action-controls">
@@ -263,10 +259,7 @@ export function MapStudioPanel({
                       }}
                     />
                   </label>
-                  <button className="panel-action-button" disabled={!visionProvider} onClick={nameWithVisionModel} type="button">
-                    <WandSparkles size={15} />
-                    {visionProvider ? `用 ${visionProvider.name} 自动命名` : "未配置图像识别模型"}
-                  </button>
+                  <div className="segmentation-status">自动命名先不启用；请在这里手动命名。</div>
                 </>
               ) : null}
               {layerAction === "regenerate" ? (
@@ -299,7 +292,9 @@ export function MapStudioPanel({
               ) : null}
             </>
           ) : (
-            <div className="segmentation-status error">还没有 SAM 图层</div>
+            <div className={world.map.regions.length ? "segmentation-status" : "segmentation-status error"}>
+              {world.map.regions.length ? "选择一个区域后，可以命名、重生成或设置功能。" : "还没有区域图层"}
+            </div>
           )}
         </section>
       ) : null}
@@ -339,14 +334,22 @@ function ProgressBar({ segmentation }: { segmentation: MapSegmentationState }) {
   );
 }
 
-function RegionList({ world, selection, onSelect }: { world: WorldSnapshot; selection: SelectionState; onSelect: (selection: SelectionState) => void }) {
+function RegionList({
+  activeRegionId,
+  world,
+  onActivateRegion
+}: {
+  activeRegionId: string | null;
+  world: WorldSnapshot;
+  onActivateRegion: (regionId: string) => void;
+}) {
   return (
     <div className="sam-layer-list" data-testid="sam-layer-list">
       {world.map.regions.map((region) => (
         <button
-          className={selection.kind === "region" && selection.id === region.id ? "scene-list-row active" : "scene-list-row"}
+          className={activeRegionId === region.id ? "scene-list-row active" : "scene-list-row"}
           key={region.id}
-          onClick={() => onSelect({ kind: "region", id: region.id })}
+          onClick={() => onActivateRegion(region.id)}
           type="button"
         >
           <span>{region.name}</span>
@@ -362,6 +365,7 @@ function FunctionButtons({ value, onCommit }: { value: MapRegionFunction; onComm
   const options: { value: MapRegionFunction; label: string }[] = [
     { value: "walkable", label: "道路" },
     { value: "obstacle", label: "不可穿过" },
+    { value: "action", label: "行动区" },
     { value: "residential", label: "居住区" },
     { value: "social", label: "社交区" },
     { value: "custom", label: "自定义" },
@@ -381,11 +385,11 @@ function FunctionButtons({ value, onCommit }: { value: MapRegionFunction; onComm
   );
 }
 
-function stepButtonClass(step: StudioStep, activeStep: StudioStep, state: "idle" | "active" | "done" | "error") {
+function stepButtonClass(step: MapStudioStep, activeStep: MapStudioStep, state: "idle" | "active" | "done" | "error") {
   return `workflow-step ${state}${step === activeStep ? " selected" : ""}`;
 }
 
-function stepState(step: StudioStep, world: WorldSnapshot, generation: MapGenerationState | null, segmentation: MapSegmentationState) {
+function stepState(step: MapStudioStep, world: WorldSnapshot, generation: MapGenerationState | null, segmentation: MapSegmentationState) {
   if (step === "background") {
     return world.map.background_image ? "done" : generation?.candidates.length ? "active" : "idle";
   }
@@ -457,6 +461,7 @@ function functionLabel(value: MapRegionFunction) {
     unassigned: "未设定",
     walkable: "道路",
     obstacle: "不可穿过",
+    action: "行动区",
     residential: "居住区",
     social: "社交区",
     custom: "自定义"
