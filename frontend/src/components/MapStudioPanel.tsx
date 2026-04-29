@@ -308,7 +308,7 @@ function ProviderCard({ provider, segmentation }: { provider: ModelConfig | null
     return (
       <div className="model-config-row" data-testid="sam-provider-card">
         <strong>未配置 SAM 分层模型</strong>
-        <small>在模型管理中启用一个带 segmentation 能力的本地 HTTP SAM provider。</small>
+        <small>请先在模型管理里配置 SAM 分层；优先使用本机 SAM 小服务。</small>
       </div>
     );
   }
@@ -316,7 +316,7 @@ function ProviderCard({ provider, segmentation }: { provider: ModelConfig | null
     <div className="model-config-row" data-testid="sam-provider-card">
       <strong>{provider.name}</strong>
       <small>
-        {provider.provider === "mock" ? "测试 Mock" : "HTTP SAM"} / {provider.model || "未指定模型"}
+        {provider.provider === "mock" ? "测试 Mock" : "SAM 分层服务"} / {provider.model || "未指定模型"}
       </small>
       <small>{provider.baseUrl || "本地 mock provider"}</small>
       {segmentation.mode === "mock" || segmentation.mode === "local_mock" ? <small>当前结果来自测试 Mock SAM</small> : null}

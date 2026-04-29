@@ -463,37 +463,37 @@ function defaultCapabilityStatus(): ModelCapabilityStatus[] {
       id: "llm",
       label: "语言模型 LLM",
       status: "missing",
-      summary: "未连接后端，无法检测本地 LLM",
+      summary: "本机引擎服务暂未连接，正在等待模型检测",
       configured: false,
       configured_model_id: null,
       configured_model_name: null,
       local_available: false,
       recommended_local: null,
-      suggestions: ["启动后端后可检测 Ollama。"]
+      suggestions: ["桌面版会自动启动本机引擎；如果一直没有连接，请确认 Python 依赖已安装。"]
     },
     {
       id: "image_generation",
       label: "图片生成",
       status: "missing",
-      summary: "未连接后端，无法检测图片生成服务",
+      summary: "本机引擎服务暂未连接，暂时无法检测图片生成器",
       configured: false,
       configured_model_id: null,
       configured_model_name: null,
       local_available: false,
       recommended_local: null,
-      suggestions: ["可先使用高级配置接入本地图片生成 HTTP 服务。"]
+      suggestions: ["现在可以先导入图片；连接本机引擎后再检测本地图片生成器。"]
     },
     {
       id: "segmentation",
       label: "SAM 分层",
       status: "missing",
-      summary: "未连接后端，无法检测 SAM 服务",
+      summary: "本机引擎服务暂未连接，暂时无法检测 SAM 分层",
       configured: false,
       configured_model_id: null,
       configured_model_name: null,
       local_available: false,
       recommended_local: null,
-      suggestions: ["启动 SAM HTTP 服务后可一键配置。"]
+      suggestions: ["连接本机引擎后会检测 SAM 分层小服务；没有检测到时可按卡片里的最快路径处理。"]
     }
   ];
 }

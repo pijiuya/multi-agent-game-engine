@@ -18,24 +18,42 @@ type Props = {
 
 const CAPABILITY_ORDER: ModelCapabilityId[] = ["llm", "image_generation", "segmentation"];
 
-const CAPABILITY_META: Record<ModelCapabilityId, { title: string; subtitle: string; icon: typeof Bot; localLabel: string }> = {
+const CAPABILITY_META: Record<
+  ModelCapabilityId,
+  { title: string; subtitle: string; icon: typeof Bot; localLabel: string; setupSteps: string[] }
+> = {
   llm: {
     title: "语言模型 LLM",
     subtitle: "控制 agent 的语言、意图和身份表达",
     icon: Bot,
-    localLabel: "一键使用本地 LLM"
+    localLabel: "一键使用本地 LLM",
+    setupSteps: [
+      "安装并打开 Ollama。",
+      "准备 qwen2.5:1.5b、qwen2.5:7b 或 gemma3:1b。",
+      "回到这里点击重新检测，再一键使用本地 LLM。"
+    ]
   },
   image_generation: {
     title: "图片生成",
     subtitle: "生成 2D 地图背景和后续局部重绘",
     icon: ImagePlus,
-    localLabel: "一键使用本地图片服务"
+    localLabel: "一键使用本地图片服务",
+    setupSteps: [
+      "首版可以先用内置测试候选或直接导入图片。",
+      "要接本地图片模型时，启动 ComfyUI 或同类本地图片生成器。",
+      "生成器给出服务地址后，在高级配置里填入并保存。"
+    ]
   },
   segmentation: {
     title: "SAM 分层",
     subtitle: "把背景图切分成可命名、可设定功能的区域",
     icon: Layers3,
-    localLabel: "一键使用本地 SAM"
+    localLabel: "一键使用本地 SAM",
+    setupSteps: [
+      "启动一个本地 SAM 分层小服务，默认建议端口 8001。",
+      "它只需要接收地图图片并返回区域多边形。",
+      "启动后点击重新检测；检测到后点一键使用本地 SAM。"
+    ]
   }
 };
 
@@ -166,6 +184,16 @@ function CapabilityDetail({
       {status.suggestions.map((suggestion) => (
         <div className="model-suggestion" key={suggestion}>{suggestion}</div>
       ))}
+      {status.status !== "ready" ? (
+        <div className="model-setup-steps">
+          <span>最快路径</span>
+          <ol>
+            {meta.setupSteps.map((step) => (
+              <li key={step}>{step}</li>
+            ))}
+          </ol>
+        </div>
+      ) : null}
       <div className="model-action-row">
         <button className="panel-action-button" disabled={!canUseLocal} onClick={() => onConfigureLocal(capability)} type="button">
           <CheckCircle2 size={15} />
@@ -183,8 +211,8 @@ function CapabilityDetail({
       {advancedOpen ? (
         <div className="model-advanced-panel" data-testid={`model-advanced-${capability}`}>
           <label>
-            <span>API 地址</span>
-            <input aria-label={`${meta.title} API 地址`} onChange={(event) => onUpdateDraft({ baseUrl: event.currentTarget.value })} value={draft.baseUrl} />
+            <span>服务地址</span>
+            <input aria-label={`${meta.title} 服务地址`} onChange={(event) => onUpdateDraft({ baseUrl: event.currentTarget.value })} value={draft.baseUrl} />
           </label>
           <label>
             <span>API Key</span>

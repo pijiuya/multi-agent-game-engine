@@ -332,11 +332,11 @@ def test_model(model_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Model config not found")
     provider = config.get("provider", "mock")
     if provider != "mock" and not config.get("base_url"):
-        return {"ok": False, "provider": provider, "message": "缺少 HTTP 地址"}
+        return {"ok": False, "provider": provider, "message": "缺少服务地址"}
     return {
         "ok": bool(config.get("enabled", True)),
         "provider": provider,
-        "message": "Mock provider 可用" if provider == "mock" else "HTTP provider 已配置",
+        "message": "测试 Mock 可用" if provider == "mock" else "模型服务已配置",
     }
 
 
@@ -842,19 +842,19 @@ def _capability_suggestions(
     if capability == "image_generation":
         if local_services.get("image_generation", {}).get("available"):
             return ["检测到本地图片生成服务，可以一键配置。"]
-        return ["推荐后续接入本地 ComfyUI 或其他轻量图片生成 HTTP 服务。"]
+        return ["可先导入图片或使用测试候选；需要真生成时，推荐接入本地 ComfyUI 等图片生成器。"]
     if capability == "segmentation":
         if local_services.get("segmentation", {}).get("available"):
-            return ["检测到本地 SAM HTTP 服务，可以一键配置。"]
-        return ["推荐启动一个本地 SAM HTTP 服务，并通过 AGENT_ENGINE_SAM_URL 或高级配置填写地址。"]
+            return ["检测到本地 SAM 分层服务，可以一键配置。"]
+        return ["推荐启动一个本地 SAM 分层小服务；启动后重新检测，或在高级配置填写它给出的服务地址。"]
     return []
 
 
 def _missing_capability_message(capability: str) -> str:
     messages = {
         "llm": "未检测到可用本地 LLM；建议安装 Ollama 并准备 qwen2.5:1.5b。",
-        "image_generation": "未检测到本地图片生成服务；可先使用高级配置接入本地/远程 HTTP 服务。",
-        "segmentation": "未检测到本地 SAM 服务；请启动 SAM HTTP 服务或填写高级 API 地址。",
+        "image_generation": "未检测到本地图片生成器；可先导入图片，或在高级配置接入图片生成服务。",
+        "segmentation": "未检测到本地 SAM 分层服务；请先启动 SAM 小服务，或在高级配置填写服务地址。",
     }
     return messages.get(capability, "未检测到可用本地能力")
 
@@ -894,7 +894,7 @@ def _segmentation_state(
 def _call_http_sam_provider(config: dict[str, Any], world_map: WorldMap) -> list[MapRegion]:
     base_url = str(config.get("base_url", "")).strip()
     if not base_url:
-        raise HTTPException(status_code=400, detail="SAM 分层模型缺少 HTTP 地址")
+        raise HTTPException(status_code=400, detail="SAM 分层模型缺少服务地址")
     body = {
         "image": world_map.background_image,
         "image_path": _asset_path_for_url(world_map.background_image),
@@ -914,9 +914,9 @@ def _call_http_sam_provider(config: dict[str, Any], world_map: WorldMap) -> list
         with urlrequest.urlopen(http_request, timeout=float(os.getenv("AGENT_ENGINE_SAM_TIMEOUT", "60"))) as response:
             data = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"SAM HTTP 服务错误：{exc.code}") from exc
+        raise HTTPException(status_code=502, detail=f"SAM 分层服务错误：{exc.code}") from exc
     except (URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=502, detail=f"SAM HTTP 服务不可用：{exc}") from exc
+        raise HTTPException(status_code=502, detail=f"SAM 分层服务不可用：{exc}") from exc
     return _regions_from_provider_response(data, config)
 
 

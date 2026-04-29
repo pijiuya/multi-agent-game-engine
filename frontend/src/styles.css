@@ -1361,6 +1361,7 @@ input:focus {
 .model-dialogue-row,
 .model-status-card,
 .model-suggestion,
+.model-setup-steps,
 .model-advanced-panel {
   display: grid;
   gap: 4px;
@@ -1371,6 +1372,7 @@ input:focus {
 }
 
 .model-dialogue-row span,
+.model-setup-steps span,
 .model-advanced-panel span {
   font-size: 11px;
   color: var(--label);
@@ -1389,6 +1391,16 @@ input:focus {
 .model-suggestion {
   color: var(--ink);
   white-space: normal;
+}
+
+.model-setup-steps ol {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--ink);
 }
 
 .model-action-row {

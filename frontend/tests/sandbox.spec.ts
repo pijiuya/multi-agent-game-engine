@@ -556,7 +556,7 @@ test("map studio separates model management and runs gated SAM flow", async ({ p
   await expect(modelsPanel.getByTestId("model-capability-cards")).toContainText("语言模型 LLM");
   await expect(modelsPanel.getByTestId("model-capability-cards")).toContainText("图片生成");
   await expect(modelsPanel.getByTestId("model-capability-cards")).toContainText("SAM 分层");
-  await expect(modelsPanel.getByText("API 地址")).toHaveCount(0);
+  await expect(modelsPanel.getByText("服务地址", { exact: true })).toHaveCount(0);
   await expect(modelsPanel.getByText("Provider")).toHaveCount(0);
   await expect(modelsPanel.getByRole("button", { name: "新增模型" })).toHaveCount(0);
   await expect(modelsPanel.getByTestId("map-ratio-controls")).toHaveCount(0);
@@ -564,7 +564,7 @@ test("map studio separates model management and runs gated SAM flow", async ({ p
   await expect(modelsPanel.getByTestId("segment-map-button")).toHaveCount(0);
   await modelsPanel.getByTestId("model-capability-segmentation").click();
   await modelsPanel.getByTestId("model-advanced-toggle-segmentation").click();
-  await expect(modelsPanel.getByTestId("model-advanced-segmentation").getByText("API 地址", { exact: true })).toBeVisible();
+  await expect(modelsPanel.getByTestId("model-advanced-segmentation").getByText("服务地址", { exact: true })).toBeVisible();
   await expect(modelsPanel.getByTestId("model-advanced-segmentation").getByText("API Key", { exact: true })).toBeVisible();
 
   await expect(mapStudioPanel.getByTestId("map-workflow-steps")).toContainText("背景生成/导入");
