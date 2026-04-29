@@ -50,6 +50,7 @@ export const fallbackWorld: WorldSnapshot = {
         ]
       }
     ],
+    regions: [],
     items: [
       {
         id: "item_lamp",

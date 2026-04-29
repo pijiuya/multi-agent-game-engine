@@ -13,7 +13,7 @@ export function SceneElementsPanel({ world, selection, canvasPoints, onSelect }:
     ...world.map.walkable_areas.map((area) => ({ ...area, group: "可行走" })),
     ...world.map.obstacles.map((area) => ({ ...area, group: "障碍" })),
     ...world.map.interaction_zones.map((area) => ({ ...area, group: "互动" }))
-  ];
+  ].filter((area) => !area.metadata?.generated);
 
   return (
     <div className="scene-list">
@@ -49,6 +49,19 @@ export function SceneElementsPanel({ world, selection, canvasPoints, onSelect }:
           <Shapes size={16} />
           <span>{area.name}</span>
           <small>{area.group}</small>
+        </button>
+      ))}
+
+      <div className="panel-section-label">SAM 分层</div>
+      {world.map.regions.map((region) => (
+        <button
+          key={region.id}
+          className={selection.kind === "region" && selection.id === region.id ? "scene-list-row active" : "scene-list-row"}
+          onClick={() => onSelect({ kind: "region", id: region.id })}
+        >
+          <Shapes size={16} />
+          <span>{region.name}</span>
+          <small>{regionFunctionLabel(region.function)}</small>
         </button>
       ))}
 
@@ -92,6 +105,18 @@ export function SceneElementsPanel({ world, selection, canvasPoints, onSelect }:
       ))}
     </div>
   );
+}
+
+function regionFunctionLabel(value: string) {
+  const labels: Record<string, string> = {
+    unassigned: "未设定",
+    walkable: "道路",
+    obstacle: "不可穿过",
+    residential: "居住区",
+    social: "社交区",
+    custom: "自定义"
+  };
+  return labels[value] ?? value;
 }
 
 function displayName(name: string) {

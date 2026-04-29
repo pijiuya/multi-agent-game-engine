@@ -118,3 +118,56 @@ class ProjectStore:
         self.initialize()
         return json.loads(self.project_json.read_text(encoding="utf-8"))
 
+    def load_model_configs(self) -> list[dict[str, Any]]:
+        self.initialize()
+        with self.connect() as conn:
+            row = conn.execute("SELECT value FROM kv WHERE key = ?", ("model_configs",)).fetchone()
+        if row is None:
+            configs = default_model_configs()
+            self.save_model_configs(configs)
+            return configs
+        return json.loads(row["value"])
+
+    def save_model_configs(self, configs: list[dict[str, Any]]) -> None:
+        self.initialize()
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)",
+                ("model_configs", json.dumps(configs)),
+            )
+            conn.commit()
+
+
+def default_model_configs() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "model_mock_llm",
+            "name": "Mock LLM",
+            "kind": "local",
+            "provider": "mock",
+            "base_url": "",
+            "model": "mock-agent",
+            "enabled": True,
+            "capabilities": ["llm"],
+        },
+        {
+            "id": "model_mock_image",
+            "name": "Mock 图片生成",
+            "kind": "local",
+            "provider": "mock",
+            "base_url": "",
+            "model": "mock-map-generator",
+            "enabled": True,
+            "capabilities": ["image_generation"],
+        },
+        {
+            "id": "model_mock_sam",
+            "name": "Mock SAM 分层（测试）",
+            "kind": "local",
+            "provider": "mock",
+            "base_url": "",
+            "model": "mock-sam",
+            "enabled": False,
+            "capabilities": ["segmentation", "vision_labeling"],
+        },
+    ]

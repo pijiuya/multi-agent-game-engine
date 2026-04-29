@@ -11,6 +11,20 @@ export type PolygonArea = {
   metadata?: Record<string, unknown>;
 };
 
+export type MapRegionFunction = "unassigned" | "walkable" | "obstacle" | "residential" | "social" | "custom";
+
+export type MapRegion = {
+  id: string;
+  name: string;
+  points: Point[];
+  source: string;
+  function: MapRegionFunction;
+  image_prompt: string;
+  notes: string;
+  confidence: number;
+  tags: string[];
+};
+
 export type WorldItem = {
   id: string;
   name: string;
@@ -36,6 +50,7 @@ export type WorldMap = {
   items: WorldItem[];
   triggers: PolygonArea[];
   spawn_points: Point[];
+  regions: MapRegion[];
 };
 
 export type AgentProfile = {
@@ -100,7 +115,7 @@ export type ViewMode = "2d" | "3d";
 export type EditTool = "select" | "walkable" | "obstacle" | "zone" | "item" | "spawn" | "move" | "anchor";
 
 export type PanelState = {
-  id: "tools" | "scene" | "agents" | "properties";
+  id: "tools" | "scene" | "agents" | "properties" | "models" | "mapStudio";
   title: string;
   x: number;
   y: number;
@@ -116,6 +131,7 @@ export type SelectionState =
   | { kind: "agent"; id: string }
   | { kind: "item"; id: string }
   | { kind: "area"; id: string }
+  | { kind: "region"; id: string }
   | { kind: "point"; id: string };
 
 export type CanvasViewState = {
@@ -130,3 +146,52 @@ export type CanvasPoint = {
   position: Point;
   snapped: boolean;
 };
+
+export type ModelCapability = "llm" | "image_generation" | "segmentation" | "vision_labeling";
+
+export type ModelConfig = {
+  id: string;
+  name: string;
+  kind: string;
+  provider: string;
+  baseUrl: string;
+  model: string;
+  enabled: boolean;
+  capabilities: ModelCapability[];
+};
+
+export type GeneratedImageCandidate = {
+  id: string;
+  url: string;
+  prompt: string;
+  width: number;
+  height: number;
+  provider_id: string;
+};
+
+export type MapGenerationState = {
+  id: string;
+  status: string;
+  prompt: string;
+  ratio: string;
+  width: number;
+  height: number;
+  provider_id: string;
+  candidates: GeneratedImageCandidate[];
+  selected_candidate_id: string | null;
+};
+
+export type MapSegmentationStage = "idle" | "prepare_image" | "call_sam" | "smooth_edges" | "save_regions" | "done" | "error";
+
+export type MapSegmentationState = {
+  status: "idle" | "running" | "done" | "error";
+  progress: number;
+  stage: MapSegmentationStage;
+  provider_id: string | null;
+  provider_name: string | null;
+  error: string | null;
+  region_count: number;
+  mode: "none" | "http" | "mock" | "local_mock";
+};
+
+export type MapRatioPreset = "1:1" | "16:9" | "custom";

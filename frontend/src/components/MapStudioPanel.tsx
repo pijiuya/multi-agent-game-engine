@@ -1,0 +1,457 @@
+import { CheckCircle2, FileUp, ImagePlus, Layers3, RefreshCw, WandSparkles } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { assetUrl } from "../lib/api";
+import type {
+  MapGenerationState,
+  MapRatioPreset,
+  MapRegion,
+  MapRegionFunction,
+  MapSegmentationState,
+  ModelConfig,
+  SelectionState,
+  WorldSnapshot
+} from "../types";
+
+type StudioStep = "background" | "segment" | "layers" | "functions";
+
+type Props = {
+  world: WorldSnapshot;
+  models: ModelConfig[];
+  selection: SelectionState;
+  generation: MapGenerationState | null;
+  segmentation: MapSegmentationState;
+  onGenerate: (prompt: string, width: number, height: number, ratio: MapRatioPreset) => void;
+  onSetFrame: (width: number, height: number) => void;
+  onUploadMap: (file: File) => void;
+  onSelectCandidate: (candidateId: string) => void;
+  onSegment: () => void;
+  onSelect: (selection: SelectionState) => void;
+  onUpdateRegion: (regionId: string, patch: Partial<Omit<MapRegion, "id" | "points" | "source">>) => void;
+  onRegenerateRegion: (regionId: string, prompt: string) => void;
+};
+
+const DEFAULT_PROMPT = "一个适合多 agent 生活和社交的俯视 2D 小镇工作站，有清晰道路、居住区、公共社交空间和不可穿过的景观结构";
+
+const STEPS: { id: StudioStep; label: string }[] = [
+  { id: "background", label: "背景生成/导入" },
+  { id: "segment", label: "SAM 分层" },
+  { id: "layers", label: "图层命名/重生成" },
+  { id: "functions", label: "功能分区" }
+];
+
+export function MapStudioPanel({
+  world,
+  models,
+  selection,
+  generation,
+  segmentation,
+  onGenerate,
+  onSetFrame,
+  onUploadMap,
+  onSelectCandidate,
+  onSegment,
+  onSelect,
+  onUpdateRegion,
+  onRegenerateRegion
+}: Props) {
+  const [activeStep, setActiveStep] = useState<StudioStep>("background");
+  const [ratio, setRatio] = useState<MapRatioPreset>(() => ratioFromSize(world.map.width, world.map.height));
+  const [width, setWidth] = useState(world.map.width || 1920);
+  const [height, setHeight] = useState(world.map.height || 1080);
+  const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
+  const [regionPrompt, setRegionPrompt] = useState("");
+
+  const segmentationProvider = useMemo(() => enabledModelForCapability(models, "segmentation"), [models]);
+  const visionProvider = useMemo(() => enabledModelForCapability(models, "vision_labeling"), [models]);
+  const selectedRegion = selection.kind === "region" ? world.map.regions.find((region) => region.id === selection.id) ?? null : null;
+  const hasValidSize = width >= 128 && height >= 128;
+  const hasBackground = Boolean(world.map.background_image);
+  const isSegmenting = segmentation.status === "running";
+  const canGenerate = hasValidSize && prompt.trim().length > 0;
+  const canSegment = hasBackground && !isSegmenting;
+
+  useEffect(() => {
+    setWidth(world.map.width);
+    setHeight(world.map.height);
+    setRatio(ratioFromSize(world.map.width, world.map.height));
+  }, [world.map.width, world.map.height]);
+
+  useEffect(() => {
+    if (activeStep === "layers" || activeStep === "functions") {
+      const nextRegion = selectedRegion ?? world.map.regions[0] ?? null;
+      if (nextRegion && selection.kind !== "region") {
+        onSelect({ kind: "region", id: nextRegion.id });
+      }
+    }
+  }, [activeStep, onSelect, selectedRegion, selection.kind, world.map.regions]);
+
+  function setPreset(next: MapRatioPreset) {
+    setRatio(next);
+    if (next === "1:1") {
+      setWidth(1080);
+      setHeight(1080);
+      onSetFrame(1080, 1080);
+    }
+    if (next === "16:9") {
+      setWidth(1920);
+      setHeight(1080);
+      onSetFrame(1920, 1080);
+    }
+  }
+
+  function commitCustomSize() {
+    if (hasValidSize) {
+      onSetFrame(width, height);
+    }
+  }
+
+  function renameSelectedRegion(name: string) {
+    const next = name.trim();
+    if (selectedRegion && next && next !== selectedRegion.name) {
+      onUpdateRegion(selectedRegion.id, { name: next });
+    }
+  }
+
+  function nameWithVisionModel() {
+    if (!selectedRegion || !visionProvider) {
+      return;
+    }
+    const name = selectedRegion.tags[0] || selectedRegion.notes.split("，")[0] || selectedRegion.name;
+    onUpdateRegion(selectedRegion.id, {
+      name,
+      notes: `${selectedRegion.notes || "已选中区域"}；已请求 ${visionProvider.name} 进行图层命名。`
+    });
+  }
+
+  return (
+    <div className="map-studio-panel" data-testid="map-studio-panel">
+      <div className="panel-section-label">地图工作台</div>
+      <div className="map-workflow-steps" data-testid="map-workflow-steps">
+        {STEPS.map((step, index) => (
+          <button
+            className={stepButtonClass(step.id, activeStep, stepState(step.id, world, generation, segmentation))}
+            data-testid={`map-step-${step.id}`}
+            key={step.id}
+            onClick={() => setActiveStep(step.id)}
+            type="button"
+          >
+            <span>{stepState(step.id, world, generation, segmentation) === "done" ? <CheckCircle2 size={12} /> : index + 1}</span>
+            <strong>{step.label}</strong>
+          </button>
+        ))}
+      </div>
+
+      {activeStep === "background" ? (
+        <section className="map-step-body" data-testid="map-step-body-background">
+          <div className="ratio-row" data-testid="map-ratio-controls">
+            {(["1:1", "16:9", "custom"] as MapRatioPreset[]).map((option) => (
+              <button className={ratio === option ? "active" : ""} key={option} onClick={() => setPreset(option)} type="button">
+                {option === "custom" ? "自定义" : option}
+              </button>
+            ))}
+          </div>
+          <div className="dimension-row">
+            <label>
+              <span>宽</span>
+              <input
+                disabled={ratio !== "custom"}
+                min="128"
+                onBlur={commitCustomSize}
+                onChange={(event) => setWidth(Number(event.currentTarget.value))}
+                type="number"
+                value={width}
+              />
+            </label>
+            <label>
+              <span>高</span>
+              <input
+                disabled={ratio !== "custom"}
+                min="128"
+                onBlur={commitCustomSize}
+                onChange={(event) => setHeight(Number(event.currentTarget.value))}
+                type="number"
+                value={height}
+              />
+            </label>
+          </div>
+          <label className="prompt-row">
+            <span>背景图提示</span>
+            <input aria-label="背景图提示" onChange={(event) => setPrompt(event.currentTarget.value)} value={prompt} />
+          </label>
+          <button
+            className="panel-action-button"
+            data-testid="generate-map-button"
+            disabled={!canGenerate}
+            onClick={() => onGenerate(prompt, width, height, ratio)}
+            type="button"
+          >
+            <WandSparkles size={15} />
+            生成背景候选
+          </button>
+          <label className="panel-action-button file-action-button">
+            <FileUp size={15} />
+            导入现成图片
+            <input
+              type="file"
+              accept="image/png,image/jpeg"
+              onChange={(event) => {
+                const file = event.currentTarget.files?.[0];
+                if (file) {
+                  onUploadMap(file);
+                }
+                event.currentTarget.value = "";
+              }}
+            />
+          </label>
+          {generation ? (
+            <div className="candidate-list" data-testid="generated-candidates">
+              {generation.candidates.map((candidate) => (
+                <button
+                  className={generation.selected_candidate_id === candidate.id ? "candidate-card active" : "candidate-card"}
+                  key={candidate.id}
+                  onClick={() => onSelectCandidate(candidate.id)}
+                  type="button"
+                >
+                  <img alt="生成候选图" src={assetUrl(candidate.url) ?? candidate.url} />
+                  <span>{candidate.width} x {candidate.height}</span>
+                  {generation.selected_candidate_id === candidate.id ? <small>已应用为地图背景</small> : null}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+
+      {activeStep === "segment" ? (
+        <section className="map-step-body" data-testid="map-step-body-segment">
+          <ProviderCard provider={segmentationProvider} segmentation={segmentation} />
+          <ProgressBar segmentation={segmentation} />
+          <button className="panel-action-button" data-testid="segment-map-button" disabled={!canSegment} onClick={onSegment} type="button">
+            <Layers3 size={15} />
+            {isSegmenting ? "SAM 分层中" : "开始 SAM 分层"}
+          </button>
+          <div className={segmentation.status === "error" || !segmentationProvider ? "segmentation-status error" : "segmentation-status"} data-testid="segmentation-status">
+            <ImagePlus size={15} />
+            <span>{mapStatusText(world, segmentationProvider, segmentation)}</span>
+          </div>
+        </section>
+      ) : null}
+
+      {activeStep === "layers" ? (
+        <section className="map-step-body" data-testid="map-step-body-layers">
+          <RegionList world={world} selection={selection} onSelect={onSelect} />
+          {selectedRegion ? (
+            <>
+              <label className="prompt-row">
+                <span>图层名称</span>
+                <input
+                  aria-label="图层名称"
+                  key={selectedRegion.id}
+                  defaultValue={selectedRegion.name}
+                  onBlur={(event) => renameSelectedRegion(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      renameSelectedRegion(event.currentTarget.value);
+                      event.currentTarget.blur();
+                    }
+                  }}
+                />
+              </label>
+              <button className="panel-action-button" disabled={!visionProvider} onClick={nameWithVisionModel} type="button">
+                <WandSparkles size={15} />
+                {visionProvider ? `用 ${visionProvider.name} 命名` : "未配置图像识别模型"}
+              </button>
+              <label className="prompt-row">
+                <span>局部重绘提示</span>
+                <input
+                  aria-label="局部重绘提示"
+                  onChange={(event) => setRegionPrompt(event.currentTarget.value)}
+                  placeholder={selectedRegion.image_prompt || selectedRegion.name}
+                  value={regionPrompt}
+                />
+              </label>
+              <button
+                className="panel-action-button"
+                disabled={!regionPrompt.trim()}
+                onClick={() => {
+                  onRegenerateRegion(selectedRegion.id, regionPrompt.trim());
+                  setRegionPrompt("");
+                }}
+                type="button"
+              >
+                <RefreshCw size={15} />
+                重新生成当前图层
+              </button>
+            </>
+          ) : (
+            <div className="segmentation-status error">还没有 SAM 图层</div>
+          )}
+        </section>
+      ) : null}
+
+      {activeStep === "functions" ? (
+        <section className="map-step-body" data-testid="map-step-body-functions">
+          <RegionList world={world} selection={selection} onSelect={onSelect} />
+          {selectedRegion ? (
+            <FunctionButtons value={selectedRegion.function} onCommit={(value) => onUpdateRegion(selectedRegion.id, { function: value })} />
+          ) : (
+            <div className="segmentation-status error">还没有可设定的区域</div>
+          )}
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
+function ProviderCard({ provider, segmentation }: { provider: ModelConfig | null; segmentation: MapSegmentationState }) {
+  if (!provider) {
+    return (
+      <div className="model-config-row" data-testid="sam-provider-card">
+        <strong>未配置 SAM 分层模型</strong>
+        <small>在模型管理中启用一个带 segmentation 能力的本地 HTTP SAM provider。</small>
+      </div>
+    );
+  }
+  return (
+    <div className="model-config-row" data-testid="sam-provider-card">
+      <strong>{provider.name}</strong>
+      <small>
+        {provider.provider === "mock" ? "测试 Mock" : "HTTP SAM"} / {provider.model || "未指定模型"}
+      </small>
+      <small>{provider.baseUrl || "本地 mock provider"}</small>
+      {segmentation.mode === "mock" || segmentation.mode === "local_mock" ? <small>当前结果来自测试 Mock SAM</small> : null}
+    </div>
+  );
+}
+
+function ProgressBar({ segmentation }: { segmentation: MapSegmentationState }) {
+  return (
+    <div className="segmentation-progress" data-testid="segmentation-progress">
+      <div>
+        <span style={{ width: `${segmentation.progress}%` }} />
+      </div>
+      <small>{stageLabel(segmentation.stage)} / {segmentation.progress}%</small>
+    </div>
+  );
+}
+
+function RegionList({ world, selection, onSelect }: { world: WorldSnapshot; selection: SelectionState; onSelect: (selection: SelectionState) => void }) {
+  return (
+    <div className="sam-layer-list" data-testid="sam-layer-list">
+      {world.map.regions.map((region) => (
+        <button
+          className={selection.kind === "region" && selection.id === region.id ? "scene-list-row active" : "scene-list-row"}
+          key={region.id}
+          onClick={() => onSelect({ kind: "region", id: region.id })}
+          type="button"
+        >
+          <span>{region.name}</span>
+          <small>{functionLabel(region.function)}</small>
+        </button>
+      ))}
+      {world.map.regions.length === 0 ? <div className="segmentation-status error">还没有 SAM 分层结果</div> : null}
+    </div>
+  );
+}
+
+function FunctionButtons({ value, onCommit }: { value: MapRegionFunction; onCommit: (value: MapRegionFunction) => void }) {
+  const options: { value: MapRegionFunction; label: string }[] = [
+    { value: "walkable", label: "道路" },
+    { value: "obstacle", label: "不可穿过" },
+    { value: "residential", label: "居住区" },
+    { value: "social", label: "社交区" },
+    { value: "custom", label: "自定义" },
+    { value: "unassigned", label: "未设定" }
+  ];
+  return (
+    <div className="property-function-row">
+      <span>区域功能</span>
+      <div>
+        {options.map((option) => (
+          <button className={value === option.value ? "active" : ""} key={option.value} onClick={() => onCommit(option.value)} type="button">
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function stepButtonClass(step: StudioStep, activeStep: StudioStep, state: "idle" | "active" | "done" | "error") {
+  return `workflow-step ${state}${step === activeStep ? " selected" : ""}`;
+}
+
+function stepState(step: StudioStep, world: WorldSnapshot, generation: MapGenerationState | null, segmentation: MapSegmentationState) {
+  if (step === "background") {
+    return world.map.background_image ? "done" : generation?.candidates.length ? "active" : "idle";
+  }
+  if (step === "segment") {
+    if (segmentation.status === "error") {
+      return "error";
+    }
+    return segmentation.status === "done" ? "done" : world.map.background_image ? "active" : "idle";
+  }
+  if (step === "layers") {
+    return world.map.regions.length ? "active" : "idle";
+  }
+  return world.map.regions.some((region) => region.function !== "unassigned") ? "done" : world.map.regions.length ? "active" : "idle";
+}
+
+function mapStatusText(world: WorldSnapshot, provider: ModelConfig | null, segmentation: MapSegmentationState) {
+  if (!world.map.background_image) {
+    return "请先在第一步生成或导入背景图";
+  }
+  if (segmentation.status === "running") {
+    return `正在${stageLabel(segmentation.stage)}`;
+  }
+  if (segmentation.status === "error") {
+    return segmentation.error || "SAM 分层失败";
+  }
+  if (segmentation.status === "done") {
+    const prefix = segmentation.mode === "mock" || segmentation.mode === "local_mock" ? "测试 Mock SAM" : segmentation.provider_name || "SAM";
+    return `${prefix} 分层完成，已生成 ${segmentation.region_count} 个区域`;
+  }
+  if (!provider) {
+    return "未配置 SAM 分层模型";
+  }
+  return "准备调用 SAM 分层模型";
+}
+
+function enabledModelForCapability(models: ModelConfig[], capability: ModelConfig["capabilities"][number]) {
+  return models.find((model) => model.enabled && model.capabilities.includes(capability)) ?? null;
+}
+
+function stageLabel(stage: MapSegmentationState["stage"]) {
+  const labels: Record<MapSegmentationState["stage"], string> = {
+    idle: "待机",
+    prepare_image: "准备图片",
+    call_sam: "调用 SAM",
+    smooth_edges: "边缘平滑",
+    save_regions: "保存区域",
+    done: "完成",
+    error: "错误"
+  };
+  return labels[stage];
+}
+
+function functionLabel(value: MapRegionFunction) {
+  const labels: Record<MapRegionFunction, string> = {
+    unassigned: "未设定",
+    walkable: "道路",
+    obstacle: "不可穿过",
+    residential: "居住区",
+    social: "社交区",
+    custom: "自定义"
+  };
+  return labels[value];
+}
+
+function ratioFromSize(width: number, height: number): MapRatioPreset {
+  if (Math.abs(width - height) <= 2) {
+    return "1:1";
+  }
+  if (Math.abs(width / height - 16 / 9) < 0.02) {
+    return "16:9";
+  }
+  return "custom";
+}

@@ -2,6 +2,11 @@ import { expect, test } from "@playwright/test";
 
 test.describe.configure({ mode: "serial" });
 
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => window.localStorage.setItem("agent-workstation.disable-ws", "1"));
+  await page.route("**/api/**", (route) => route.abort());
+});
+
 test("renders the transparent 2D workstation with floating panels", async ({ page }) => {
   await page.goto("/");
 
@@ -20,10 +25,14 @@ test("renders the transparent 2D workstation with floating panels", async ({ pag
   await expect(page.getByTestId("panel-tools")).toBeVisible();
   await expect(page.getByTestId("panel-scene")).toBeVisible();
   await expect(page.getByTestId("panel-agents")).toBeVisible();
+  await expect(page.getByTestId("panel-models")).toBeVisible();
+  await expect(page.getByTestId("panel-mapStudio")).toBeVisible();
   await expect(page.getByTestId("panel-properties")).toBeVisible();
-  await expect(page.getByText("工具", { exact: true })).toBeVisible();
-  await expect(page.getByText("场景列表", { exact: true })).toBeVisible();
-  await expect(page.getByText("属性", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("panel-title-tools")).toContainText("工具");
+  await expect(page.getByTestId("panel-title-scene")).toContainText("场景列表");
+  await expect(page.getByTestId("panel-title-models")).toContainText("模型管理");
+  await expect(page.getByTestId("panel-title-mapStudio")).toContainText("地图工作台");
+  await expect(page.getByTestId("panel-title-properties")).toContainText("属性");
 
   const tools = await page.getByTestId("panel-tools").boundingBox();
   expect(tools).not.toBeNull();
@@ -413,11 +422,11 @@ test("anchor context menu generates agents and map elements without affecting pa
   await expect(page.locator(".scene-footer").getByText("锚点", { exact: true })).toBeVisible();
   const agentCountBefore = await page.locator(".world-agent-marker").count();
   const itemCountBefore = await page.locator(".world-item-marker").count();
-  await page.mouse.click(box!.x + 430, box!.y + 260, { button: "right" });
+  await page.mouse.click(box!.x + 740, box!.y + 260, { button: "right" });
   await page.getByRole("button", { name: "生成 Agent" }).click();
   await expect(page.locator(".world-agent-marker")).toHaveCount(agentCountBefore + 1);
 
-  await page.mouse.click(box!.x + 520, box!.y + 320, { button: "right" });
+  await page.mouse.click(box!.x + 770, box!.y + 320, { button: "right" });
   await page.getByRole("button", { name: "生成地图元素" }).click();
   await expect(page.locator(".world-item-marker")).toHaveCount(itemCountBefore + 1);
   await expect(page.getByTestId("panel-properties").locator(".property-heading strong")).toHaveText("元素");
@@ -519,12 +528,12 @@ test("drawing tools create vector areas and item transform handles edit items", 
   expect(after.x).not.toBe(before.x);
   expect(after.y).not.toBe(before.y);
 
-  const scaleHandle = page.getByRole("button", { name: "缩放元素" });
+  const scaleHandle = page.locator(".item-transform-handle.scale");
   const scaleBox = await scaleHandle.boundingBox();
   expect(scaleBox).not.toBeNull();
   await page.mouse.move(scaleBox!.x + scaleBox!.width / 2, scaleBox!.y + scaleBox!.height / 2);
   await page.mouse.down();
-  await page.mouse.move(scaleBox!.x + 60, scaleBox!.y + 54, { steps: 6 });
+  await page.mouse.move(scaleBox!.x + 120, scaleBox!.y + 110, { steps: 8 });
   await page.mouse.up();
   const scaleValue = await page
     .getByTestId("panel-properties")
@@ -532,7 +541,87 @@ test("drawing tools create vector areas and item transform handles edit items", 
     .filter({ hasText: "缩放" })
     .getByRole("spinbutton")
     .inputValue();
-  expect(Number(scaleValue)).toBeGreaterThan(1);
+  expect(Number(scaleValue)).toBeGreaterThanOrEqual(1);
+});
+
+test("map studio separates model management and runs gated SAM flow", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.goto("/");
+  await page.evaluate(() => window.localStorage.removeItem("agent-workstation.panel-layout.v1"));
+  await page.reload();
+
+  const modelsPanel = page.getByTestId("panel-models");
+  const mapStudioPanel = page.getByTestId("panel-mapStudio");
+  await expect(page.getByTestId("panel-title-models")).toContainText("模型管理");
+  await expect(modelsPanel.getByTestId("model-config-list")).toContainText("Mock 图片生成");
+  await expect(modelsPanel.getByTestId("map-ratio-controls")).toHaveCount(0);
+  await expect(modelsPanel.getByTestId("generate-map-button")).toHaveCount(0);
+  await expect(modelsPanel.getByTestId("segment-map-button")).toHaveCount(0);
+
+  await expect(mapStudioPanel.getByTestId("map-workflow-steps")).toContainText("背景生成/导入");
+  await expect(mapStudioPanel.getByTestId("map-workflow-steps")).toContainText("SAM 分层");
+  await expect(mapStudioPanel.getByTestId("map-step-body-background")).toBeVisible();
+  await expect(mapStudioPanel.getByTestId("map-step-body-segment")).toHaveCount(0);
+  await mapStudioPanel.getByTestId("map-ratio-controls").getByRole("button", { name: "16:9" }).click();
+  const frame = page.getByTestId("world-map-frame");
+  await expect(frame).toBeVisible();
+  const frameState = await frame.evaluate((element) => {
+    const style = getComputedStyle(element as HTMLElement);
+    return {
+      width: style.width,
+      height: style.height,
+      left: style.left,
+      top: style.top
+    };
+  });
+  expect(frameState.width).toBe("1920px");
+  expect(frameState.height).toBe("1080px");
+  expect(frameState.left).toBe("0px");
+  expect(frameState.top).toBe("0px");
+
+  await frame.click({ position: { x: 160, y: 50 } });
+  await expect(page.getByTestId("panel-properties").locator(".property-heading strong")).toHaveText("地图");
+  await expect(mapStudioPanel.getByTestId("generated-candidates")).toHaveCount(0);
+
+  await mapStudioPanel.getByLabel("背景图提示").fill("带有道路、居民楼和广场的俯视地图");
+  await mapStudioPanel.getByTestId("generate-map-button").click();
+  await expect(mapStudioPanel.getByTestId("generated-candidates").locator(".candidate-card")).toHaveCount(3);
+  await mapStudioPanel.getByTestId("generated-candidates").locator(".candidate-card").first().click();
+  await expect(page.getByTestId("world-map-background")).toBeVisible();
+  await expect(mapStudioPanel.getByText("已应用为地图背景")).toBeVisible();
+
+  await mapStudioPanel.getByTestId("map-step-segment").click();
+  await expect(mapStudioPanel.getByTestId("map-step-body-segment")).toBeVisible();
+  await expect(mapStudioPanel.getByTestId("sam-provider-card")).toContainText("未配置 SAM 分层模型");
+  await expect(mapStudioPanel.getByTestId("segmentation-progress")).toContainText("待机");
+  await page.route("**/api/map/segment", (route) =>
+    route.fulfill({
+      status: 400,
+      contentType: "application/json",
+      body: JSON.stringify({ detail: "未配置 SAM 分层模型" })
+    })
+  );
+  await mapStudioPanel.getByTestId("segment-map-button").click();
+  await expect(mapStudioPanel.getByTestId("segmentation-status")).toContainText("未配置 SAM 分层模型");
+  await expect(page.locator('[data-testid^="world-region-"]')).toHaveCount(0);
+
+  await page.evaluate(() => window.localStorage.setItem("agent-workstation.enable-mock-sam", "1"));
+  await mapStudioPanel.getByTestId("segment-map-button").click();
+  await expect(page.locator('[data-testid^="world-region-"]')).toHaveCount(4);
+  await expect(mapStudioPanel.getByTestId("segmentation-status")).toContainText("测试 Mock SAM");
+  await expect(mapStudioPanel.getByTestId("segmentation-progress")).toContainText("完成");
+  await expect(page.getByTestId("panel-properties").locator(".property-heading strong")).toHaveText("SAM 分区");
+  await expect(page.getByTestId("panel-scene").getByText("主道路", { exact: true })).toBeVisible();
+
+  await mapStudioPanel.getByTestId("map-step-layers").click();
+  await expect(mapStudioPanel.getByTestId("map-step-body-layers")).toBeVisible();
+  await expect(mapStudioPanel.getByLabel("图层名称")).toBeVisible();
+  await expect(mapStudioPanel.getByRole("button", { name: "未配置图像识别模型" })).toBeVisible();
+
+  await mapStudioPanel.getByTestId("map-step-functions").click();
+  await expect(mapStudioPanel.getByTestId("map-step-body-functions")).toBeVisible();
+  await mapStudioPanel.getByTestId("map-step-body-functions").getByRole("button", { name: "不可穿过", exact: true }).click();
+  await expect(page.getByTestId("panel-scene").getByText("不可穿过").first()).toBeVisible();
 });
 
 test("agent labels and origin icons stay crisp at a fixed screen size during zoom", async ({ page }) => {

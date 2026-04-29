@@ -1,6 +1,6 @@
 import json
 
-from agent_engine.engine.world import GameWorld
+from agent_engine.engine.world import GameWorld, MapRegion, Point
 from agent_engine.persistence.sqlite_store import ProjectStore
 
 
@@ -44,3 +44,48 @@ def test_project_store_loads_legacy_items(tmp_path):
     assert item.rotation == 0
     assert item.image is None
     assert item.description == ""
+
+
+def test_project_store_loads_legacy_maps_without_regions(tmp_path):
+    store = ProjectStore(tmp_path / "project")
+    world = GameWorld.default()
+    snapshot = world.to_dict()
+    del snapshot["map"]["regions"]
+    store.initialize()
+    with store.connect() as conn:
+        conn.execute("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)", ("world", json.dumps(snapshot)))
+        conn.commit()
+
+    loaded = store.load_world()
+    assert loaded.map.regions == []
+
+
+def test_region_function_mirroring_and_model_configs(tmp_path):
+    store = ProjectStore(tmp_path / "project")
+    world = GameWorld.default()
+    world.map.regions = [
+        MapRegion(
+            id="region_walk",
+            name="道路区域",
+            function="walkable",
+            points=[Point(0, 0), Point(20, 0), Point(20, 20), Point(0, 20)],
+        ),
+        MapRegion(
+            id="region_social",
+            name="社交区域",
+            function="social",
+            points=[Point(30, 30), Point(60, 30), Point(60, 60), Point(30, 60)],
+        ),
+    ]
+    world.map.sync_functional_regions()
+    store.save_world(world)
+
+    loaded = store.load_world()
+    assert len(loaded.map.regions) == 2
+    assert any(area.metadata.get("region_id") == "region_walk" for area in loaded.map.walkable_areas)
+    assert any(area.metadata.get("region_id") == "region_social" for area in loaded.map.interaction_zones)
+
+    configs = store.load_model_configs()
+    assert any("segmentation" in config["capabilities"] for config in configs)
+    store.save_model_configs([{**configs[0], "id": "model_custom"}])
+    assert store.load_model_configs()[0]["id"] == "model_custom"

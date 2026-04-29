@@ -2,6 +2,11 @@ import { expect, test } from "@playwright/test";
 import { PNG } from "pngjs";
 
 test.describe("transparent workstation rendering", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => window.localStorage.setItem("agent-workstation.disable-ws", "1"));
+    await page.route("**/api/**", (route) => route.abort());
+  });
+
   for (const viewport of [
     { name: "desktop", width: 1280, height: 820 },
     { name: "mobile", width: 390, height: 820 }

@@ -1,24 +1,44 @@
 import type { KeyboardEvent } from "react";
-import type { AgentProfile, CanvasPoint, Point, SelectionState, WorldItem, WorldMap, WorldSnapshot } from "../types";
+import type {
+  AgentProfile,
+  CanvasPoint,
+  MapGenerationState,
+  MapRegion,
+  MapRegionFunction,
+  MapSegmentationState,
+  Point,
+  SelectionState,
+  WorldItem,
+  WorldMap,
+  WorldSnapshot
+} from "../types";
 
 type Props = {
   world: WorldSnapshot;
   selection: SelectionState;
   canvasPoints: CanvasPoint[];
+  generation: MapGenerationState | null;
+  segmentation: MapSegmentationState;
   onUpdateMap: (patch: Partial<Pick<WorldMap, "name" | "width" | "height" | "background_image">>) => void;
   onUpdateAgent: (agentId: string, patch: Partial<Omit<AgentProfile, "id">>) => void;
   onUpdateItem: (itemId: string, patch: Partial<Omit<WorldItem, "id">>) => void;
   onUploadItemImage: (itemId: string, file: File) => void;
+  onUpdateRegion: (regionId: string, patch: Partial<Omit<MapRegion, "id" | "points" | "source">>) => void;
+  onRegenerateRegion: (regionId: string, prompt: string) => void;
 };
 
 export function PropertiesPanel({
   world,
   selection,
   canvasPoints,
+  generation,
+  segmentation,
   onUpdateMap,
   onUpdateAgent,
   onUpdateItem,
-  onUploadItemImage
+  onUploadItemImage,
+  onUpdateRegion,
+  onRegenerateRegion
 }: Props) {
   return (
     <div className="properties-panel" key={`${selection.kind}-${selection.id}`}>
@@ -26,13 +46,37 @@ export function PropertiesPanel({
         <strong>{selectionKindLabel(selection.kind)}</strong>
         <span>{selection.id}</span>
       </div>
-      {renderEditor({ world, selection, canvasPoints, onUpdateMap, onUpdateAgent, onUpdateItem, onUploadItemImage })}
+      {renderEditor({
+        world,
+        selection,
+        canvasPoints,
+        generation,
+        segmentation,
+        onUpdateMap,
+        onUpdateAgent,
+        onUpdateItem,
+        onUploadItemImage,
+        onUpdateRegion,
+        onRegenerateRegion
+      })}
     </div>
   );
 }
 
 function renderEditor(props: Props) {
-  const { world, selection, canvasPoints, onUpdateMap, onUpdateAgent, onUpdateItem, onUploadItemImage } = props;
+  const {
+    world,
+    selection,
+    canvasPoints,
+    generation,
+    segmentation,
+    onUpdateMap,
+    onUpdateAgent,
+    onUpdateItem,
+    onUploadItemImage,
+    onUpdateRegion,
+    onRegenerateRegion
+  } = props;
 
   if (selection.kind === "agent") {
     const profile = world.agent_profiles[selection.id];
@@ -105,6 +149,32 @@ function renderEditor(props: Props) {
     );
   }
 
+  if (selection.kind === "region") {
+    const region = world.map.regions.find((candidate) => candidate.id === selection.id);
+    if (!region) {
+      return <Missing label="没有找到 SAM 分区" />;
+    }
+    return (
+      <div className="property-grid">
+        <Editable label="名称" value={region.name} onCommit={(name) => onUpdateRegion(region.id, { name })} />
+        <Readonly label="来源" value={region.source} />
+        <Readonly label="点位" value={String(region.points.length)} />
+        <Readonly label="识别置信度" value={`${Math.round(region.confidence * 100)}%`} />
+        <FunctionButtons value={region.function} onCommit={(value) => onUpdateRegion(region.id, { function: value })} />
+        <Editable label="备注" value={region.notes} onCommit={(notes) => onUpdateRegion(region.id, { notes })} />
+        <Editable label="标签" value={region.tags.join(", ")} onCommit={(tags) => onUpdateRegion(region.id, { tags: parseTags(tags) })} />
+        <Editable
+          label="局部生成提示"
+          value={region.image_prompt || region.name}
+          onCommit={(image_prompt) => {
+            onUpdateRegion(region.id, { image_prompt });
+            onRegenerateRegion(region.id, image_prompt);
+          }}
+        />
+      </div>
+    );
+  }
+
   if (selection.kind === "point") {
     const point = canvasPoints.find((candidate) => candidate.id === selection.id);
     if (!point) {
@@ -124,10 +194,14 @@ function renderEditor(props: Props) {
     <div className="property-grid">
       <Editable label="名称" value={displayName(world.map.name)} onCommit={(name) => onUpdateMap({ name })} />
       <Readonly label="类型" value="2D 场景地图" />
+      <Readonly label="比例" value={generation?.ratio || ratioFromSize(world.map.width, world.map.height)} />
       <EditableNumber label="宽度" value={world.map.width} onCommit={(width) => onUpdateMap({ width })} />
       <EditableNumber label="高度" value={world.map.height} onCommit={(height) => onUpdateMap({ height })} />
       <Readonly label="背景图" value={world.map.background_image ?? "无"} />
-      <Readonly label="简介" value="手绘地图背景，互动内容由人工标注。" />
+      <Readonly label="生成提示" value={generation?.prompt ?? "无"} />
+      <Readonly label="SAM 状态" value={segmentationLabel(segmentation)} />
+      <Readonly label="SAM 区域数" value={String(world.map.regions.length || segmentation.region_count)} />
+      <Readonly label="简介" value="地图工作台负责生成流程；这里记录地图细节和当前分层状态。" />
     </div>
   );
 }
@@ -225,9 +299,38 @@ function selectionKindLabel(kind: SelectionState["kind"]) {
     agent: "Agent",
     item: "元素",
     area: "区域",
+    region: "SAM 分区",
     point: "空点"
   };
   return labels[kind];
+}
+
+function FunctionButtons({ value, onCommit }: { value: MapRegionFunction; onCommit: (value: MapRegionFunction) => void }) {
+  const options: { value: MapRegionFunction; label: string }[] = [
+    { value: "walkable", label: "道路" },
+    { value: "obstacle", label: "不可穿过" },
+    { value: "residential", label: "居住区" },
+    { value: "social", label: "社交区" },
+    { value: "custom", label: "自定义" },
+    { value: "unassigned", label: "未设定" }
+  ];
+  return (
+    <div className="property-function-row">
+      <span>区域功能</span>
+      <div>
+        {options.map((option) => (
+          <button
+            className={value === option.value ? "active" : ""}
+            key={option.value}
+            onClick={() => onCommit(option.value)}
+            type="button"
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function areaKindLabel(kind: string) {
@@ -237,6 +340,32 @@ function areaKindLabel(kind: string) {
     zone: "互动区"
   };
   return labels[kind] ?? kind;
+}
+
+function ratioFromSize(width: number, height: number) {
+  if (Math.abs(width - height) <= 2) {
+    return "1:1";
+  }
+  if (Math.abs(width / height - 16 / 9) < 0.02) {
+    return "16:9";
+  }
+  return "自定义";
+}
+
+function segmentationLabel(segmentation: MapSegmentationState) {
+  if (segmentation.status === "running") {
+    return "SAM 分层中";
+  }
+  if (segmentation.status === "error") {
+    return segmentation.error || "SAM 分层失败";
+  }
+  if (segmentation.status === "done") {
+    if (segmentation.mode === "mock" || segmentation.mode === "local_mock") {
+      return `测试 Mock SAM 完成，${segmentation.region_count} 个区域`;
+    }
+    return `HTTP SAM 完成，${segmentation.region_count} 个区域`;
+  }
+  return "未分层";
 }
 
 function displayName(name: string) {

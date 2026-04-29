@@ -57,6 +57,62 @@ class PolygonArea:
 
 
 @dataclass(slots=True)
+class MapRegion:
+    id: str
+    name: str
+    points: list[Point]
+    source: str = "sam"
+    function: str = "unassigned"
+    image_prompt: str = ""
+    notes: str = ""
+    confidence: float = 0.0
+    tags: list[str] = field(default_factory=list)
+
+    def to_area(self) -> PolygonArea:
+        kind = "zone" if self.function == "social" else self.function
+        return PolygonArea(
+            id=f"area_{self.id}",
+            name=self.name,
+            kind=kind,
+            points=self.points,
+            metadata={
+                "region_id": self.id,
+                "source": self.source,
+                "function": self.function,
+                "notes": self.notes,
+                "generated": True,
+            },
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "points": [point.to_dict() for point in self.points],
+            "source": self.source,
+            "function": self.function,
+            "image_prompt": self.image_prompt,
+            "notes": self.notes,
+            "confidence": self.confidence,
+            "tags": self.tags,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "MapRegion":
+        return cls(
+            id=data["id"],
+            name=data.get("name", data["id"]),
+            points=[Point.from_dict(point) for point in data.get("points", [])],
+            source=data.get("source", "sam"),
+            function=data.get("function", "unassigned"),
+            image_prompt=data.get("image_prompt", data.get("imagePrompt", "")),
+            notes=data.get("notes", ""),
+            confidence=float(data.get("confidence", 0)),
+            tags=list(data.get("tags", [])),
+        )
+
+
+@dataclass(slots=True)
 class WorldItem:
     id: str
     name: str
@@ -112,6 +168,7 @@ class WorldMap:
     items: list[WorldItem] = field(default_factory=list)
     triggers: list[PolygonArea] = field(default_factory=list)
     spawn_points: list[Point] = field(default_factory=list)
+    regions: list[MapRegion] = field(default_factory=list)
 
     def is_inside_bounds(self, point: Point) -> bool:
         return 0 <= point.x <= self.width and 0 <= point.y <= self.height
@@ -132,6 +189,27 @@ class WorldMap:
     def item_by_id(self, item_id: str) -> WorldItem | None:
         return next((item for item in self.items if item.id == item_id), None)
 
+    def region_by_id(self, region_id: str) -> MapRegion | None:
+        return next((region for region in self.regions if region.id == region_id), None)
+
+    def sync_functional_regions(self) -> None:
+        self.walkable_areas = [
+            area for area in self.walkable_areas if not area.metadata.get("generated")
+        ]
+        self.obstacles = [
+            area for area in self.obstacles if not area.metadata.get("generated")
+        ]
+        self.interaction_zones = [
+            area for area in self.interaction_zones if not area.metadata.get("generated")
+        ]
+        for region in self.regions:
+            if region.function == "walkable":
+                self.walkable_areas.append(region.to_area())
+            elif region.function == "obstacle":
+                self.obstacles.append(region.to_area())
+            elif region.function == "social":
+                self.interaction_zones.append(region.to_area())
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -145,6 +223,7 @@ class WorldMap:
             "items": [item.to_dict() for item in self.items],
             "triggers": [trigger.to_dict() for trigger in self.triggers],
             "spawn_points": [point.to_dict() for point in self.spawn_points],
+            "regions": [region.to_dict() for region in self.regions],
         }
 
     @classmethod
@@ -185,6 +264,7 @@ class WorldMap:
             items=[WorldItem.from_dict(item) for item in data.get("items", [])],
             triggers=[PolygonArea.from_dict(area) for area in data.get("triggers", [])],
             spawn_points=[Point.from_dict(point) for point in data.get("spawn_points", [])],
+            regions=[MapRegion.from_dict(region) for region in data.get("regions", [])],
         )
 
 

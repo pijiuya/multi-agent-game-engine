@@ -1,5 +1,14 @@
 import { fallbackWorld } from "./fallbackWorld";
-import type { AgentProfile, WorldItem, WorldMap, WorldSnapshot } from "../types";
+import type {
+  AgentProfile,
+  MapGenerationState,
+  MapRegion,
+  MapSegmentationState,
+  ModelConfig,
+  WorldItem,
+  WorldMap,
+  WorldSnapshot
+} from "../types";
 
 export const apiBase = import.meta.env.VITE_API_BASE ?? "";
 
@@ -9,7 +18,7 @@ export async function getWorld(): Promise<WorldSnapshot> {
     if (!response.ok) {
       throw new Error(`world request failed: ${response.status}`);
     }
-    return response.json();
+    return normalizeWorldSnapshot(await response.json());
   } catch {
     return structuredClone(fallbackWorld);
   }
@@ -25,7 +34,7 @@ export async function saveMap(map: WorldMap): Promise<WorldSnapshot | null> {
     if (!response.ok) {
       throw new Error(`map save failed: ${response.status}`);
     }
-    return response.json();
+    return normalizeWorldSnapshot(await response.json());
   } catch {
     return null;
   }
@@ -38,7 +47,129 @@ export async function patchMap(patch: Partial<Pick<WorldMap, "name" | "width" | 
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch)
     });
-    return response.ok ? (response.json() as Promise<WorldSnapshot>) : null;
+    return response.ok ? await response.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function getModels(): Promise<ModelConfig[]> {
+  try {
+    const response = await fetch(`${apiBase}/api/models`);
+    if (!response.ok) {
+      throw new Error(`models request failed: ${response.status}`);
+    }
+    const data = await response.json();
+    return (data.models ?? []).map(modelFromApi);
+  } catch {
+    return defaultModels();
+  }
+}
+
+export async function replaceModels(models: ModelConfig[]): Promise<ModelConfig[]> {
+  try {
+    const response = await fetch(`${apiBase}/api/models`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ models: models.map(modelToApi) })
+    });
+    if (!response.ok) {
+      throw new Error(`models save failed: ${response.status}`);
+    }
+    const data = await response.json();
+    return (data.models ?? []).map(modelFromApi);
+  } catch {
+    return models;
+  }
+}
+
+export async function testModel(modelId: string): Promise<{ ok: boolean; message: string; provider: string }> {
+  try {
+    const response = await fetch(`${apiBase}/api/models/${modelId}/test`, { method: "POST" });
+    const data = await response.json();
+    return {
+      ok: Boolean(response.ok && data.ok),
+      message: String(data.message ?? data.detail ?? (response.ok ? "连接可用" : "连接失败")),
+      provider: String(data.provider ?? "")
+    };
+  } catch {
+    return { ok: false, message: "连接测试失败", provider: "" };
+  }
+}
+
+export async function createMapGeneration(payload: {
+  prompt: string;
+  width: number;
+  height: number;
+  ratio: string;
+  count?: number;
+  provider_id?: string | null;
+}): Promise<MapGenerationState | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/map/generation`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    return response.ok ? await response.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function selectGeneratedMap(generationId: string, candidateId: string): Promise<{ generation: MapGenerationState; world: WorldSnapshot } | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/map/generation/${generationId}/select`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ candidate_id: candidateId })
+    });
+    return response.ok ? normalizeGenerationSelection(await response.json()) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function segmentMap(): Promise<{ world: WorldSnapshot | null; segmentation: MapSegmentationState }> {
+  try {
+    const response = await fetch(`${apiBase}/api/map/segment`, { method: "POST" });
+    const data = await response.json();
+    if (!response.ok) {
+      return {
+        world: null,
+        segmentation: errorSegmentation(String(data.detail ?? "SAM 分层失败"))
+      };
+    }
+    return {
+      world: normalizeWorldSnapshot(data.world ?? data),
+      segmentation: normalizeSegmentation(data.segmentation, data.world ?? data)
+    };
+  } catch {
+    return { world: null, segmentation: errorSegmentation("SAM 分层接口不可用") };
+  }
+}
+
+export async function patchMapRegion(regionId: string, patch: Partial<Omit<MapRegion, "id" | "points" | "source">>): Promise<WorldSnapshot | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/map/regions/${regionId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch)
+    });
+    return response.ok ? normalizeWorldSnapshot(await response.json()) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function regenerateMapRegion(regionId: string, prompt: string): Promise<WorldSnapshot | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/map/regions/${regionId}/regenerate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt })
+    });
+    return response.ok ? normalizeWorldSnapshot(await response.json()) : null;
   } catch {
     return null;
   }
@@ -51,7 +182,7 @@ export async function patchAgent(agentId: string, patch: Partial<Omit<AgentProfi
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch)
     });
-    return response.ok ? (response.json() as Promise<WorldSnapshot>) : null;
+    return response.ok ? normalizeWorldSnapshot(await response.json()) : null;
   } catch {
     return null;
   }
@@ -64,7 +195,7 @@ export async function patchMapItem(itemId: string, patch: Partial<Omit<WorldItem
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch)
     });
-    return response.ok ? (response.json() as Promise<WorldSnapshot>) : null;
+    return response.ok ? normalizeWorldSnapshot(await response.json()) : null;
   } catch {
     return null;
   }
@@ -77,7 +208,7 @@ export async function postAction(agentId: string, type: string, payload: Record<
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ agent_id: agentId, type, payload })
     });
-    return response.ok ? response.json() : null;
+    return response.ok ? await response.json() : null;
   } catch {
     return null;
   }
@@ -88,7 +219,7 @@ export async function setSimulation(running: boolean) {
     const response = await fetch(`${apiBase}/api/simulation/${running ? "start" : "pause"}`, {
       method: "POST"
     });
-    return response.ok ? response.json() : null;
+    return response.ok ? normalizeWorldSnapshot(await response.json()) : null;
   } catch {
     return null;
   }
@@ -97,7 +228,7 @@ export async function setSimulation(running: boolean) {
 export async function tickSimulation(): Promise<WorldSnapshot | null> {
   try {
     const response = await fetch(`${apiBase}/api/simulation/tick`, { method: "POST" });
-    return response.ok ? response.json() : null;
+    return response.ok ? normalizeWorldSnapshot(await response.json()) : null;
   } catch {
     return null;
   }
@@ -114,7 +245,7 @@ export async function createAgent(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, role, position })
     });
-    return response.ok ? response.json() : null;
+    return response.ok ? normalizeWorldSnapshot(await response.json()) : null;
   } catch {
     return null;
   }
@@ -158,8 +289,148 @@ export function assetUrl(path: string | null) {
   if (!path) {
     return null;
   }
-  if (path.startsWith("blob:") || path.startsWith("http")) {
+  if (path.startsWith("blob:") || path.startsWith("data:") || path.startsWith("http")) {
     return path;
   }
   return `${apiBase}${path}`;
+}
+
+export function normalizeWorldSnapshot(snapshot: WorldSnapshot): WorldSnapshot {
+  return {
+    ...snapshot,
+    map: {
+      ...fallbackWorld.map,
+      ...snapshot.map,
+      regions: snapshot.map?.regions ?? [],
+      walkable_areas: snapshot.map?.walkable_areas ?? [],
+      obstacles: snapshot.map?.obstacles ?? [],
+      interaction_zones: snapshot.map?.interaction_zones ?? [],
+      items: (snapshot.map?.items ?? []).map((item) => ({
+        ...item,
+        radius: item.radius ?? 32,
+        scale: item.scale ?? 1,
+        rotation: item.rotation ?? 0,
+        image: item.image ?? null,
+        description: item.description ?? "",
+        tags: item.tags ?? [],
+        state: item.state ?? {}
+      })),
+      triggers: snapshot.map?.triggers ?? [],
+      spawn_points: snapshot.map?.spawn_points ?? []
+    }
+  };
+}
+
+function normalizeSegmentation(data: Partial<MapSegmentationState> | undefined, world: WorldSnapshot): MapSegmentationState {
+  return {
+    status: data?.status ?? "done",
+    progress: clampProgress(data?.progress ?? 100),
+    stage: data?.stage ?? "done",
+    provider_id: data?.provider_id ?? null,
+    provider_name: data?.provider_name ?? null,
+    error: data?.error ?? null,
+    region_count: data?.region_count ?? world.map.regions.length,
+    mode: data?.mode ?? "http"
+  };
+}
+
+export function idleSegmentation(): MapSegmentationState {
+  return {
+    status: "idle",
+    progress: 0,
+    stage: "idle",
+    provider_id: null,
+    provider_name: null,
+    error: null,
+    region_count: 0,
+    mode: "none"
+  };
+}
+
+export function errorSegmentation(error: string): MapSegmentationState {
+  return {
+    status: "error",
+    progress: 0,
+    stage: "error",
+    provider_id: null,
+    provider_name: null,
+    error,
+    region_count: 0,
+    mode: "none"
+  };
+}
+
+function clampProgress(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.min(100, Math.max(0, Math.round(value)));
+}
+
+function normalizeGenerationSelection(data: { generation: MapGenerationState; world: WorldSnapshot }) {
+  return {
+    ...data,
+    world: normalizeWorldSnapshot(data.world)
+  };
+}
+
+function modelFromApi(data: Record<string, unknown>): ModelConfig {
+  return {
+    id: String(data.id ?? ""),
+    name: String(data.name ?? ""),
+    kind: String(data.kind ?? "local"),
+    provider: String(data.provider ?? "mock"),
+    baseUrl: String(data.base_url ?? data.baseUrl ?? ""),
+    model: String(data.model ?? ""),
+    enabled: Boolean(data.enabled ?? true),
+    capabilities: Array.isArray(data.capabilities) ? (data.capabilities as ModelConfig["capabilities"]) : []
+  };
+}
+
+function modelToApi(model: ModelConfig) {
+  return {
+    id: model.id,
+    name: model.name,
+    kind: model.kind,
+    provider: model.provider,
+    base_url: model.baseUrl,
+    model: model.model,
+    enabled: model.enabled,
+    capabilities: model.capabilities
+  };
+}
+
+function defaultModels(): ModelConfig[] {
+  return [
+    {
+      id: "model_mock_llm",
+      name: "Mock LLM",
+      kind: "local",
+      provider: "mock",
+      baseUrl: "",
+      model: "mock-agent",
+      enabled: true,
+      capabilities: ["llm"]
+    },
+    {
+      id: "model_mock_image",
+      name: "Mock 图片生成",
+      kind: "local",
+      provider: "mock",
+      baseUrl: "",
+      model: "mock-map-generator",
+      enabled: true,
+      capabilities: ["image_generation"]
+    },
+    {
+      id: "model_mock_sam",
+      name: "Mock SAM 分层（测试）",
+      kind: "local",
+      provider: "mock",
+      baseUrl: "",
+      model: "mock-sam",
+      enabled: false,
+      capabilities: ["segmentation", "vision_labeling"]
+    }
+  ];
 }

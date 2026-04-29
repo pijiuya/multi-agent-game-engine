@@ -186,10 +186,15 @@ export function SceneViewport({
   }
 
   function stopMarkerPointer(event: PointerEvent<HTMLButtonElement>) {
-    event.stopPropagation();
+    if (event.button === 0) {
+      event.stopPropagation();
+    }
   }
 
   function startItemTransform(mode: ItemTransform["mode"], item: WorldItem, event: PointerEvent<HTMLElement>) {
+    if (event.button !== 0) {
+      return;
+    }
     event.stopPropagation();
     event.preventDefault();
     const point = localWorldFromClient(event.clientX, event.clientY);
@@ -289,27 +294,72 @@ export function SceneViewport({
               className="world-map-background"
               data-testid="world-map-background"
               draggable={false}
+              onClick={(event) => {
+                event.stopPropagation();
+                onSelect({ kind: "map", id: world.map.id });
+              }}
+              onPointerDown={(event) => {
+                if (event.button === 0 && editTool === "select") {
+                  event.stopPropagation();
+                }
+              }}
               src={assetUrl(world.map.background_image) ?? world.map.background_image}
               style={{ left: 0, top: 0, width: world.map.width, height: world.map.height }}
             />
-          ) : null}
+          ) : (
+            <button
+              aria-label="选择地图框"
+              className="world-map-frame"
+              data-testid="world-map-frame"
+              onClick={(event) => {
+                if (editTool === "select") {
+                  event.stopPropagation();
+                  onSelect({ kind: "map", id: world.map.id });
+                }
+              }}
+              onPointerDown={(event) => {
+                if (event.button === 0 && editTool === "select") {
+                  event.stopPropagation();
+                }
+              }}
+              style={{ left: 0, top: 0, width: world.map.width, height: world.map.height }}
+            >
+              <span>{world.map.width} x {world.map.height}</span>
+            </button>
+          )}
           <svg
             className="world-vector-layer"
             data-testid="world-vector-layer"
             style={{ width: world.map.width, height: world.map.height }}
           >
-            {[...world.map.walkable_areas, ...world.map.obstacles, ...world.map.interaction_zones].map((area) => (
+            {[...world.map.walkable_areas, ...world.map.obstacles, ...world.map.interaction_zones]
+              .filter((area) => !area.metadata?.generated)
+              .map((area) => (
+                <polygon
+                  className={`world-area world-area-${area.kind} ${
+                    selection.kind === "area" && selection.id === area.id ? "active" : ""
+                  }`}
+                  data-testid={`world-area-${area.id}`}
+                  key={area.id}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onSelect({ kind: "area", id: area.id });
+                  }}
+                  points={area.points.map((point) => `${point.x},${point.y}`).join(" ")}
+                />
+              ))}
+            {world.map.regions.map((region) => (
               <polygon
-                className={`world-area world-area-${area.kind} ${
-                  selection.kind === "area" && selection.id === area.id ? "active" : ""
+                className={`world-region world-region-${region.function} ${
+                  selection.kind === "region" && selection.id === region.id ? "active" : ""
                 }`}
-                data-testid={`world-area-${area.id}`}
-                key={area.id}
+                data-testid={`world-region-${region.id}`}
+                key={region.id}
                 onClick={(event) => {
                   event.stopPropagation();
-                  onSelect({ kind: "area", id: area.id });
+                  onSelect({ kind: "region", id: region.id });
                 }}
-                points={area.points.map((point) => `${point.x},${point.y}`).join(" ")}
+                points={region.points.map((point) => `${point.x},${point.y}`).join(" ")}
               />
             ))}
             {draftPoints.length > 0 ? (

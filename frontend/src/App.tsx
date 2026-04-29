@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AgentPanel } from "./components/AgentPanel";
 import { FloatingPanel } from "./components/FloatingPanel";
+import { MapStudioPanel } from "./components/MapStudioPanel";
+import { ModelManagerPanel } from "./components/ModelManagerPanel";
 import { PropertiesPanel } from "./components/PropertiesPanel";
 import { SceneElementsPanel } from "./components/SceneElementsPanel";
 import { SceneViewport } from "./components/SceneViewport";
@@ -13,13 +15,23 @@ import {
 } from "./lib/canvasCoords";
 import {
   createAgent as createAgentRemote,
+  createMapGeneration,
   getWorld,
+  getModels,
+  idleSegmentation,
   patchAgent,
   patchMap,
   patchMapItem,
+  patchMapRegion,
   postAction,
+  normalizeWorldSnapshot,
+  regenerateMapRegion,
+  replaceModels,
   saveMap,
+  segmentMap,
+  selectGeneratedMap,
   setSimulation,
+  testModel as testModelRemote,
   tickSimulation,
   uploadAsset,
   uploadMapImage,
@@ -31,8 +43,14 @@ import type {
   CanvasPoint,
   CanvasViewState,
   EditTool,
+  MapGenerationState,
+  MapRatioPreset,
+  MapRegion,
+  MapSegmentationState,
+  ModelConfig,
   PanelState,
   Point,
+  PolygonArea,
   SelectionState,
   WorldItem,
   WorldMap,
@@ -65,6 +83,9 @@ export default function App() {
   const [canvasPoints, setCanvasPoints] = useState<CanvasPoint[]>([]);
   const [anchorPoint, setAnchorPoint] = useState<Point | null>(null);
   const [anchorMenu, setAnchorMenu] = useState<AnchorMenuState | null>(null);
+  const [models, setModels] = useState<ModelConfig[]>([]);
+  const [generation, setGeneration] = useState<MapGenerationState | null>(null);
+  const [segmentation, setSegmentation] = useState<MapSegmentationState>(() => idleSegmentation());
   const [panels, setPanels] = useState<PanelState[]>(() => loadPanelLayout(createInitialPanels()));
   const [zCursor, setZCursor] = useState(() => maxPanelZ(loadPanelLayout(createInitialPanels())));
   const pendingMapPatchRef = useRef<MapPatch>({});
@@ -82,6 +103,7 @@ export default function App() {
 
   useEffect(() => {
     void refreshWorld();
+    void refreshModels();
   }, []);
 
   useEffect(() => {
@@ -92,13 +114,19 @@ export default function App() {
     if (!world) {
       return;
     }
+    if (typeof window !== "undefined" && window.localStorage.getItem("agent-workstation.disable-ws") === "1") {
+      return;
+    }
     let socket: WebSocket | null = null;
     try {
       socket = new WebSocket(wsUrl());
       socket.onopen = () => setStatus("后端已连接");
       socket.onmessage = (event) => {
         const snapshot = JSON.parse(event.data) as WorldSnapshot;
-        setWorld(mergeSnapshotWithLocalState(snapshot, {
+        if (!snapshot || typeof snapshot !== "object" || !snapshot.map || !snapshot.agent_profiles) {
+          return;
+        }
+        setWorld(mergeSnapshotWithLocalState(normalizeWorldSnapshot(snapshot), {
           mapPatch: pendingMapPatchRef.current,
           agentPatches: pendingAgentPatchesRef.current,
           itemPatches: pendingItemPatchesRef.current,
@@ -126,6 +154,9 @@ export default function App() {
     if (selection.kind === "item" && !world.map.items.some((item) => item.id === selection.id)) {
       setSelection({ kind: "map", id: world.map.id });
     }
+    if (selection.kind === "region" && !world.map.regions.some((region) => region.id === selection.id)) {
+      setSelection({ kind: "map", id: world.map.id });
+    }
     if (selection.kind === "point" && !canvasPoints.some((point) => point.id === selection.id)) {
       setSelection({ kind: "map", id: world.map.id });
     }
@@ -141,6 +172,10 @@ export default function App() {
       return { kind: "map", id: snapshot.map.id };
     });
     setStatus("就绪");
+  }
+
+  async function refreshModels() {
+    setModels(await getModels());
   }
 
   async function setSimulationRunning(running: boolean, stopped = false) {
@@ -187,9 +222,11 @@ export default function App() {
     try {
       const result = await uploadMapImage(file);
       setWorld({ ...world, map: { ...world.map, background_image: result.url } });
+      setSegmentation(idleSegmentation());
       setStatus("图片已上传");
     } catch {
       setWorld({ ...world, map: { ...world.map, background_image: URL.createObjectURL(file) } });
+      setSegmentation(idleSegmentation());
       setStatus("本地图片");
     }
   }
@@ -366,6 +403,152 @@ export default function App() {
     } else {
       setStatus("本地更改");
     }
+  }
+
+  async function generateMap(prompt: string, width = 1920, height = 1080, ratio: MapRatioPreset = "16:9") {
+    if (!world) {
+      return;
+    }
+    const fullPrompt = mapPrompt(prompt, width, height, ratio);
+    setSegmentation(idleSegmentation());
+    await updateMapPatch({ width, height });
+    const task = await createMapGeneration({ prompt: fullPrompt, width, height, ratio, count: 3 });
+    if (task) {
+      setGeneration(task);
+      setStatus("背景候选已生成");
+    } else {
+      setGeneration(createLocalGeneration(fullPrompt, width, height, ratio));
+      setStatus("本地背景候选已生成");
+    }
+  }
+
+  async function selectMapCandidate(candidateId: string) {
+    if (!generation) {
+      return;
+    }
+    const result = await selectGeneratedMap(generation.id, candidateId);
+    if (result) {
+      setGeneration(result.generation);
+      setWorld(result.world);
+      setSelection({ kind: "map", id: result.world.map.id });
+      setSegmentation(idleSegmentation());
+      setStatus("背景已选择");
+      return;
+    }
+    const candidate = generation.candidates.find((item) => item.id === candidateId);
+    if (candidate && world) {
+      const nextGeneration = { ...generation, selected_candidate_id: candidateId };
+      const nextWorld = {
+        ...world,
+        map: {
+          ...world.map,
+          width: generation.width,
+          height: generation.height,
+          background_image: candidate.url
+        }
+      };
+      setGeneration(nextGeneration);
+      setWorld(nextWorld);
+      setSelection({ kind: "map", id: nextWorld.map.id });
+      setSegmentation(idleSegmentation());
+      setStatus("本地背景已选择");
+    }
+  }
+
+  async function runMapSegmentation() {
+    const provider = enabledModelForCapability(models, "segmentation");
+    setSegmentation({
+      status: "running",
+      progress: 35,
+      stage: "call_sam",
+      provider_id: provider?.id ?? null,
+      provider_name: provider?.name ?? null,
+      error: null,
+      region_count: 0,
+      mode: "none"
+    });
+    const result = await segmentMap();
+    if (result.world) {
+      setWorld(result.world);
+      setSegmentation(result.segmentation);
+      setSelection(
+        result.world.map.regions[0]
+          ? { kind: "region", id: result.world.map.regions[0].id }
+          : { kind: "map", id: result.world.map.id }
+      );
+      const prefix = result.segmentation.mode === "mock" ? "测试 Mock SAM" : "SAM";
+      setStatus(`${prefix} 分层完成`);
+      return;
+    }
+
+    const allowLocalMock = typeof window !== "undefined" && window.localStorage.getItem("agent-workstation.enable-mock-sam") === "1";
+    if (allowLocalMock) {
+      setWorld((current) => {
+        if (!current) {
+          return current;
+        }
+        const nextMap = syncFunctionalRegions({
+          ...current.map,
+          regions: createLocalRegions(current.map.width, current.map.height)
+        });
+        const nextWorld = { ...current, map: nextMap };
+        setSelection(nextMap.regions[0] ? { kind: "region", id: nextMap.regions[0].id } : { kind: "map", id: nextMap.id });
+        setSegmentation({
+          status: "done",
+          progress: 100,
+          stage: "done",
+          provider_id: "local_mock_sam",
+          provider_name: "测试 Mock SAM",
+          error: null,
+          region_count: nextMap.regions.length,
+          mode: "local_mock"
+        });
+        return nextWorld;
+      });
+      setStatus("测试 Mock SAM 分层完成");
+      return;
+    }
+    setSegmentation(result.segmentation);
+    setStatus(result.segmentation.error || "SAM 分层失败");
+  }
+
+  async function updateRegion(regionId: string, patch: Partial<Omit<MapRegion, "id" | "points" | "source">>) {
+    setSelection({ kind: "region", id: regionId });
+    setWorld((current) => (current ? applyRegionPatch(current, regionId, patch) : current));
+    const snapshot = await patchMapRegion(regionId, patch);
+    if (snapshot) {
+      setWorld(snapshot);
+      setStatus("区域已保存");
+    } else {
+      setStatus("本地区域更改");
+    }
+  }
+
+  async function regenerateRegion(regionId: string, prompt: string) {
+    const snapshot = await regenerateMapRegion(regionId, prompt);
+    if (snapshot) {
+      setWorld(snapshot);
+      setStatus("区域重绘提示已保存");
+    } else {
+      setWorld((current) =>
+        current
+          ? applyRegionPatch(current, regionId, {
+              image_prompt: prompt,
+              notes: `已为此区域记录局部重绘提示：${prompt}`
+            })
+          : current
+      );
+      setStatus("本地区域重绘提示已保存");
+    }
+  }
+
+  async function saveModels(nextModels: ModelConfig[]) {
+    setModels(await replaceModels(nextModels));
+    setStatus("模型配置已保存");
+  }
+
+  async function testModelConnection(modelId: string) {
+    return testModelRemote(modelId);
   }
 
   async function updateAgentProfile(agentId: string, patch: AgentPatch) {
@@ -596,15 +779,43 @@ export default function App() {
               onRefresh={() => void refreshWorld()}
             />
           ) : null}
+          {panel.id === "models" ? (
+            <ModelManagerPanel
+              models={models}
+              onSaveModels={saveModels}
+              onTestModel={testModelConnection}
+            />
+          ) : null}
+          {panel.id === "mapStudio" ? (
+            <MapStudioPanel
+              world={world}
+              models={models}
+              selection={selection}
+              generation={generation}
+              segmentation={segmentation}
+              onGenerate={(prompt, width, height, ratio) => void generateMap(prompt, width, height, ratio)}
+              onSetFrame={(width, height) => void updateMapPatch({ width, height })}
+              onUploadMap={(file) => void handleUpload(file)}
+              onSelectCandidate={(candidateId) => void selectMapCandidate(candidateId)}
+              onSegment={() => void runMapSegmentation()}
+              onSelect={setSelection}
+              onUpdateRegion={(regionId, patch) => void updateRegion(regionId, patch)}
+              onRegenerateRegion={(regionId, prompt) => void regenerateRegion(regionId, prompt)}
+            />
+          ) : null}
           {panel.id === "properties" ? (
             <PropertiesPanel
               world={world}
               selection={selection}
               canvasPoints={canvasPoints}
+              generation={generation}
+              segmentation={segmentation}
               onUpdateMap={(patch) => void updateMapPatch(patch)}
               onUpdateAgent={(agentId, patch) => void updateAgentProfile(agentId, patch)}
               onUpdateItem={(itemId, patch) => void updateItemPatch(itemId, patch)}
               onUploadItemImage={(itemId, file) => void uploadItemImage(itemId, file)}
+              onUpdateRegion={(regionId, patch) => void updateRegion(regionId, patch)}
+              onRegenerateRegion={(regionId, prompt) => void regenerateRegion(regionId, prompt)}
             />
           ) : null}
         </FloatingPanel>
@@ -621,14 +832,18 @@ function createInitialPanels(): PanelState[] {
       makePanel("tools", "工具", 16, 84, 96, 552, 44),
       makePanel("scene", "场景列表", 16, 282, Math.min(340, width - 32), 220, 43),
       makePanel("agents", "Agent 面板", 16, 522, Math.min(340, width - 32), 220, 42),
-      makePanel("properties", "属性", 16, Math.max(684, height - 152), Math.min(340, width - 32), 240, 41)
+      makePanel("mapStudio", "地图工作台", 16, Math.max(684, height - 152), Math.min(340, width - 32), 280, 45),
+      makePanel("models", "模型管理", 16, Math.max(704, height - 152), Math.min(340, width - 32), 280, 41),
+      makePanel("properties", "属性", 16, Math.max(724, height - 152), Math.min(340, width - 32), 240, 40)
     ];
   }
   return [
     makePanel("tools", "工具", 42, 126, 96, 552, 44),
     makePanel("scene", "场景列表", 42, 348, 304, 340, 43),
     makePanel("agents", "Agent 面板", Math.max(380, width - 388), 92, 340, 316, 42),
-    makePanel("properties", "属性", Math.max(380, width - 408), Math.max(440, height - 330), 360, 276, 41)
+    makePanel("mapStudio", "地图工作台", 154, Math.max(500, height - 312), 340, 296, 45),
+    makePanel("models", "模型管理", 520, Math.max(500, height - 312), 360, 296, 41),
+    makePanel("properties", "属性", Math.max(380, width - 408), Math.max(440, height - 330), 360, 276, 40)
   ];
 }
 
@@ -796,6 +1011,188 @@ function applyItemPatch(world: WorldSnapshot, itemId: string, patch: Partial<Omi
     map: {
       ...world.map,
       items: world.map.items.map((item) => (item.id === itemId ? { ...item, ...patch } : item))
+    }
+  };
+}
+
+function applyRegionPatch(world: WorldSnapshot, regionId: string, patch: Partial<Omit<MapRegion, "id" | "points" | "source">>): WorldSnapshot {
+  return {
+    ...world,
+    map: syncFunctionalRegions({
+      ...world.map,
+      regions: world.map.regions.map((region) => (region.id === regionId ? { ...region, ...patch } : region))
+    })
+  };
+}
+
+function mapPrompt(prompt: string, width: number, height: number, ratio: MapRatioPreset) {
+  return [
+    "生成稳定的 2D 游戏背景图，俯视或轻等距视角，无文字，无 UI，无角色，边界清晰，适合后续 SAM 分区。",
+    "需要包含可识别道路、不可穿过结构、潜在居住区、社交区和自定义兴趣点。",
+    `地图比例：${ratio}；目标尺寸：${width} x ${height} 像素。`,
+    `用户需求：${prompt}`
+  ].join("\n");
+}
+
+function enabledModelForCapability(models: ModelConfig[], capability: ModelConfig["capabilities"][number]) {
+  return models.find((model) => model.enabled && model.capabilities.includes(capability)) ?? null;
+}
+
+function createLocalGeneration(prompt: string, width: number, height: number, ratio: MapRatioPreset): MapGenerationState {
+  const id = makeId("local_gen");
+  return {
+    id,
+    status: "done",
+    prompt,
+    ratio,
+    width,
+    height,
+    provider_id: "model_mock_image",
+    selected_candidate_id: null,
+    candidates: [0, 1, 2].map((index) => {
+      const hue = (index * 68 + prompt.length * 5) % 360;
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+        <defs>
+          <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="hsl(${hue}, 34%, 82%)"/>
+            <stop offset="1" stop-color="hsl(${(hue + 88) % 360}, 32%, 64%)"/>
+          </linearGradient>
+          <pattern id="grid" width="96" height="96" patternUnits="userSpaceOnUse">
+            <path d="M0 0H96V96H0Z" fill="none" stroke="rgba(20,20,20,.13)" stroke-width="2"/>
+            <path d="M0 48H96M48 0V96" stroke="rgba(255,255,255,.22)" stroke-width="1"/>
+          </pattern>
+        </defs>
+        <rect width="100%" height="100%" fill="url(#bg)"/>
+        <rect width="100%" height="100%" fill="url(#grid)" opacity=".78"/>
+        <path d="M${width * 0.07} ${height * 0.62} C ${width * 0.28} ${height * 0.44}, ${width * 0.55} ${height * 0.72}, ${width * 0.9} ${height * 0.42}" fill="none" stroke="rgba(36,36,36,.38)" stroke-width="${Math.max(18, width * 0.018)}" stroke-linecap="round"/>
+        <rect x="${width * 0.1}" y="${height * 0.12}" width="${width * 0.24}" height="${height * 0.24}" rx="18" fill="rgba(255,255,255,.24)" stroke="rgba(20,20,20,.22)" stroke-width="4"/>
+        <rect x="${width * 0.62}" y="${height * 0.16}" width="${width * 0.25}" height="${height * 0.28}" rx="22" fill="rgba(255,255,255,.2)" stroke="rgba(20,20,20,.2)" stroke-width="4"/>
+        <circle cx="${width * 0.46}" cy="${height * 0.36}" r="${Math.min(width, height) * 0.09}" fill="rgba(255,255,255,.18)" stroke="rgba(20,20,20,.18)" stroke-width="4"/>
+      </svg>`;
+      return {
+        id: `${id}_candidate_${index + 1}`,
+        url: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`,
+        prompt,
+        width,
+        height,
+        provider_id: "model_mock_image"
+      };
+    })
+  };
+}
+
+function createLocalRegions(width: number, height: number): MapRegion[] {
+  return [
+    {
+      id: makeId("region"),
+      name: "主道路",
+      function: "walkable",
+      source: "local_mock_sam",
+      points: [
+        { x: width * 0.06, y: height * 0.58 },
+        { x: width * 0.28, y: height * 0.47 },
+        { x: width * 0.54, y: height * 0.62 },
+        { x: width * 0.9, y: height * 0.38 },
+        { x: width * 0.93, y: height * 0.48 },
+        { x: width * 0.55, y: height * 0.74 },
+        { x: width * 0.28, y: height * 0.58 },
+        { x: width * 0.08, y: height * 0.69 }
+      ],
+      image_prompt: "",
+      notes: "本地 mock 识别为主要移动路径。",
+      confidence: 0.86,
+      tags: ["道路", "移动"]
+    },
+    {
+      id: makeId("region"),
+      name: "左上居住区",
+      function: "residential",
+      source: "local_mock_sam",
+      points: [
+        { x: width * 0.1, y: height * 0.12 },
+        { x: width * 0.34, y: height * 0.12 },
+        { x: width * 0.34, y: height * 0.36 },
+        { x: width * 0.1, y: height * 0.36 }
+      ],
+      image_prompt: "",
+      notes: "适合放置 agent 起居和身份相关物件。",
+      confidence: 0.78,
+      tags: ["居住"]
+    },
+    {
+      id: makeId("region"),
+      name: "右侧社交广场",
+      function: "social",
+      source: "local_mock_sam",
+      points: [
+        { x: width * 0.62, y: height * 0.16 },
+        { x: width * 0.87, y: height * 0.16 },
+        { x: width * 0.87, y: height * 0.44 },
+        { x: width * 0.62, y: height * 0.44 }
+      ],
+      image_prompt: "",
+      notes: "开放区域，适合社交、对话和公共事件。",
+      confidence: 0.82,
+      tags: ["社交", "公共"]
+    },
+    {
+      id: makeId("region"),
+      name: "中心景观障碍",
+      function: "obstacle",
+      source: "local_mock_sam",
+      points: [
+        { x: width * 0.41, y: height * 0.28 },
+        { x: width * 0.51, y: height * 0.28 },
+        { x: width * 0.56, y: height * 0.37 },
+        { x: width * 0.5, y: height * 0.47 },
+        { x: width * 0.4, y: height * 0.45 },
+        { x: width * 0.36, y: height * 0.36 }
+      ],
+      image_prompt: "",
+      notes: "中心实体结构，默认不可穿过。",
+      confidence: 0.8,
+      tags: ["障碍"]
+    }
+  ];
+}
+
+function syncFunctionalRegions(map: WorldMap): WorldMap {
+  const baseWalkable = map.walkable_areas.filter((area) => !area.metadata?.generated);
+  const baseObstacles = map.obstacles.filter((area) => !area.metadata?.generated);
+  const baseZones = map.interaction_zones.filter((area) => !area.metadata?.generated);
+  return map.regions.reduce(
+    (current, region) => {
+      const area = regionToArea(region);
+      if (!area) {
+        return current;
+      }
+      if (region.function === "walkable") {
+        return { ...current, walkable_areas: [...current.walkable_areas, area] };
+      }
+      if (region.function === "obstacle") {
+        return { ...current, obstacles: [...current.obstacles, area] };
+      }
+      return { ...current, interaction_zones: [...current.interaction_zones, area] };
+    },
+    { ...map, walkable_areas: baseWalkable, obstacles: baseObstacles, interaction_zones: baseZones }
+  );
+}
+
+function regionToArea(region: MapRegion): PolygonArea | null {
+  if (!["walkable", "obstacle", "social"].includes(region.function)) {
+    return null;
+  }
+  return {
+    id: `area_${region.id}`,
+    name: region.name,
+    kind: region.function === "social" ? "zone" : region.function,
+    points: region.points,
+    metadata: {
+      generated: true,
+      region_id: region.id,
+      function: region.function,
+      source: region.source,
+      notes: region.notes
     }
   };
 }
