@@ -208,3 +208,106 @@ test("workspace can invert grid and translucent material tone", async ({ page })
   expect(material).toContain("rgba(10, 10, 10");
   expect(material).not.toContain("radial-gradient");
 });
+
+test("workspace wheel zoom changes grid scale and density", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.goto("/");
+
+  const scene = page.getByTestId("scene-viewport");
+  const surface = page.getByTestId("workspace-surface");
+  const box = await surface.boundingBox();
+  expect(box).not.toBeNull();
+
+  const before = await readGridState(scene);
+  await surface.hover();
+  await page.mouse.wheel(0, -900);
+  await page.mouse.wheel(0, -900);
+  await page.mouse.wheel(0, -900);
+  await page.mouse.wheel(0, -900);
+  const zoomedIn = await readGridState(scene);
+  expect(zoomedIn.minorSize).toBeGreaterThan(before.minorSize);
+  expect(zoomedIn.density).toBe("fine");
+
+  await page.mouse.wheel(0, 1400);
+  await page.mouse.wheel(0, 1400);
+  await page.mouse.wheel(0, 1400);
+  await page.mouse.wheel(0, 1400);
+  await page.mouse.wheel(0, 1400);
+  await page.mouse.wheel(0, 1400);
+  await page.mouse.wheel(0, 1400);
+  await page.mouse.wheel(0, 1400);
+  const zoomedOut = await readGridState(scene);
+  expect(zoomedOut.minorSize).toBeLessThan(zoomedIn.minorSize);
+  expect(zoomedOut.density).toBe("simple");
+
+  await expect(page.getByTestId("world-2d")).toHaveCount(0);
+});
+
+test("middle mouse pans infinite grid without affecting panels", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.goto("/");
+
+  const scene = page.getByTestId("scene-viewport");
+  const surface = page.getByTestId("workspace-surface");
+  const box = await surface.boundingBox();
+  expect(box).not.toBeNull();
+
+  const before = await readGridState(scene);
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  await page.mouse.down({ button: "middle" });
+  await page.mouse.move(box!.x + box!.width / 2 + 96, box!.y + box!.height / 2 + 44, { steps: 8 });
+  await page.mouse.up({ button: "middle" });
+
+  const after = await readGridState(scene);
+  expect(after.panX).not.toBe(before.panX);
+  expect(after.panY).not.toBe(before.panY);
+
+  const panelBody = page.getByTestId("panel-tools").locator(".floating-panel-body");
+  const panelScrollBefore = await panelBody.evaluate((element) => element.scrollTop);
+  const zoomBeforePanelWheel = (await readGridState(scene)).minorSize;
+  await panelBody.hover();
+  await page.mouse.wheel(0, 500);
+  const panelScrollAfter = await panelBody.evaluate((element) => element.scrollTop);
+  const zoomAfterPanelWheel = (await readGridState(scene)).minorSize;
+  expect(panelScrollAfter).toBeGreaterThanOrEqual(panelScrollBefore);
+  expect(zoomAfterPanelWheel).toBe(zoomBeforePanelWheel);
+});
+
+test("workspace zoom and pan still work after tone inversion", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "切换黑白反色" }).click();
+  const scene = page.getByTestId("scene-viewport");
+  const surface = page.getByTestId("workspace-surface");
+  const box = await surface.boundingBox();
+  expect(box).not.toBeNull();
+
+  const before = await readGridState(scene);
+  await surface.hover();
+  await page.mouse.wheel(0, -900);
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  await page.mouse.down({ button: "middle" });
+  await page.mouse.move(box!.x + box!.width / 2 + 42, box!.y + box!.height / 2 + 32, { steps: 5 });
+  await page.mouse.up({ button: "middle" });
+
+  const after = await readGridState(scene);
+  expect(after.minorSize).toBeGreaterThan(before.minorSize);
+  expect(after.panX).not.toBe(before.panX);
+  expect(after.backgroundImage).toContain("rgba(255, 255, 255");
+});
+
+async function readGridState(scene: import("@playwright/test").Locator) {
+  return scene.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const grid = getComputedStyle(element.querySelector(".scene-window-grid") as Element);
+    return {
+      density: element.getAttribute("data-grid-density"),
+      panX: style.getPropertyValue("--grid-pan-x").trim(),
+      panY: style.getPropertyValue("--grid-pan-y").trim(),
+      minorSize: parseFloat(style.getPropertyValue("--grid-size-minor")),
+      majorSize: parseFloat(style.getPropertyValue("--grid-size-major")),
+      backgroundImage: grid.backgroundImage
+    };
+  });
+}

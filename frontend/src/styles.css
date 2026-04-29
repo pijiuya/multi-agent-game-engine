@@ -110,6 +110,14 @@ input,
 }
 
 .scene-window {
+  --grid-pan-x: 0px;
+  --grid-pan-y: 0px;
+  --grid-size-minor: 18px;
+  --grid-size-major: 90px;
+  --grid-alpha-minor-x: 0.28;
+  --grid-alpha-minor-y: 0.26;
+  --grid-alpha-major-x: 0.42;
+  --grid-alpha-major-y: 0.38;
   position: absolute;
   inset: 28px;
   display: grid;
@@ -155,12 +163,10 @@ input,
   inset: 0;
   pointer-events: none;
   background:
-    linear-gradient(90deg, rgba(var(--grid-rgb), 0.34) 1px, transparent 1px),
-    linear-gradient(0deg, rgba(var(--grid-rgb), 0.32) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(var(--grid-rgb), 0.2) 1px, transparent 1px),
-    linear-gradient(0deg, rgba(var(--grid-rgb), 0.18) 1px, transparent 1px);
-  background-size: 18px 18px;
-  background-position: 0 0, 0 0, 0 0, 0 0;
+    linear-gradient(90deg, rgba(var(--grid-rgb), var(--grid-alpha-minor-x)) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(var(--grid-rgb), var(--grid-alpha-minor-y)) 1px, transparent 1px);
+  background-size: var(--grid-size-minor) var(--grid-size-minor);
+  background-position: var(--grid-pan-x) var(--grid-pan-y), var(--grid-pan-x) var(--grid-pan-y);
   clip-path: inset(0 round 28px);
   mask-image: linear-gradient(90deg, transparent 0%, rgba(0, 0, 0, 0.22) 5%, rgba(0, 0, 0, 0.68) 14%, black 28%, black 72%, rgba(0, 0, 0, 0.68) 86%, rgba(0, 0, 0, 0.22) 95%, transparent 100%);
   -webkit-mask-image: linear-gradient(90deg, transparent 0%, rgba(0, 0, 0, 0.22) 5%, rgba(0, 0, 0, 0.68) 14%, black 28%, black 72%, rgba(0, 0, 0, 0.68) 86%, rgba(0, 0, 0, 0.22) 95%, transparent 100%);
@@ -171,9 +177,10 @@ input,
   position: absolute;
   inset: 0;
   background:
-    linear-gradient(90deg, rgba(var(--grid-rgb), 0.42) 1px, transparent 1px),
-    linear-gradient(0deg, rgba(var(--grid-rgb), 0.38) 1px, transparent 1px);
-  background-size: 90px 90px;
+    linear-gradient(90deg, rgba(var(--grid-rgb), var(--grid-alpha-major-x)) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(var(--grid-rgb), var(--grid-alpha-major-y)) 1px, transparent 1px);
+  background-size: var(--grid-size-major) var(--grid-size-major);
+  background-position: var(--grid-pan-x) var(--grid-pan-y), var(--grid-pan-x) var(--grid-pan-y);
   mask-image: linear-gradient(90deg, transparent 0%, rgba(0, 0, 0, 0.18) 6%, rgba(0, 0, 0, 0.62) 18%, black 32%, black 68%, rgba(0, 0, 0, 0.62) 82%, rgba(0, 0, 0, 0.18) 94%, transparent 100%);
   -webkit-mask-image: linear-gradient(90deg, transparent 0%, rgba(0, 0, 0, 0.18) 6%, rgba(0, 0, 0, 0.62) 18%, black 32%, black 68%, rgba(0, 0, 0, 0.62) 82%, rgba(0, 0, 0, 0.18) 94%, transparent 100%);
 }
@@ -251,13 +258,21 @@ input,
   background: transparent;
   border: 0;
   border-radius: 18px;
+  cursor: grab;
   box-shadow: none;
+  touch-action: none;
+  user-select: none;
+  -webkit-app-region: no-drag;
+}
+
+.scene-window.panning .scene-canvas-shell {
+  cursor: grabbing;
 }
 
 .workspace-surface {
   width: 100%;
   height: 100%;
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 .world-surface {

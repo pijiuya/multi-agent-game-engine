@@ -266,7 +266,7 @@ export default function App() {
   function setZoom(direction: 1 | -1) {
     setCanvasView((view) => ({
       ...view,
-      zoom: clamp(view.zoom * (direction > 0 ? 1.18 : 0.82), 0.35, 4),
+      zoom: clamp(view.zoom * (direction > 0 ? 1.18 : 0.82), 0.125, 8),
       fitMode: false
     }));
   }
@@ -286,6 +286,7 @@ export default function App() {
         editTool={editTool}
         canvasView={canvasView}
         status={status}
+        onViewChange={setCanvasView}
       />
 
       <TransportControls
