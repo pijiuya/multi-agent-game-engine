@@ -636,6 +636,12 @@ test("agent panel controls animation, stop, dialogue, and item mobility", async 
   });
   await expect(page.getByTestId("agent-animation-meta-agent_mira")).toContainText("GIF");
   await expect(page.locator(".world-agent-sprite")).toBeVisible();
+  await page.getByLabel("动画缩放").fill("2.4");
+  await page.getByLabel("动画缩放").blur();
+  expect((agentPatches[agentPatches.length - 1]?.animation as Record<string, unknown>).scale).toBe(2.4);
+  const spriteBox = await page.locator(".world-agent-sprite").boundingBox();
+  expect(spriteBox).not.toBeNull();
+  expect(spriteBox!.width).toBeGreaterThan(60);
 
   const png = Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
@@ -649,6 +655,7 @@ test("agent panel controls animation, stop, dialogue, and item mobility", async 
   const latestAnimation = agentPatches[agentPatches.length - 1]?.animation as Record<string, unknown>;
   expect(latestAnimation.kind).toBe("png_sequence");
   expect((latestAnimation.frames as unknown[]).length).toBe(2);
+  expect(latestAnimation.scale).toBe(2.4);
 
   await page.getByRole("button", { name: "停止移动" }).click();
   expect(actionRequests[actionRequests.length - 1]?.type).toBe("stop");

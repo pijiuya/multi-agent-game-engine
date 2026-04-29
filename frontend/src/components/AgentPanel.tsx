@@ -62,7 +62,8 @@ export function AgentPanel({
         fps: agent.animation?.fps ?? 8,
         max_pixels: metric.pixels,
         width: metric.width,
-        height: metric.height
+        height: metric.height,
+        scale: agent.animation?.scale ?? 1.6
       }
     });
   }
@@ -86,7 +87,8 @@ export function AgentPanel({
         fps: agent.animation?.fps ?? 8,
         max_pixels: max.pixels,
         width: max.width,
-        height: max.height
+        height: max.height,
+        scale: agent.animation?.scale ?? 1.6
       }
     });
   }
@@ -334,6 +336,18 @@ function AgentDetail({
                 />
               </label>
             ) : null}
+            <label>
+              缩放
+              <input
+                aria-label="动画缩放"
+                defaultValue={animation.scale}
+                max={6}
+                min={0.1}
+                onBlur={(event) => onUpdateAnimation({ ...animation, scale: clampAnimationScale(event.currentTarget.value) })}
+                step={0.1}
+                type="number"
+              />
+            </label>
           </>
         ) : (
           <small>未设置动画资产</small>
@@ -382,6 +396,14 @@ function formatPixels(value: number) {
     return `${(value / 1_000_000).toFixed(2)}MP`;
   }
   return `${value}px`;
+}
+
+function clampAnimationScale(value: string) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return 1.6;
+  }
+  return Math.max(0.1, Math.min(6, parsed));
 }
 
 function stateLabel(status?: string) {

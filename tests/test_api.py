@@ -478,6 +478,8 @@ def test_api_region_boolean_subtract_can_remove_target_region():
 def test_api_records_decision_events_from_model_actions():
     client = TestClient(app)
     api_main.runtime.world = api_main.GameWorld.default()
+    api_main.runtime.providers = {"mock": api_main.MockProvider()}
+    api_main.runtime.default_provider_id = "mock"
     api_main.runtime.world.running = True
     api_main.runtime.world.tick = 7
 
@@ -493,6 +495,48 @@ def test_api_records_decision_events_from_model_actions():
     assert decision["provider"] == "mock"
     assert decision["results"]
     assert any(event["id"] == decision["results"][0]["event_id"] for event in payload["events"])
+
+
+def test_api_syncs_enabled_llm_model_to_runtime_provider():
+    client = TestClient(app)
+
+    response = client.patch(
+        "/api/models",
+        json={
+            "models": [
+                {
+                    "id": "model_test_llm",
+                    "name": "测试 LLM",
+                    "kind": "local",
+                    "provider": "ollama",
+                    "base_url": "http://127.0.0.1:11434",
+                    "api_key": "",
+                    "model": "qwen2.5:7b",
+                    "enabled": True,
+                    "capabilities": ["llm"],
+                },
+                {
+                    "id": "model_mock_image",
+                    "name": "Mock 图片生成",
+                    "kind": "local",
+                    "provider": "mock",
+                    "base_url": "",
+                    "api_key": "",
+                    "model": "mock-map-generator",
+                    "enabled": True,
+                    "capabilities": ["image_generation"],
+                },
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    assert api_main.runtime.default_provider_id == "model_test_llm"
+    assert api_main.runtime.providers["model_test_llm"].name == "ollama"
+    assert api_main.runtime.providers["model_test_llm"].model == "qwen2.5:7b"
+
+    assert client.patch("/api/models", json={"models": default_model_configs()}).status_code == 200
+    assert api_main.runtime.default_provider_id == "mock"
 
 
 def test_api_model_capability_status_and_one_click_config(monkeypatch):

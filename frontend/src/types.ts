@@ -79,6 +79,7 @@ export type AgentAnimation = {
   max_pixels: number;
   width: number;
   height: number;
+  scale: number;
 };
 
 export type DialoguePolicy = {

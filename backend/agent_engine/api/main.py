@@ -38,6 +38,7 @@ from agent_engine.engine.world import (
     normalize_agent_animation,
     normalize_dialogue_policy,
 )
+from agent_engine.models.provider import MockProvider, OllamaProvider, OpenAICompatibleProvider
 from agent_engine.persistence.sqlite_store import ProjectStore
 
 
@@ -292,6 +293,7 @@ def get_models() -> dict[str, Any]:
 def replace_models(payload: ModelsPatch) -> dict[str, Any]:
     configs = [_model_config_dict(config) for config in payload.models]
     store.save_model_configs(configs)
+    _sync_runtime_model_providers()
     return {"models": [_public_model_config(config) for config in configs]}
 
 
@@ -304,6 +306,7 @@ def create_model(payload: ModelConfigPayload) -> dict[str, Any]:
     configs = [item for item in configs if item["id"] != config["id"]]
     configs.append(config)
     store.save_model_configs(configs)
+    _sync_runtime_model_providers()
     return {"models": [_public_model_config(item) for item in configs], "model": _public_model_config(config)}
 
 
@@ -315,6 +318,7 @@ def patch_model(model_id: str, payload: ModelConfigPatch) -> dict[str, Any]:
             next_config = {**config, **_payload_data(payload), "id": model_id}
             configs[index] = next_config
             store.save_model_configs(configs)
+            _sync_runtime_model_providers()
             return {"models": [_public_model_config(item) for item in configs], "model": _public_model_config(next_config)}
     raise HTTPException(status_code=404, detail="Model config not found")
 
@@ -326,6 +330,7 @@ def delete_model(model_id: str) -> dict[str, Any]:
     if len(next_configs) == len(configs):
         raise HTTPException(status_code=404, detail="Model config not found")
     store.save_model_configs(next_configs)
+    _sync_runtime_model_providers()
     return {"models": [_public_model_config(config) for config in next_configs]}
 
 
@@ -367,6 +372,7 @@ def configure_local_capability(capability: str) -> dict[str, Any]:
         if vision_config:
             next_configs = _upsert_model_config(next_configs, vision_config)
     store.save_model_configs(next_configs)
+    _sync_runtime_model_providers()
     return {
         "models": [_public_model_config(config) for config in next_configs],
         "capability": _capability_status(capability, next_configs, ollama_models, local_services),
@@ -410,6 +416,7 @@ def configure_remote_capability(capability: str, payload: CapabilityConfigurePay
     config = _remote_capability_config(capability, payload)
     configs = _upsert_model_config(store.load_model_configs(), config)
     store.save_model_configs(configs)
+    _sync_runtime_model_providers()
     return {
         "models": [_public_model_config(item) for item in configs],
         "capability": _capability_status(capability, configs, _detect_ollama_models(), _detect_local_model_services()),
@@ -867,6 +874,47 @@ def _public_model_config(config: dict[str, Any]) -> dict[str, Any]:
         "enabled": bool(config.get("enabled", True)),
         "capabilities": list(config.get("capabilities", [])),
     }
+
+
+def _sync_runtime_model_providers() -> None:
+    providers = {"mock": MockProvider()}
+    default_provider_id = "mock"
+    for config in store.load_model_configs():
+        if not config.get("enabled", True) or "llm" not in set(config.get("capabilities", [])):
+            continue
+        provider = _runtime_provider_from_model_config(config, providers["mock"])
+        if provider is None:
+            continue
+        provider_id = str(config.get("id") or config.get("provider") or "mock")
+        providers[provider_id] = provider
+        provider_name = str(config.get("provider") or "mock")
+        providers.setdefault(provider_name, provider)
+        if provider_name != "mock" and default_provider_id == "mock":
+            default_provider_id = provider_id
+    runtime.providers = providers
+    runtime.default_provider_id = default_provider_id
+
+
+def _runtime_provider_from_model_config(config: dict[str, Any], mock_provider: MockProvider):
+    provider = str(config.get("provider") or "mock")
+    if provider == "mock":
+        return mock_provider
+    if provider == "ollama":
+        return OllamaProvider(
+            base_url=str(config.get("base_url") or "http://127.0.0.1:11434"),
+            model=str(config.get("model") or "llama3.1"),
+        )
+    if provider == "openai-compatible":
+        base_url = str(config.get("base_url") or "").strip()
+        model = str(config.get("model") or "").strip()
+        if not base_url or not model:
+            return None
+        return OpenAICompatibleProvider(
+            base_url=base_url,
+            api_key=str(config.get("api_key") or ""),
+            model=model,
+        )
+    return None
 
 
 def _capability_status(
@@ -2034,3 +2082,6 @@ def _save_uploaded_asset(file: UploadFile, prefix: str) -> str:
     with destination.open("wb") as output:
         shutil.copyfileobj(file.file, output)
     return asset_name
+
+
+_sync_runtime_model_providers()

@@ -537,8 +537,16 @@ function normalizeAgentAnimation(value: unknown): AgentAnimation | null {
     fps: Math.max(1, Number(animation.fps ?? 8)),
     max_pixels: Math.max(0, Number(animation.max_pixels ?? 0)),
     width: Math.max(0, Number(animation.width ?? 0)),
-    height: Math.max(0, Number(animation.height ?? 0))
+    height: Math.max(0, Number(animation.height ?? 0)),
+    scale: clampNumber(Number(animation.scale ?? 1.6), 0.1, 6)
   };
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  return Math.max(min, Math.min(max, value));
 }
 
 function normalizeDialoguePolicy(value: unknown) {

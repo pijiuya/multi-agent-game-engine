@@ -399,6 +399,7 @@ def normalize_agent_animation(data: Any) -> dict[str, Any] | None:
         "max_pixels": max(0, int(data.get("max_pixels") or 0)),
         "width": max(0, int(data.get("width") or 0)),
         "height": max(0, int(data.get("height") or 0)),
+        "scale": max(0.1, min(6.0, float(data.get("scale") or 1.6))),
     }
 
 

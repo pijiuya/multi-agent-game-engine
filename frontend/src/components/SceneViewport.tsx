@@ -477,6 +477,7 @@ export function SceneViewport({
             if (!state) {
               return null;
             }
+            const animationSource = agentAnimationSource(agent, world.tick);
             return (
               <button
                 className={
@@ -500,8 +501,14 @@ export function SceneViewport({
                 style={{ ...screenPointStyle(state.position, canvasView), "--agent-color": agent.color } as CSSProperties}
                 title={agent.name}
               >
-                {agentAnimationSource(agent, world.tick) ? (
-                  <img alt="" className="world-agent-sprite" draggable={false} src={agentAnimationSource(agent, world.tick) ?? ""} />
+                {animationSource ? (
+                  <img
+                    alt=""
+                    className="world-agent-sprite"
+                    draggable={false}
+                    src={animationSource}
+                    style={agentSpriteStyle(agent)}
+                  />
                 ) : (
                   <span />
                 )}
@@ -651,6 +658,23 @@ function agentAnimationSource(agent: AgentProfile, tick: number) {
   const frameIndex = Math.floor((tick / 10) * Math.max(1, animation.fps)) % animation.frames.length;
   const frame = animation.frames[frameIndex];
   return assetUrl(frame) ?? frame;
+}
+
+function agentSpriteStyle(agent: AgentProfile) {
+  const animation = agent.animation;
+  if (!animation) {
+    return undefined;
+  }
+  const scale = clamp(animation.scale || 1.6, 0.1, 6);
+  const sourceWidth = animation.width > 0 ? animation.width : 52;
+  const sourceHeight = animation.height > 0 ? animation.height : 52;
+  const sourceMax = Math.max(sourceWidth, sourceHeight, 32);
+  const maxSide = clamp(sourceMax * scale, 18, 320);
+  const dimensions = itemDimensions(maxSide, sourceWidth / sourceHeight);
+  return {
+    width: `${dimensions.width}px`,
+    height: `${dimensions.height}px`
+  } as CSSProperties;
 }
 
 function dialogueText(message: string) {
