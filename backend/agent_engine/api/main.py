@@ -75,6 +75,34 @@ class ProposalSubmit(BaseModel):
     proposal: dict[str, Any]
 
 
+class WorldMapPatch(BaseModel):
+    name: str | None = None
+    width: int | None = None
+    height: int | None = None
+    background_image: str | None = None
+
+
+class AgentPatch(BaseModel):
+    name: str | None = None
+    role: str | None = None
+    identity: str | None = None
+    color: str | None = None
+    model_provider: str | None = None
+    action_space: list[str] | None = None
+
+
+class WorldItemPatch(BaseModel):
+    name: str | None = None
+    position: dict[str, float] | None = None
+    radius: float | None = None
+    scale: float | None = None
+    rotation: float | None = None
+    image: str | None = None
+    description: str | None = None
+    tags: list[str] | None = None
+    state: dict[str, Any] | None = None
+
+
 @app.get("/healthz")
 def healthz() -> dict[str, Any]:
     return {
@@ -121,19 +149,27 @@ def update_map(payload: WorldMapUpdate) -> dict[str, Any]:
     return runtime.snapshot()
 
 
+@app.patch("/api/map")
+def patch_map(payload: WorldMapPatch) -> dict[str, Any]:
+    data = _payload_data(payload)
+    for field_name, value in data.items():
+        setattr(runtime.world.map, field_name, value)
+    store.save_world(runtime.world)
+    return runtime.snapshot()
+
+
 @app.post("/api/maps/image")
 async def upload_map_image(file: UploadFile = File(...)) -> dict[str, Any]:
-    suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".png", ".jpg", ".jpeg"}:
-        raise HTTPException(status_code=400, detail="Only PNG and JPG map images are supported.")
-    asset_name = f"{new_id('map')}{suffix}"
-    destination = store.assets_dir / asset_name
-    store.initialize()
-    with destination.open("wb") as output:
-        shutil.copyfileobj(file.file, output)
+    asset_name = _save_uploaded_asset(file, "map")
     runtime.world.map.background_image = f"/api/assets/{asset_name}"
     store.save_world(runtime.world)
     return {"asset": asset_name, "url": runtime.world.map.background_image}
+
+
+@app.post("/api/assets")
+async def upload_asset(file: UploadFile = File(...)) -> dict[str, Any]:
+    asset_name = _save_uploaded_asset(file, "asset")
+    return {"asset": asset_name, "url": f"/api/assets/{asset_name}"}
 
 
 @app.get("/api/assets/{asset_name}")
@@ -166,6 +202,32 @@ def create_agent(payload: AgentCreate) -> dict[str, Any]:
     position = Point.from_dict(payload.position) if payload.position else runtime.world.map.nearest_spawn()
     runtime.world.add_agent(profile, position=position)
     runtime.world.add_event("system", f"Agent {profile.name} created.", agent_id=profile.id)
+    store.save_world(runtime.world)
+    return runtime.snapshot()
+
+
+@app.patch("/api/agents/{agent_id}")
+def patch_agent(agent_id: str, payload: AgentPatch) -> dict[str, Any]:
+    profile = runtime.world.agent_profiles.get(agent_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    data = _payload_data(payload)
+    for field_name, value in data.items():
+        setattr(profile, field_name, value)
+    store.save_world(runtime.world)
+    return runtime.snapshot()
+
+
+@app.patch("/api/map/items/{item_id}")
+def patch_item(item_id: str, payload: WorldItemPatch) -> dict[str, Any]:
+    item = runtime.world.map.item_by_id(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    data = _payload_data(payload)
+    if "position" in data:
+        item.position = Point.from_dict(data.pop("position"))
+    for field_name, value in data.items():
+        setattr(item, field_name, value)
     store.save_world(runtime.world)
     return runtime.snapshot()
 
@@ -240,3 +302,21 @@ async def _handle_ws_message(message: dict[str, Any]) -> None:
                 payload=dict(payload.get("payload", {})),
             )
         )
+
+
+def _payload_data(payload: BaseModel) -> dict[str, Any]:
+    if hasattr(payload, "model_dump"):
+        return payload.model_dump(exclude_unset=True)
+    return payload.dict(exclude_unset=True)
+
+
+def _save_uploaded_asset(file: UploadFile, prefix: str) -> str:
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in {".png", ".jpg", ".jpeg"}:
+        raise HTTPException(status_code=400, detail="Only PNG and JPG assets are supported.")
+    asset_name = f"{new_id(prefix)}{suffix}"
+    destination = store.assets_dir / asset_name
+    store.initialize()
+    with destination.open("wb") as output:
+        shutil.copyfileobj(file.file, output)
+    return asset_name

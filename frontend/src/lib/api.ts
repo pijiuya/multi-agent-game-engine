@@ -1,5 +1,5 @@
 import { fallbackWorld } from "./fallbackWorld";
-import type { WorldMap, WorldSnapshot } from "../types";
+import type { AgentProfile, WorldItem, WorldMap, WorldSnapshot } from "../types";
 
 export const apiBase = import.meta.env.VITE_API_BASE ?? "";
 
@@ -26,6 +26,45 @@ export async function saveMap(map: WorldMap): Promise<WorldSnapshot | null> {
       throw new Error(`map save failed: ${response.status}`);
     }
     return response.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function patchMap(patch: Partial<Pick<WorldMap, "name" | "width" | "height" | "background_image">>) {
+  try {
+    const response = await fetch(`${apiBase}/api/map`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch)
+    });
+    return response.ok ? (response.json() as Promise<WorldSnapshot>) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function patchAgent(agentId: string, patch: Partial<Omit<AgentProfile, "id">>) {
+  try {
+    const response = await fetch(`${apiBase}/api/agents/${agentId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch)
+    });
+    return response.ok ? (response.json() as Promise<WorldSnapshot>) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function patchMapItem(itemId: string, patch: Partial<Omit<WorldItem, "id">>) {
+  try {
+    const response = await fetch(`${apiBase}/api/map/items/${itemId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch)
+    });
+    return response.ok ? (response.json() as Promise<WorldSnapshot>) : null;
   } catch {
     return null;
   }
@@ -85,6 +124,19 @@ export async function uploadMapImage(file: File) {
   const form = new FormData();
   form.append("file", file);
   const response = await fetch(`${apiBase}/api/maps/image`, {
+    method: "POST",
+    body: form
+  });
+  if (!response.ok) {
+    throw new Error(`upload failed: ${response.status}`);
+  }
+  return response.json() as Promise<{ asset: string; url: string }>;
+}
+
+export async function uploadAsset(file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  const response = await fetch(`${apiBase}/api/assets`, {
     method: "POST",
     body: form
   });

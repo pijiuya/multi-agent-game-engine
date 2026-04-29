@@ -31,6 +31,10 @@ export function addItemToMap(map: WorldMap, point: Point): WorldMap {
         name: "Item",
         position: point,
         radius: 34,
+        scale: 1,
+        rotation: 0,
+        image: null,
+        description: "",
         tags: [],
         state: {}
       }
@@ -101,4 +105,3 @@ function randomAgentColor() {
   const palette = ["#2563eb", "#dc2626", "#059669", "#7c3aed", "#ea580c", "#0891b2"];
   return palette[Math.floor(Math.random() * palette.length)];
 }
-

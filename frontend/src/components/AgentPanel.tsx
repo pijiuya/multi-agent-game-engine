@@ -8,14 +8,16 @@ type Props = {
   selection: SelectionState;
   onSelect: (selection: SelectionState) => void;
   onLocateAgent: (agentId: string) => void;
+  onRenameAgent: (agentId: string, name: string) => void;
   onCreateAgent: (name: string, role: string, point: Point) => void;
   onRefresh: () => void;
 };
 
-export function AgentPanel({ world, selection, onSelect, onLocateAgent, onCreateAgent, onRefresh }: Props) {
+export function AgentPanel({ world, selection, onSelect, onLocateAgent, onRenameAgent, onCreateAgent, onRefresh }: Props) {
   const [name, setName] = useState("新 Agent");
   const [role, setRole] = useState("居民");
   const [speech, setSpeech] = useState("");
+  const [menu, setMenu] = useState<{ x: number; y: number; agentId: string } | null>(null);
   const selectedAgent = selection.kind === "agent" ? world.agent_profiles[selection.id] : null;
 
   async function sendSpeech() {
@@ -28,7 +30,7 @@ export function AgentPanel({ world, selection, onSelect, onLocateAgent, onCreate
   }
 
   return (
-    <div className="agent-panel">
+    <div className="agent-panel" onClick={() => setMenu(null)}>
       <div className="agent-stack">
         {Object.values(world.agent_profiles).map((agent) => {
           const state = world.agent_states[agent.id];
@@ -38,6 +40,11 @@ export function AgentPanel({ world, selection, onSelect, onLocateAgent, onCreate
               key={agent.id}
               onClick={() => onSelect({ kind: "agent", id: agent.id })}
               onDoubleClick={() => onLocateAgent(agent.id)}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                onSelect({ kind: "agent", id: agent.id });
+                setMenu({ x: event.clientX, y: event.clientY, agentId: agent.id });
+              }}
             >
               <span className="agent-swatch" style={{ background: agent.color }} />
               <span>
@@ -78,6 +85,46 @@ export function AgentPanel({ world, selection, onSelect, onLocateAgent, onCreate
           <Send size={17} />
         </button>
       </div>
+      {menu ? (
+        <div
+          className="agent-context-menu"
+          data-testid="agent-context-menu"
+          onClick={(event) => event.stopPropagation()}
+          style={{ left: menu.x, top: menu.y }}
+        >
+          <button
+            onClick={() => {
+              const agent = world.agent_profiles[menu.agentId];
+              const next = window.prompt("重命名 Agent", agent?.name ?? "")?.trim();
+              if (agent && next && next !== agent.name) {
+                onRenameAgent(agent.id, next);
+              }
+              setMenu(null);
+            }}
+          >
+            重命名
+          </button>
+          <button
+            onClick={() => {
+              onLocateAgent(menu.agentId);
+              setMenu(null);
+            }}
+          >
+            定位
+          </button>
+          <button
+            onClick={() => {
+              const agent = world.agent_profiles[menu.agentId];
+              if (agent) {
+                void navigator.clipboard?.writeText(`${agent.name} / ${agent.role}: ${agent.identity}`);
+              }
+              setMenu(null);
+            }}
+          >
+            复制身份摘要
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

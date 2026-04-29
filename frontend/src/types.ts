@@ -16,6 +16,10 @@ export type WorldItem = {
   name: string;
   position: Point;
   radius: number;
+  scale: number;
+  rotation: number;
+  image: string | null;
+  description: string;
   tags: string[];
   state: Record<string, unknown>;
 };

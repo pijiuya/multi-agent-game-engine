@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AgentPanel } from "./components/AgentPanel";
 import { FloatingPanel } from "./components/FloatingPanel";
 import { PropertiesPanel } from "./components/PropertiesPanel";
@@ -14,21 +14,38 @@ import {
 import {
   createAgent as createAgentRemote,
   getWorld,
+  patchAgent,
+  patchMap,
+  patchMapItem,
   postAction,
   saveMap,
   setSimulation,
   tickSimulation,
+  uploadAsset,
   uploadMapImage,
   wsUrl
 } from "./lib/api";
 import { addAgentLocal, addAreaToMap, addItemToMap, addSpawnToMap, makeId, moveAgentLocal } from "./lib/worldOps";
-import type { CanvasPoint, CanvasViewState, EditTool, PanelState, Point, SelectionState, WorldSnapshot } from "./types";
+import type {
+  AgentProfile,
+  CanvasPoint,
+  CanvasViewState,
+  EditTool,
+  PanelState,
+  Point,
+  SelectionState,
+  WorldItem,
+  WorldMap,
+  WorldSnapshot
+} from "./types";
 
 type AnchorMenuState = {
   x: number;
   y: number;
   point: Point;
 };
+
+type ItemPatch = Partial<Omit<WorldItem, "id">>;
 
 export default function App() {
   const [world, setWorld] = useState<WorldSnapshot | null>(null);
@@ -47,6 +64,7 @@ export default function App() {
   const [anchorMenu, setAnchorMenu] = useState<AnchorMenuState | null>(null);
   const [panels, setPanels] = useState<PanelState[]>(() => createInitialPanels());
   const [zCursor, setZCursor] = useState(40);
+  const pendingItemPatchesRef = useRef<Record<string, ItemPatch>>({});
 
   const selectedAgentId = selection.kind === "agent" ? selection.id : null;
   const selectedAgentExists = useMemo(() => {
@@ -70,7 +88,7 @@ export default function App() {
       socket.onopen = () => setStatus("后端已连接");
       socket.onmessage = (event) => {
         const snapshot = JSON.parse(event.data) as WorldSnapshot;
-        setWorld(snapshot);
+        setWorld(mergeSnapshotWithPendingItems(snapshot, pendingItemPatchesRef.current));
       };
       socket.onerror = () => setStatus("本地预览");
       socket.onclose = () => setStatus((current) => (current === "后端已连接" ? "本地预览" : current));
@@ -176,7 +194,7 @@ export default function App() {
       return;
     }
     if (editTool === "walkable" || editTool === "obstacle" || editTool === "zone") {
-      setDraftPoints((points) => [...points, point]);
+      setDraftPoints((points) => [...points, snapWorldPointToGrid(point, canvasView.zoom)]);
       return;
     }
     if (editTool === "item") {
@@ -184,10 +202,21 @@ export default function App() {
       const item = map.items[map.items.length - 1];
       setWorld({ ...world, map });
       setSelection(item ? { kind: "item", id: item.id } : selection);
+      setEditTool("select");
+      const snapshot = await saveMap(map);
+      if (snapshot) {
+        setWorld(snapshot);
+      }
       return;
     }
     if (editTool === "spawn") {
-      setWorld({ ...world, map: addSpawnToMap(world.map, point) });
+      const map = addSpawnToMap(world.map, snapWorldPointToGrid(point, canvasView.zoom));
+      setWorld({ ...world, map });
+      setEditTool("select");
+      const snapshot = await saveMap(map);
+      if (snapshot) {
+        setWorld(snapshot);
+      }
       return;
     }
     if (editTool === "move" && selectedAgentId) {
@@ -200,11 +229,16 @@ export default function App() {
     }
   }
 
-  function finalizePolygon() {
+  async function finalizePolygon() {
     if (!world || draftPoints.length < 3) {
       return;
     }
-    setWorld({ ...world, map: addAreaToMap(world.map, editTool, draftPoints) });
+    const map = addAreaToMap(world.map, editTool, draftPoints);
+    setWorld({ ...world, map });
+    const snapshot = await saveMap(map);
+    if (snapshot) {
+      setWorld(snapshot);
+    }
     setDraftPoints([]);
   }
 
@@ -288,6 +322,81 @@ export default function App() {
     setCanvasPoints((points) => [...points, canvasPoint]);
     setSelection({ kind: "point", id: canvasPoint.id });
     setAnchorMenu(null);
+  }
+
+  async function updateMapPatch(patch: Partial<Pick<WorldMap, "name" | "width" | "height" | "background_image">>) {
+    if (!world) {
+      return;
+    }
+    const nextWorld = { ...world, map: { ...world.map, ...patch } };
+    setWorld(nextWorld);
+    const snapshot = await patchMap(patch);
+    if (snapshot) {
+      setWorld(snapshot);
+      setStatus("已保存");
+    } else {
+      setStatus("本地更改");
+    }
+  }
+
+  async function updateAgentProfile(agentId: string, patch: Partial<Omit<AgentProfile, "id">>) {
+    if (!world) {
+      return;
+    }
+    const profile = world.agent_profiles[agentId];
+    if (!profile) {
+      return;
+    }
+    setWorld({
+      ...world,
+      agent_profiles: {
+        ...world.agent_profiles,
+        [agentId]: { ...profile, ...patch }
+      }
+    });
+    const snapshot = await patchAgent(agentId, patch);
+    if (snapshot) {
+      setWorld(snapshot);
+      setStatus("已保存");
+    } else {
+      setStatus("本地更改");
+    }
+  }
+
+  function previewItemPatch(itemId: string, patch: Partial<Omit<WorldItem, "id">>) {
+    setPendingItemPatch(pendingItemPatchesRef, itemId, patch);
+    setSelection({ kind: "item", id: itemId });
+    setWorld((current) => (current ? applyItemPatch(current, itemId, patch) : current));
+  }
+
+  async function updateItemPatch(itemId: string, patch: Partial<Omit<WorldItem, "id">>) {
+    if (!world) {
+      return;
+    }
+    if (Object.keys(patch).length === 0) {
+      return;
+    }
+    setPendingItemPatch(pendingItemPatchesRef, itemId, patch);
+    setSelection({ kind: "item", id: itemId });
+    setWorld((current) => (current ? applyItemPatch(current, itemId, patch) : current));
+    const snapshot = await patchMapItem(itemId, patch);
+    if (snapshot) {
+      clearPendingItemPatch(pendingItemPatchesRef, itemId);
+      setWorld(mergeSnapshotWithPendingItems(snapshot, pendingItemPatchesRef.current));
+      setStatus("已保存");
+    } else {
+      setStatus("本地更改");
+    }
+  }
+
+  async function uploadItemImage(itemId: string, file: File) {
+    try {
+      const result = await uploadAsset(file);
+      await updateItemPatch(itemId, { image: result.url });
+    } catch {
+      await updateItemPatch(itemId, { image: URL.createObjectURL(file) });
+      setStatus("本地图片");
+    }
   }
 
   function movePanel(id: PanelState["id"], x: number, y: number) {
@@ -383,6 +492,10 @@ export default function App() {
         onWorldPoint={(point) => void handleWorldClick(point)}
         onSelect={setSelection}
         onAnchorContext={openAnchorMenu}
+        draftPoints={draftPoints}
+        onRenameAgent={(agentId, name) => void updateAgentProfile(agentId, { name })}
+        onPreviewItem={previewItemPatch}
+        onCommitItem={(itemId, patch) => void updateItemPatch(itemId, patch)}
       />
 
       <TransportControls
@@ -433,7 +546,7 @@ export default function App() {
               onSave={() => void handleSave()}
               onZoom={setZoom}
               onFit={() => setCanvasView({ zoom: 1, pan: { x: 0, y: 0 }, fitMode: true })}
-              onFinalizePolygon={finalizePolygon}
+              onFinalizePolygon={() => void finalizePolygon()}
               onClearDraft={() => setDraftPoints([])}
               onUpload={(file) => void handleUpload(file)}
             />
@@ -447,11 +560,22 @@ export default function App() {
               selection={selection}
               onSelect={setSelection}
               onLocateAgent={locateAgent}
+              onRenameAgent={(agentId, name) => void updateAgentProfile(agentId, { name })}
               onCreateAgent={(name, role, point) => void createAgent(name, role, point)}
               onRefresh={() => void refreshWorld()}
             />
           ) : null}
-          {panel.id === "properties" ? <PropertiesPanel world={world} selection={selection} canvasPoints={canvasPoints} /> : null}
+          {panel.id === "properties" ? (
+            <PropertiesPanel
+              world={world}
+              selection={selection}
+              canvasPoints={canvasPoints}
+              onUpdateMap={(patch) => void updateMapPatch(patch)}
+              onUpdateAgent={(agentId, patch) => void updateAgentProfile(agentId, patch)}
+              onUpdateItem={(itemId, patch) => void updateItemPatch(itemId, patch)}
+              onUploadItemImage={(itemId, file) => void uploadItemImage(itemId, file)}
+            />
+          ) : null}
         </FloatingPanel>
       ))}
     </main>
@@ -546,4 +670,37 @@ function snapToTargets(active: PanelState, panels: PanelState[]): PanelState {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function applyItemPatch(world: WorldSnapshot, itemId: string, patch: Partial<Omit<WorldItem, "id">>): WorldSnapshot {
+  return {
+    ...world,
+    map: {
+      ...world.map,
+      items: world.map.items.map((item) => (item.id === itemId ? { ...item, ...patch } : item))
+    }
+  };
+}
+
+function mergeSnapshotWithPendingItems(snapshot: WorldSnapshot, pending: Record<string, ItemPatch>): WorldSnapshot {
+  return Object.entries(pending).reduce(
+    (current, [itemId, patch]) => applyItemPatch(current, itemId, patch),
+    snapshot
+  );
+}
+
+function setPendingItemPatch(ref: { current: Record<string, ItemPatch> }, itemId: string, patch: ItemPatch) {
+  ref.current = {
+    ...ref.current,
+    [itemId]: {
+      ...ref.current[itemId],
+      ...patch
+    }
+  };
+}
+
+function clearPendingItemPatch(ref: { current: Record<string, ItemPatch> }, itemId: string) {
+  const next = { ...ref.current };
+  delete next[itemId];
+  ref.current = next;
 }

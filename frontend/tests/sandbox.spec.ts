@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+test.describe.configure({ mode: "serial" });
+
 test("renders the transparent 2D workstation with floating panels", async ({ page }) => {
   await page.goto("/");
 
@@ -27,8 +29,8 @@ test("renders the transparent 2D workstation with floating panels", async ({ pag
   expect(tools).not.toBeNull();
   expect(tools!.height).toBeGreaterThan(tools!.width * 3);
 
-  await page.getByTestId("panel-agents").getByRole("button", { name: /Mira/ }).click();
-  await expect(page.getByTestId("panel-properties").getByText("mediator", { exact: true })).toBeVisible();
+  await page.getByTestId("panel-agents").locator(".agent-card").first().click();
+  await expect(page.getByTestId("panel-properties").locator(".property-heading strong")).toHaveText("Agent");
 });
 
 test("floating panels drag and snap to the scene edge", async ({ page }) => {
@@ -220,7 +222,7 @@ test("workspace wheel zoom changes grid scale and density", async ({ page }) => 
   expect(box).not.toBeNull();
 
   const before = await readGridState(scene);
-  await surface.hover();
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
   await page.mouse.wheel(0, -900);
   await page.mouse.wheel(0, -900);
   await page.mouse.wheel(0, -900);
@@ -285,7 +287,7 @@ test("workspace zoom and pan still work after tone inversion", async ({ page }) 
   expect(box).not.toBeNull();
 
   const before = await readGridState(scene);
-  await surface.hover();
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
   await page.mouse.wheel(0, -900);
   await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
   await page.mouse.down({ button: "middle" });
@@ -326,17 +328,18 @@ test("double clicking an agent centers that agent in world coordinates", async (
   const shellBox = await shell.boundingBox();
   expect(shellBox).not.toBeNull();
 
-  await page.getByTestId("panel-agents").getByRole("button", { name: /Mira/ }).dblclick();
-  await expect(page.getByTestId("panel-properties").getByText("mediator", { exact: true })).toBeVisible();
+  const firstMarker = page.locator(".world-agent-marker").first();
+  await page.getByTestId("panel-agents").locator(".agent-card").first().dblclick();
+  await expect(page.getByTestId("panel-properties").locator(".property-heading strong")).toHaveText("Agent");
   const after = await readGridState(scene);
-  const agentPosition = await page.getByTestId("world-agent-agent_mira").evaluate((element) => ({
+  const agentPosition = await firstMarker.evaluate((element) => ({
     x: Number(element.getAttribute("data-world-x")),
     y: Number(element.getAttribute("data-world-y"))
   }));
 
   expect(parseFloat(after.panX)).toBeCloseTo(shellBox!.width / 2 - agentPosition.x, 0);
   expect(parseFloat(after.panY)).toBeCloseTo(shellBox!.height / 2 - agentPosition.y, 0);
-  await expect(page.getByTestId("world-agent-agent_mira")).toBeVisible();
+  await expect(firstMarker).toBeVisible();
 });
 
 test("anchor tool snaps to the grid and generates empty points", async ({ page }) => {
@@ -372,15 +375,15 @@ test("anchor context menu generates agents and map elements without affecting pa
 
   await page.getByRole("button", { name: "锚点" }).click();
   await expect(page.locator(".scene-footer").getByText("锚点", { exact: true })).toBeVisible();
-  const agentCountBefore = await page.locator('[data-testid^="world-agent-"]').count();
-  const itemCountBefore = await page.locator('[data-testid^="world-item-"]').count();
+  const agentCountBefore = await page.locator(".world-agent-marker").count();
+  const itemCountBefore = await page.locator(".world-item-marker").count();
   await page.mouse.click(box!.x + 430, box!.y + 260, { button: "right" });
   await page.getByRole("button", { name: "生成 Agent" }).click();
-  await expect(page.locator('[data-testid^="world-agent-"]')).toHaveCount(agentCountBefore + 1);
+  await expect(page.locator(".world-agent-marker")).toHaveCount(agentCountBefore + 1);
 
   await page.mouse.click(box!.x + 520, box!.y + 320, { button: "right" });
   await page.getByRole("button", { name: "生成地图元素" }).click();
-  await expect(page.locator('[data-testid^="world-item-"]')).toHaveCount(itemCountBefore + 1);
+  await expect(page.locator(".world-item-marker")).toHaveCount(itemCountBefore + 1);
   await expect(page.getByTestId("panel-properties").locator(".property-heading strong")).toHaveText("元素");
 
   const zoomBeforePanelRightClick = (await readGridState(scene)).minorSize;
@@ -390,6 +393,136 @@ test("anchor context menu generates agents and map elements without affecting pa
   expect(zoomAfterPanelRightClick).toBe(zoomBeforePanelRightClick);
 
   await expect(page.getByTestId("world-2d")).toHaveCount(0);
+});
+
+test("properties panel renames map and agent through real editors", async ({ page }) => {
+  await page.goto("/");
+  const suffix = Date.now().toString().slice(-5);
+
+  await page.getByTestId("panel-scene").getByRole("button", { name: /地图/ }).first().click();
+  const mapName = page.getByTestId("panel-properties").locator(".property-edit-row").filter({ hasText: "名称" }).getByRole("textbox");
+  await mapName.fill(`测试地图 ${suffix}`);
+  await mapName.press("Enter");
+  await expect(page.locator(".scene-footer").getByText(`测试地图 ${suffix}`, { exact: true })).toBeVisible();
+
+  await page.getByTestId("panel-agents").locator(".agent-card").first().click();
+  const agentName = page.getByTestId("panel-properties").locator(".property-edit-row").filter({ hasText: "名称" }).getByRole("textbox");
+  await agentName.fill(`测试Agent ${suffix}`);
+  await agentName.press("Enter");
+  await expect(page.getByTestId("panel-agents").getByRole("button", { name: new RegExp(`测试Agent ${suffix}`) })).toBeVisible();
+});
+
+test("agent panel context menu and scene double click can rename agents", async ({ page }) => {
+  await page.goto("/");
+  const suffix = Date.now().toString().slice(-5);
+  const firstAgent = page.getByTestId("panel-agents").locator(".agent-card").first();
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("重命名 Agent");
+    await dialog.accept(`右键Agent ${suffix}`);
+  });
+  await firstAgent.click({ button: "right" });
+  await page.getByTestId("agent-context-menu").getByRole("button", { name: "重命名" }).click();
+  await expect(page.getByTestId("panel-agents").getByRole("button", { name: new RegExp(`右键Agent ${suffix}`) })).toBeVisible();
+
+  const marker = page.locator('[data-testid^="world-agent-label-"]').first();
+  page.once("dialog", async (dialog) => {
+    await dialog.accept(`场景Agent ${suffix}`);
+  });
+  await marker.dblclick({ force: true });
+  await expect(page.locator('[data-testid^="world-agent-label-"]').filter({ hasText: `场景Agent ${suffix}` })).toBeVisible();
+});
+
+test("drawing tools create vector areas and item transform handles edit items", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.goto("/");
+
+  const surface = page.getByTestId("workspace-surface");
+  const box = await surface.boundingBox();
+  expect(box).not.toBeNull();
+
+  await page.getByRole("button", { name: "障碍区" }).click();
+  await page.mouse.click(box!.x + 440, box!.y + 260);
+  await page.mouse.click(box!.x + 520, box!.y + 260);
+  await page.mouse.click(box!.x + 520, box!.y + 330);
+  await expect(page.getByTestId("world-draft-area")).toBeVisible();
+  const areaCountBefore = await page.locator('[data-testid^="world-area-"]').count();
+  await page.getByRole("button", { name: "完成多边形" }).click();
+  await expect(page.locator('[data-testid^="world-area-"]')).toHaveCount(areaCountBefore + 1);
+
+  await page.getByTestId("panel-tools").getByRole("button", { name: "元素" }).click();
+  const itemCountBefore = await page.locator(".world-item-marker").count();
+  await page.mouse.click(box!.x + 620, box!.y + 360);
+  await expect(page.locator(".world-item-marker")).toHaveCount(itemCountBefore + 1);
+  await expect(page.getByTestId("item-transform-box")).toBeVisible();
+
+  const item = page.locator(".world-item-marker").last();
+  const before = await item.evaluate((element) => ({
+    x: Number(element.getAttribute("data-world-x")),
+    y: Number(element.getAttribute("data-world-y"))
+  }));
+  const itemBox = await item.boundingBox();
+  expect(itemBox).not.toBeNull();
+  await page.mouse.move(itemBox!.x + itemBox!.width / 2, itemBox!.y + itemBox!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(itemBox!.x + itemBox!.width / 2 + 54, itemBox!.y + itemBox!.height / 2 + 36, { steps: 6 });
+  await page.mouse.up();
+  const after = await item.evaluate((element) => ({
+    x: Number(element.getAttribute("data-world-x")),
+    y: Number(element.getAttribute("data-world-y"))
+  }));
+  expect(after.x).not.toBe(before.x);
+  expect(after.y).not.toBe(before.y);
+
+  const scaleHandle = page.getByRole("button", { name: "缩放元素" });
+  const scaleBox = await scaleHandle.boundingBox();
+  expect(scaleBox).not.toBeNull();
+  await page.mouse.move(scaleBox!.x + scaleBox!.width / 2, scaleBox!.y + scaleBox!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(scaleBox!.x + 60, scaleBox!.y + 54, { steps: 6 });
+  await page.mouse.up();
+  const scaleValue = await page
+    .getByTestId("panel-properties")
+    .locator(".property-edit-row")
+    .filter({ hasText: "缩放" })
+    .getByRole("spinbutton")
+    .inputValue();
+  expect(Number(scaleValue)).toBeGreaterThan(1);
+});
+
+test("agent labels stay crisp while icons remain vector based during zoom", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.goto("/");
+  const surface = page.getByTestId("workspace-surface");
+  const label = page.locator(".world-agent-label").first();
+  const icon = page.locator(".world-agent-marker > span").first();
+
+  const labelBefore = await label.boundingBox();
+  const iconBefore = await icon.boundingBox();
+  expect(labelBefore).not.toBeNull();
+  expect(iconBefore).not.toBeNull();
+  await expect(page.getByTestId("world-label-layer")).toBeVisible();
+  const labelLayerState = await label.evaluate((element) => ({
+    scaleX: new DOMMatrixReadOnly(getComputedStyle(element).transform).a,
+    scaleY: new DOMMatrixReadOnly(getComputedStyle(element).transform).d,
+    inScaledLayer: Boolean(element.closest(".world-coordinate-layer"))
+  }));
+  expect(labelLayerState.scaleX).toBeCloseTo(1, 2);
+  expect(labelLayerState.scaleY).toBeCloseTo(1, 2);
+  expect(labelLayerState.inScaledLayer).toBe(false);
+
+  const box = await surface.boundingBox();
+  expect(box).not.toBeNull();
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  await page.mouse.wheel(0, -1200);
+  await page.mouse.wheel(0, -1200);
+
+  const labelAfter = await label.boundingBox();
+  const iconAfter = await icon.boundingBox();
+  expect(labelAfter).not.toBeNull();
+  expect(iconAfter).not.toBeNull();
+  expect(Math.abs(labelAfter!.height - labelBefore!.height)).toBeLessThan(2);
+  expect(iconAfter!.width).toBeGreaterThan(iconBefore!.width);
 });
 
 async function readGridState(scene: import("@playwright/test").Locator) {

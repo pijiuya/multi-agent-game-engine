@@ -1,6 +1,7 @@
 import type { CanvasViewState, Point } from "../types";
 
 export const ORIGIN_POINT: Point = { x: 0, y: 0 };
+export const OBJECT_SNAP_STEP = 18;
 
 export function screenToWorld(screen: Point, view: CanvasViewState): Point {
   return {
@@ -27,8 +28,8 @@ export function centerViewOnWorldPoint(view: CanvasViewState, world: Point, view
   };
 }
 
-export function snapWorldPointToGrid(point: Point, zoom: number): Point {
-  const step = gridWorldStepForZoom(zoom);
+export function snapWorldPointToGrid(point: Point, _zoom?: number): Point {
+  const step = OBJECT_SNAP_STEP;
   return {
     x: Math.round(point.x / step) * step,
     y: Math.round(point.y / step) * step

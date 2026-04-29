@@ -62,6 +62,10 @@ class WorldItem:
     name: str
     position: Point
     radius: float = 32
+    scale: float = 1
+    rotation: float = 0
+    image: str | None = None
+    description: str = ""
     tags: list[str] = field(default_factory=list)
     state: dict[str, Any] = field(default_factory=dict)
 
@@ -71,6 +75,10 @@ class WorldItem:
             "name": self.name,
             "position": self.position.to_dict(),
             "radius": self.radius,
+            "scale": self.scale,
+            "rotation": self.rotation,
+            "image": self.image,
+            "description": self.description,
             "tags": self.tags,
             "state": self.state,
         }
@@ -82,6 +90,10 @@ class WorldItem:
             name=data.get("name", data["id"]),
             position=Point.from_dict(data["position"]),
             radius=float(data.get("radius", 32)),
+            scale=float(data.get("scale", 1)),
+            rotation=float(data.get("rotation", 0)),
+            image=data.get("image"),
+            description=str(data.get("description", "")),
             tags=list(data.get("tags", [])),
             state=dict(data.get("state", {})),
         )
@@ -446,4 +458,3 @@ class GameWorld:
             tick=int(data.get("tick", 0)),
             running=bool(data.get("running", False)),
         )
-

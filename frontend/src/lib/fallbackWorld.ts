@@ -56,6 +56,10 @@ export const fallbackWorld: WorldSnapshot = {
         name: "Lamp",
         position: { x: 250, y: 470 },
         radius: 34,
+        scale: 1,
+        rotation: 0,
+        image: null,
+        description: "A warm scene element.",
         tags: ["light"],
         state: { mood: "warm" }
       }
@@ -144,4 +148,3 @@ export const fallbackWorld: WorldSnapshot = {
     }
   ]
 };
-

@@ -1,8 +1,9 @@
 import { Maximize2, Minus, Square, X } from "lucide-react";
 import type { CSSProperties, MouseEvent, PointerEvent, WheelEvent } from "react";
 import { useRef, useState } from "react";
-import { screenToWorld, snapWorldPointToGrid } from "../lib/canvasCoords";
-import type { CanvasPoint, CanvasViewState, EditTool, Point, SelectionState, WorldSnapshot } from "../types";
+import { screenToWorld, snapWorldPointToGrid, worldToScreen } from "../lib/canvasCoords";
+import { assetUrl } from "../lib/api";
+import type { CanvasPoint, CanvasViewState, EditTool, Point, SelectionState, WorldItem, WorldSnapshot } from "../types";
 
 type Props = {
   world: WorldSnapshot;
@@ -11,11 +12,15 @@ type Props = {
   selection: SelectionState;
   canvasPoints: CanvasPoint[];
   anchorPoint: Point | null;
+  draftPoints: Point[];
   status: string;
   onViewChange: (view: CanvasViewState) => void;
   onWorldPoint: (point: Point) => void;
   onSelect: (selection: SelectionState) => void;
   onAnchorContext: (screen: Point, world: Point) => void;
+  onRenameAgent: (agentId: string, name: string) => void;
+  onPreviewItem: (itemId: string, patch: Partial<Omit<WorldItem, "id">>) => void;
+  onCommitItem: (itemId: string, patch: Partial<Omit<WorldItem, "id">>) => void;
 };
 
 type PanDrag = {
@@ -23,6 +28,14 @@ type PanDrag = {
   x: number;
   y: number;
   pan: Point;
+};
+
+type ItemTransform = {
+  pointerId: number;
+  item: WorldItem;
+  mode: "move" | "scale" | "rotate";
+  offset: Point;
+  lastPatch: Partial<Omit<WorldItem, "id">>;
 };
 
 const MIN_ZOOM = 0.125;
@@ -35,19 +48,28 @@ export function SceneViewport({
   selection,
   canvasPoints,
   anchorPoint,
+  draftPoints,
   status,
   onViewChange,
   onWorldPoint,
   onSelect,
-  onAnchorContext
+  onAnchorContext,
+  onRenameAgent,
+  onPreviewItem,
+  onCommitItem
 }: Props) {
   const panDragRef = useRef<PanDrag | null>(null);
+  const transformRef = useRef<ItemTransform | null>(null);
+  const shellRef = useRef<HTMLDivElement | null>(null);
   const [isPanning, setIsPanning] = useState(false);
   const gridStyle = getGridStyle(canvasView);
   const density = getGridDensity(canvasView.zoom);
   const worldLayerStyle = {
+    "--inverse-zoom": String(1 / canvasView.zoom),
+    "--agent-icon-size": `${Math.round(clamp(16 + canvasView.zoom * 2, 16, 28))}px`,
     transform: `translate(${canvasView.pan.x}px, ${canvasView.pan.y}px) scale(${canvasView.zoom})`
   } as CSSProperties;
+  const selectedItem = selection.kind === "item" ? world.map.items.find((item) => item.id === selection.id) : null;
 
   function handleWheel(event: WheelEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -92,6 +114,15 @@ export function SceneViewport({
   }
 
   function movePan(event: PointerEvent<HTMLDivElement>) {
+    const transform = transformRef.current;
+    if (transform && transform.pointerId === event.pointerId) {
+      event.preventDefault();
+      const point = localWorldFromClient(event.clientX, event.clientY);
+      const patch = itemPatchFromDrag(transform, point, canvasView.zoom);
+      transform.lastPatch = patch;
+      onPreviewItem(transform.item.id, patch);
+      return;
+    }
     const drag = panDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) {
       return;
@@ -108,6 +139,16 @@ export function SceneViewport({
   }
 
   function endPan(event: PointerEvent<HTMLDivElement>) {
+    const transform = transformRef.current;
+    if (transform && transform.pointerId === event.pointerId) {
+      event.preventDefault();
+      transformRef.current = null;
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      onCommitItem(transform.item.id, transform.lastPatch);
+      return;
+    }
     const drag = panDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) {
       return;
@@ -138,13 +179,65 @@ export function SceneViewport({
     );
   }
 
+  function localWorldFromClient(clientX: number, clientY: number): Point {
+    const rect = shellRef.current?.getBoundingClientRect();
+    if (!rect) {
+      return { x: 0, y: 0 };
+    }
+    return screenToWorld({ x: clientX - rect.left, y: clientY - rect.top }, canvasView);
+  }
+
   function stopMarkerPointer(event: PointerEvent<HTMLButtonElement>) {
     event.stopPropagation();
   }
 
+  function startItemTransform(mode: ItemTransform["mode"], item: WorldItem, event: PointerEvent<HTMLElement>) {
+    event.stopPropagation();
+    event.preventDefault();
+    const point = localWorldFromClient(event.clientX, event.clientY);
+    const offset = { x: point.x - item.position.x, y: point.y - item.position.y };
+    transformRef.current = {
+      pointerId: event.pointerId,
+      item,
+      mode,
+      offset,
+      lastPatch: {}
+    };
+    onSelect({ kind: "item", id: item.id });
+    const move = (nativeEvent: globalThis.PointerEvent) => {
+      const transform = transformRef.current;
+      if (!transform || transform.pointerId !== event.pointerId) {
+        return;
+      }
+      const nextPoint = localWorldFromClient(nativeEvent.clientX, nativeEvent.clientY);
+      const patch = itemPatchFromDrag(transform, nextPoint, canvasView.zoom);
+      transform.lastPatch = patch;
+      onPreviewItem(transform.item.id, patch);
+    };
+    const up = () => {
+      const transform = transformRef.current;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      if (!transform || transform.pointerId !== event.pointerId) {
+        return;
+      }
+      transformRef.current = null;
+      onCommitItem(transform.item.id, transform.lastPatch);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+
+  function renameAgent(agentId: string, currentName: string) {
+    const next = window.prompt("重命名 Agent", currentName)?.trim();
+    if (next && next !== currentName) {
+      onRenameAgent(agentId, next);
+    }
+  }
+
   return (
     <section
-      className={isPanning ? "scene-window panning" : "scene-window"}
+      className={`scene-window tool-${editTool}${isPanning ? " panning" : ""}`}
       data-testid="scene-viewport"
       data-grid-density={density}
       style={gridStyle}
@@ -176,6 +269,7 @@ export function SceneViewport({
         </div>
       </header>
       <div
+        ref={shellRef}
         className="scene-canvas-shell"
         onWheel={handleWheel}
         onPointerDown={startPan}
@@ -191,6 +285,44 @@ export function SceneViewport({
       >
         <div className="workspace-surface" data-testid="workspace-surface" aria-label="透明工作站底图" />
         <div className="world-coordinate-layer" data-testid="world-coordinate-layer" style={worldLayerStyle}>
+          {world.map.background_image ? (
+            <img
+              alt="地图背景"
+              className="world-map-background"
+              data-testid="world-map-background"
+              draggable={false}
+              src={assetUrl(world.map.background_image) ?? world.map.background_image}
+              style={{ left: 0, top: 0, width: world.map.width, height: world.map.height }}
+            />
+          ) : null}
+          <svg
+            className="world-vector-layer"
+            data-testid="world-vector-layer"
+            style={{ width: world.map.width, height: world.map.height }}
+          >
+            {[...world.map.walkable_areas, ...world.map.obstacles, ...world.map.interaction_zones].map((area) => (
+              <polygon
+                className={`world-area world-area-${area.kind} ${
+                  selection.kind === "area" && selection.id === area.id ? "active" : ""
+                }`}
+                data-testid={`world-area-${area.id}`}
+                key={area.id}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onSelect({ kind: "area", id: area.id });
+                }}
+                points={area.points.map((point) => `${point.x},${point.y}`).join(" ")}
+              />
+            ))}
+            {draftPoints.length > 0 ? (
+              <g className="world-draft-area" data-testid="world-draft-area">
+                <polyline points={draftPoints.map((point) => `${point.x},${point.y}`).join(" ")} />
+                {draftPoints.map((point, index) => (
+                  <circle cx={point.x} cy={point.y} key={`${point.x}-${point.y}-${index}`} r="5" />
+                ))}
+              </g>
+            ) : null}
+          </svg>
           <div className="world-origin-marker" data-testid="origin-marker" style={pointStyle({ x: 0, y: 0 })}>
             <span />
           </div>
@@ -203,12 +335,12 @@ export function SceneViewport({
               data-world-object="item"
               key={item.id}
               onClick={() => onSelect({ kind: "item", id: item.id })}
-              onPointerDown={stopMarkerPointer}
-              style={pointStyle(item.position)}
+              onPointerDown={(event) => startItemTransform("move", item, event)}
+              style={itemStyle(item)}
               title={item.name}
-            >
-              {item.name.slice(0, 1)}
-            </button>
+              >
+                {item.image ? <img alt="" draggable={false} src={assetUrl(item.image) ?? item.image} /> : item.name.slice(0, 1)}
+              </button>
           ))}
           {Object.values(world.agent_profiles).map((agent) => {
             const state = world.agent_states[agent.id];
@@ -226,17 +358,17 @@ export function SceneViewport({
                 data-world-object="agent"
                 key={agent.id}
                 onClick={() => onSelect({ kind: "agent", id: agent.id })}
+                onDoubleClick={() => renameAgent(agent.id, agent.name)}
                 onPointerDown={stopMarkerPointer}
                 style={{ ...pointStyle(state.position), "--agent-color": agent.color } as CSSProperties}
                 title={agent.name}
               >
                 <span />
-                <small>{agent.name}</small>
               </button>
             );
           })}
           {canvasPoints.map((point) => (
-            <button
+              <button
               className={
                 selection.kind === "point" && selection.id === point.id ? "world-empty-point-marker active" : "world-empty-point-marker"
               }
@@ -251,6 +383,25 @@ export function SceneViewport({
               title={point.name}
             />
           ))}
+          {selectedItem ? (
+            <div className="item-transform-box" data-testid="item-transform-box" style={itemTransformStyle(selectedItem)}>
+              <button
+                aria-label="移动元素"
+                className="item-transform-center"
+                onPointerDown={(event) => startItemTransform("move", selectedItem, event)}
+              />
+              <button
+                aria-label="缩放元素"
+                className="item-transform-handle scale"
+                onPointerDown={(event) => startItemTransform("scale", selectedItem, event)}
+              />
+              <button
+                aria-label="旋转元素"
+                className="item-transform-handle rotate"
+                onPointerDown={(event) => startItemTransform("rotate", selectedItem, event)}
+              />
+            </div>
+          ) : null}
           {anchorPoint ? (
             <button
               aria-label="当前锚点"
@@ -264,6 +415,52 @@ export function SceneViewport({
               title="当前锚点"
             />
           ) : null}
+        </div>
+        <div className="world-label-layer" data-testid="world-label-layer">
+          {world.map.items.map((item) => (
+            <button
+              className={selection.kind === "item" && selection.id === item.id ? "world-item-label active" : "world-item-label"}
+              data-testid={`world-item-label-${item.id}`}
+              key={item.id}
+              onClick={(event) => {
+                event.stopPropagation();
+                onSelect({ kind: "item", id: item.id });
+              }}
+              onPointerDown={(event) => event.stopPropagation()}
+              style={screenPointStyle(item.position, canvasView)}
+              title={item.name}
+            >
+              {item.name}
+            </button>
+          ))}
+          {Object.values(world.agent_profiles).map((agent) => {
+            const state = world.agent_states[agent.id];
+            if (!state) {
+              return null;
+            }
+            return (
+              <button
+                className={
+                  selection.kind === "agent" && selection.id === agent.id ? "world-agent-label active" : "world-agent-label"
+                }
+                data-testid={`world-agent-label-${agent.id}`}
+                key={agent.id}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onSelect({ kind: "agent", id: agent.id });
+                }}
+                onDoubleClick={(event) => {
+                  event.stopPropagation();
+                  renameAgent(agent.id, agent.name);
+                }}
+                onPointerDown={(event) => event.stopPropagation()}
+                style={screenPointStyle(state.position, canvasView)}
+                title={agent.name}
+              >
+                {agent.name}
+              </button>
+            );
+          })}
         </div>
         <div className="scene-corner-mark top-left" />
         <div className="scene-corner-mark top-right" />
@@ -287,6 +484,57 @@ function pointStyle(point: Point) {
     left: `${point.x}px`,
     top: `${point.y}px`
   } as CSSProperties;
+}
+
+function screenPointStyle(point: Point, view: CanvasViewState) {
+  const screen = worldToScreen(point, view);
+  return {
+    left: `${screen.x}px`,
+    top: `${screen.y}px`
+  } as CSSProperties;
+}
+
+function itemStyle(item: WorldItem) {
+  const size = item.radius * 2 * item.scale;
+  return {
+    ...pointStyle(item.position),
+    width: `${size}px`,
+    height: `${size}px`,
+    transform: `translate(-50%, -50%) rotate(${item.rotation}deg)`
+  } as CSSProperties;
+}
+
+function itemTransformStyle(item: WorldItem) {
+  const size = item.radius * 2 * item.scale;
+  return {
+    ...pointStyle(item.position),
+    width: `${size}px`,
+    height: `${size}px`,
+    transform: `translate(-50%, -50%) rotate(${item.rotation}deg)`
+  } as CSSProperties;
+}
+
+function itemPatchFromDrag(transform: ItemTransform, point: Point, zoom: number): Partial<Omit<WorldItem, "id">> {
+  if (transform.mode === "move") {
+    return {
+      position: snapWorldPointToGrid(
+        {
+          x: point.x - transform.offset.x,
+          y: point.y - transform.offset.y
+        },
+        zoom
+      )
+    };
+  }
+  if (transform.mode === "scale") {
+    const distance = Math.hypot(point.x - transform.item.position.x, point.y - transform.item.position.y);
+    return {
+      scale: clamp(distance / Math.max(1, transform.item.radius), 0.25, 5)
+    };
+  }
+  return {
+    rotation: Math.round((Math.atan2(point.y - transform.item.position.y, point.x - transform.item.position.x) * 180) / Math.PI + 90)
+  };
 }
 
 function getGridStyle(view: CanvasViewState) {
