@@ -1682,6 +1682,7 @@ def _capability_status(
         "configured": configured is not None,
         "configured_model_id": configured.get("id") if configured else None,
         "configured_model_name": configured.get("name") if configured else None,
+        "configured_model": _public_model_config(configured) if configured else None,
         "local_available": recommendation is not None,
         "recommended_local": _public_model_config(recommendation) if recommendation else None,
         "local_options": local_options,

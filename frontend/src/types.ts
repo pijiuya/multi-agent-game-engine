@@ -324,6 +324,7 @@ export type ModelCapabilityStatus = {
   configured: boolean;
   configured_model_id: string | null;
   configured_model_name: string | null;
+  configuredModel: ModelConfig | null;
   local_available: boolean;
   installable: boolean;
   recommended_local: ModelConfig | null;

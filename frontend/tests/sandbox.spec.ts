@@ -1302,18 +1302,20 @@ test("llm capability starts local Ollama model install when no model is availabl
   await expect(modelsPanel.getByTestId("llm-connection-mode").getByRole("button", { name: "本地模型" })).toHaveClass(/active/);
   await expect(modelsPanel.getByTestId("local-model-list-llm")).toContainText("推荐 7B");
   await expect(modelsPanel.getByTestId("local-model-list-llm")).toContainText("已下载");
-  await expect(modelsPanel.getByTestId("local-model-list-llm")).toContainText("需要下载");
+  await expect(modelsPanel.getByTestId("local-model-list-llm")).toContainText("需下载后切换");
   await expect(modelsPanel).toContainText("不要求用户电脑预装 Python");
   await expect(modelsPanel.getByLabel("使用 qwen2.5:7b")).toBeChecked();
   await expect(modelsPanel.getByLabel("下载 qwen2.5:1.5b")).toBeChecked();
   await expect(modelsPanel.getByLabel("下载 qwen2.5:1.5b")).toBeDisabled();
   await expect(modelsPanel.getByLabel("下载 qwen2.5:7b")).toBeChecked();
+  await expect(modelsPanel.getByLabel("下载 qwen2.5:7b")).toBeDisabled();
+  await expect(modelsPanel.getByTestId("local-model-action-hint")).toContainText("点击主按钮会先下载 qwen2.5:7b");
   await modelsPanel.getByRole("button", { name: "远程 LLM" }).click();
   await expect(modelsPanel.getByTestId("model-advanced-llm").getByText("服务地址", { exact: true })).toBeVisible();
   await expect(modelsPanel.getByRole("button", { name: "保存并使用远程 LLM" })).toBeDisabled();
   await modelsPanel.getByRole("button", { name: "本地模型" }).click();
   await modelsPanel.getByLabel("使用 qwen2.5:1.5b").check();
-  await expect(modelsPanel.getByRole("button", { name: /下载 1 个并启用 qwen2\.5:1\.5b/ })).toBeEnabled();
+  await expect(modelsPanel.getByRole("button", { name: /切换到 qwen2\.5:1\.5b/ })).toBeEnabled();
   await modelsPanel.getByLabel("使用 qwen2.5:7b").check();
   const installButton = modelsPanel.getByRole("button", { name: /qwen2\.5:7b/ });
   await expect(installButton).toBeEnabled();
@@ -1337,6 +1339,17 @@ test("configured local model actions show inline confirmation", async ({ page })
             configured: true,
             configured_model_id: "model_local_llm",
             configured_model_name: "本地 LLM - qwen2.5:7b",
+            configured_model: {
+              id: "model_local_llm",
+              name: "本地 LLM - qwen2.5:7b",
+              kind: "local",
+              provider: "ollama",
+              base_url: "http://127.0.0.1:11434",
+              api_key: "",
+              model: "qwen2.5:7b",
+              enabled: true,
+              capabilities: ["llm"]
+            },
             local_available: true,
             installable: false,
             recommended_local: {
@@ -1440,8 +1453,8 @@ test("configured local model actions show inline confirmation", async ({ page })
 
   await page.goto("/");
   const modelsPanel = page.getByTestId("panel-models");
-  await expect(modelsPanel.getByRole("button", { name: /重新启用本地 LLM/ })).toBeEnabled();
-  await modelsPanel.getByRole("button", { name: /重新启用本地 LLM/ }).click();
+  await expect(modelsPanel.getByRole("button", { name: /确认使用 qwen2\.5:7b/ })).toBeEnabled();
+  await modelsPanel.getByRole("button", { name: /确认使用 qwen2\.5:7b/ }).click();
   await expect(modelsPanel.getByTestId("model-install-task-llm")).toContainText("本地 LLM 已启用");
 
   await modelsPanel.getByTestId("model-capability-segmentation").click();

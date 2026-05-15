@@ -137,6 +137,10 @@ export function ModelManagerPanel({
         if (current[status.id]?.length || !status.local_options.length) {
           continue;
         }
+        const hasInstalledLocalModel = status.local_options.some((option) => option.installed);
+        if (hasInstalledLocalModel) {
+          continue;
+        }
         const defaults = status.local_options
           .filter((option) => option.selectedByDefault || option.recommended)
           .filter((option) => !option.installed)
@@ -158,7 +162,9 @@ export function ModelManagerPanel({
         if (current[status.id] || !status.local_options.length) {
           continue;
         }
-        const primary = status.local_options.find((option) => option.selectedByDefault)
+        const configuredModel = configuredLocalModel(status);
+        const primary = status.local_options.find((option) => option.model === configuredModel)
+          ?? status.local_options.find((option) => option.selectedByDefault)
           ?? status.local_options.find((option) => option.recommended)
           ?? status.local_options.find((option) => option.installed)
           ?? status.local_options[0];
@@ -345,9 +351,12 @@ function CapabilityDetail({
   const meta = CAPABILITY_META[capability];
   const localSelection = localSelectionPayload(status, selectedLocalModels, primaryLocalModel);
   const primaryOption = status.local_options.find((option) => option.model === localSelection?.model);
+  const currentLocalModel = configuredLocalModel(status);
   const selectedMissingLocalCount = status.local_options.filter((option) => localSelection?.models.includes(option.model) && !option.installed).length;
+  const queuedMissingModels = status.local_options.filter((option) => localSelection?.models.includes(option.model) && !option.installed).map((option) => option.model);
   const hasSelectedInstallModels = capability !== "llm" || Boolean(localSelection?.models.length) || !status.local_options.length;
   const canUseLocal = Boolean(status.recommended_local) || Boolean(primaryOption?.installed);
+  const canSwitchOnly = capability === "llm" && Boolean(primaryOption?.installed) && Boolean(localSelection?.model) && selectedMissingLocalCount > 0;
   const canInstallLocal = capability === "llm"
     ? selectedMissingLocalCount > 0 && hasSelectedInstallModels
     : capability === "segmentation" && status.installable && hasSelectedInstallModels;
@@ -358,10 +367,13 @@ function CapabilityDetail({
     : canInstallLocal
       ? installActionLabel(capability, selectedMissingLocalCount, localSelection?.model ?? "")
       : capability === "llm" && canUseLocal && localSelection?.model
-        ? `启用 ${localSelection.model}`
+        ? currentLocalModel === localSelection.model ? `确认使用 ${localSelection.model}` : `切换到 ${localSelection.model}`
       : isReady
         ? readyActionLabel(capability)
         : meta.localLabel;
+  const localActionHint = capability === "llm" && connectionMode === "local"
+    ? localModelActionHint(currentLocalModel, localSelection?.model ?? "", queuedMissingModels)
+    : "";
   const taskMessage = task?.status === "error" ? task.error || task.message : task?.message;
   return (
     <section className="model-capability-detail" data-testid={`model-capability-detail-${capability}`}>
@@ -405,6 +417,7 @@ function CapabilityDetail({
       ) : null}
       {connectionMode === "local" && capability === "llm" && status.local_options.length ? (
         <LocalModelList
+          currentModel={currentLocalModel}
           options={status.local_options}
           primaryModel={localSelection?.model ?? primaryLocalModel}
           selectedModels={selectedLocalModels}
@@ -433,6 +446,12 @@ function CapabilityDetail({
           <small>{taskMessage}</small>
         </div>
       ) : null}
+      {localActionHint ? (
+        <div className="model-selection-confirmation" data-testid="local-model-action-hint">
+          <CheckCircle2 size={14} />
+          <span>{localActionHint}</span>
+        </div>
+      ) : null}
       {connectionMode === "local" ? <div className="model-action-row">
         <button
           className="panel-action-button"
@@ -444,6 +463,18 @@ function CapabilityDetail({
           <CheckCircle2 size={15} />
           {actionLabel}
         </button>
+        {canSwitchOnly ? (
+          <button
+            className="panel-action-button secondary"
+            disabled={isInstalling}
+            onClick={() => onConfigureLocal(capability, { model: localSelection?.model, models: localSelection?.model ? [localSelection.model] : [] })}
+            title="只切换当前使用模型，不处理下载队列"
+            type="button"
+          >
+            <CheckCircle2 size={15} />
+            只切换到 {localSelection?.model}
+          </button>
+        ) : null}
         <button className="panel-action-button" onClick={onRefresh} type="button">
           <RefreshCw size={15} />
           重新检测
@@ -494,9 +525,9 @@ function readyActionLabel(capability: ModelCapabilityId) {
 function installActionLabel(capability: ModelCapabilityId, selectedCount = 0, primaryModel = "") {
   if (capability === "llm") {
     if (selectedCount > 0) {
-      return primaryModel ? `下载 ${selectedCount} 个并启用 ${primaryModel}` : `下载 ${selectedCount} 个本地模型`;
+      return primaryModel ? `下载 ${selectedCount} 个并切换到 ${primaryModel}` : `下载 ${selectedCount} 个本地模型`;
     }
-    return primaryModel ? `启用 ${primaryModel}` : "启用本地 LLM";
+    return primaryModel ? `切换到 ${primaryModel}` : "启用本地 LLM";
   }
   if (capability === "segmentation") {
     return "安装并启用内置 SAM";
@@ -610,12 +641,14 @@ function RemoteModelPanel({
 }
 
 function LocalModelList({
+  currentModel,
   options,
   primaryModel,
   selectedModels,
   onSelectPrimary,
   onSelect
 }: {
+  currentModel: string;
   options: LocalModelOption[];
   primaryModel: string;
   selectedModels: string[];
@@ -629,26 +662,28 @@ function LocalModelList({
         <small>复选框选择下载；单选按钮选择当前使用</small>
       </div>
       <div className="local-model-list-summary">
-        <span>已下载</span>
-        <strong>{options.filter((option) => option.installed).length}</strong>
-        <span>需要下载</span>
-        <strong>{options.filter((option) => !option.installed).length}</strong>
+        <span>当前使用</span>
+        <strong>{currentModel || "未启用"}</strong>
+        <span>已选择</span>
+        <strong>{primaryModel || "未选择"}</strong>
       </div>
       {options.map((option) => {
         const selected = selectedModels.includes(option.model);
+        const isCurrent = currentModel === option.model;
+        const isPrimary = primaryModel === option.model;
         return (
-          <div className={primaryModel === option.model ? "local-model-option selected" : "local-model-option"} key={option.id}>
+          <div className={isPrimary ? "local-model-option selected" : "local-model-option"} key={option.id}>
             <input
               aria-label={`使用 ${option.model}`}
-              checked={primaryModel === option.model}
+              checked={isPrimary}
               name="primary-local-llm"
               onChange={() => onSelectPrimary(option.model)}
               type="radio"
             />
             <input
               aria-label={`下载 ${option.model}`}
-              checked={option.installed || selected}
-              disabled={option.installed}
+              checked={option.installed || selected || (isPrimary && !option.installed)}
+              disabled={option.installed || (isPrimary && !option.installed)}
               onChange={(event) => onSelect(option.model, event.currentTarget.checked)}
               type="checkbox"
             />
@@ -657,7 +692,9 @@ function LocalModelList({
               <small>{option.model}</small>
             </span>
             <em>{option.sizeLabel}</em>
-            <small className={option.installed ? "downloaded" : "missing"}>{option.installed ? "已下载" : "需要下载"}</small>
+            <small className={optionStatusClass(option.installed, isCurrent, isPrimary)}>
+              {optionStatusLabel(option.installed, isCurrent, isPrimary, selected)}
+            </small>
           </div>
         );
       })}
@@ -676,15 +713,67 @@ function localSelectionPayload(status: ModelCapabilityStatus, selectedModels: st
   if (status.id !== "llm") {
     return undefined;
   }
-  const fallbackPrimary = status.local_options.find((option) => option.selectedByDefault)?.model
+  const configuredModel = configuredLocalModel(status);
+  const fallbackPrimary = configuredModel || (
+    status.local_options.find((option) => option.selectedByDefault)?.model
     ?? status.local_options.find((option) => option.recommended)?.model
     ?? status.local_options.find((option) => option.installed)?.model
     ?? status.device_recommendation?.model
     ?? status.recommended_local?.model
-    ?? "";
+    ?? ""
+  );
   const primary = primaryModel || fallbackPrimary;
   const models = Array.from(new Set([primary, ...selectedModels].filter(Boolean)));
   return { model: primary, models };
+}
+
+function configuredLocalModel(status: ModelCapabilityStatus) {
+  if (status.id !== "llm") {
+    return "";
+  }
+  if (status.configuredModel?.kind === "local" && status.configuredModel.model) {
+    return status.configuredModel.model;
+  }
+  const configuredName = status.configured_model_name ?? "";
+  return status.local_options.find((option) => configuredName.includes(option.model))?.model ?? "";
+}
+
+function optionStatusLabel(installed: boolean, isCurrent: boolean, isPrimary: boolean, selectedForDownload: boolean) {
+  if (isCurrent) {
+    return "当前使用";
+  }
+  if (isPrimary) {
+    return installed ? "待切换" : "需下载后切换";
+  }
+  if (!installed && selectedForDownload) {
+    return "下载队列";
+  }
+  return installed ? "已下载" : "需要下载";
+}
+
+function optionStatusClass(installed: boolean, isCurrent: boolean, isPrimary: boolean) {
+  if (isCurrent) {
+    return "current";
+  }
+  if (isPrimary) {
+    return "pending";
+  }
+  return installed ? "downloaded" : "missing";
+}
+
+function localModelActionHint(currentModel: string, primaryModel: string, queuedMissingModels: string[]) {
+  if (!primaryModel) {
+    return "";
+  }
+  const currentText = currentModel || "未启用本地模型";
+  if (queuedMissingModels.length) {
+    const queue = queuedMissingModels.join("、");
+    return `当前实际使用：${currentText}。点击主按钮会先下载 ${queue}，完成后切换到 ${primaryModel}。`;
+  }
+  if (currentModel === primaryModel) {
+    return `当前实际使用：${currentText}。`;
+  }
+  return `当前实际使用：${currentText}。点击切换按钮后才会改用 ${primaryModel}。`;
 }
 
 function defaultRemoteDraft(capability: ModelCapabilityId, models: ModelConfig[]): RemoteDraft {
@@ -706,6 +795,7 @@ function fallbackStatus(capability: ModelCapabilityId): ModelCapabilityStatus {
     configured: false,
     configured_model_id: null,
     configured_model_name: null,
+    configuredModel: null,
     local_available: false,
     installable: capability === "llm" || capability === "segmentation",
     recommended_local: null,
