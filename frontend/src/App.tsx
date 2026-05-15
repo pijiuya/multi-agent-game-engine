@@ -1,6 +1,7 @@
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { AgentPanel } from "./components/AgentPanel";
 import { FloatingPanel } from "./components/FloatingPanel";
+import { ImageGenerationPanel } from "./components/ImageGenerationPanel";
 import { MapStudioPanel, type MapStudioStep } from "./components/MapStudioPanel";
 import { ModelManagerPanel } from "./components/ModelManagerPanel";
 import { latestNarrativeLine, NarrativePanel } from "./components/NarrativePanel";
@@ -63,6 +64,9 @@ import type {
   CanvasPoint,
   CanvasViewState,
   EditTool,
+  ImageAspectPreset,
+  ImageGenerationMode,
+  ImageSelectionMode,
   MapGenerationState,
   MapImageLayer,
   MapRatioPreset,
@@ -98,9 +102,12 @@ type ObjectMenuState = ObjectMenuTarget & { x: number; y: number };
 
 type ItemPatch = Partial<Omit<WorldItem, "id">>;
 type ImageLayerPatch = Partial<Omit<MapImageLayer, "id" | "kind" | "image" | "prompt" | "region_id" | "created_at">>;
+type ImageSelectionPayload =
+  | { type: "polygon"; points: Point[] }
+  | { type: "rect"; x: number; y: number; width: number; height: number };
 type MapPatch = Partial<Pick<WorldMap, "name" | "width" | "height" | "background_image">>;
 type AgentPatch = Partial<Omit<AgentProfile, "id">>;
-const PANEL_LAYOUT_STORAGE_KEY = "agent-workstation.panel-layout.v5";
+const PANEL_LAYOUT_STORAGE_KEY = "agent-workstation.panel-layout.v6";
 const PANEL_MARGIN = 16;
 const PANEL_GAP = 8;
 const PANEL_SNAP_DISTANCE = 20;
@@ -114,9 +121,18 @@ export default function App() {
   const [editTool, setEditTool] = useState<EditTool>("select");
   const [regionDrawOperation, setRegionDrawOperation] = useState<RegionDrawOperation>("add");
   const [regionDrawTargetFunction, setRegionDrawTargetFunction] = useState<MapRegionFunction>("walkable");
+  const [imageGenerationMode, setImageGenerationMode] = useState<ImageGenerationMode>("region");
+  const [imageSelectionMode, setImageSelectionMode] = useState<ImageSelectionMode>("rect");
+  const [imageAspectPreset, setImageAspectPreset] = useState<ImageAspectPreset>("1:1");
+  const [imagePrompt, setImagePrompt] = useState("");
+  const [imageReferenceBackground, setImageReferenceBackground] = useState(true);
+  const [imageCreateNewLayer, setImageCreateNewLayer] = useState(false);
+  const [imageGenerationBusy, setImageGenerationBusy] = useState(false);
+  const [imageGenerationError, setImageGenerationError] = useState<string | null>(null);
   const [activeRegionId, setActiveRegionId] = useState<string | null>(null);
   const [mapStudioStep, setMapStudioStep] = useState<MapStudioStep>("background");
   const [draftPoints, setDraftPoints] = useState<Point[]>([]);
+  const [imageDraftPoints, setImageDraftPoints] = useState<Point[]>([]);
   const [status, setStatus] = useState("载入中");
   const [appearanceMode, setAppearanceMode] = useState<"light" | "dark">("light");
   const [appBackgroundOpacity, setAppBackgroundOpacity] = useState(0);
@@ -166,6 +182,8 @@ export default function App() {
     return Boolean(world.agent_profiles[selectedAgentId]);
   }, [world, selectedAgentId]);
   const narrativeLine = useMemo(() => (world ? latestNarrativeLine(world.events) : null), [world?.events]);
+  const imageGenerationProvider = useMemo(() => enabledModelForCapability(models, "image_generation"), [models]);
+  const hasRealImageGenerationProvider = Boolean(imageGenerationProvider && imageGenerationProvider.provider !== "mock");
   const runtimeMonitorActive = useMemo(
     () => panels.some((panel) => panel.id === "runtimeMonitor" && !panel.minimized),
     [panels]
@@ -279,7 +297,7 @@ export default function App() {
   }, [activeRegionId, canvasPoints, selection, selectedAgentExists, world]);
 
   useEffect(() => {
-    if (!["region", "imageGenerate", "edgeExtend"].includes(editTool)) {
+    if (!["region", "imageGenerate"].includes(editTool)) {
       return;
     }
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -293,12 +311,16 @@ export default function App() {
       }
       if (event.key === "Escape") {
         event.preventDefault();
-        setDraftPoints([]);
+        if (editTool === "imageGenerate") {
+          setImageDraftPoints([]);
+        } else {
+          setDraftPoints([]);
+        }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [draftPoints, editTool, regionDrawOperation, regionDrawTargetFunction, world]);
+  }, [draftPoints, editTool, imageDraftPoints, imageGenerationBusy, imageGenerationMode, imagePrompt, imageReferenceBackground, imageCreateNewLayer, imageGenerationProvider, regionDrawOperation, regionDrawTargetFunction, selection, world]);
 
   async function refreshWorld() {
     const snapshot = await getWorld();
@@ -398,8 +420,12 @@ export default function App() {
       setSelection({ kind: "map", id: world.map.id });
       return;
     }
-    if (editTool === "region" || editTool === "imageGenerate" || editTool === "edgeExtend") {
+    if (editTool === "region") {
       setDraftPoints((points) => [...points, snapWorldPointToGrid(point, canvasView.zoom)]);
+      return;
+    }
+    if (editTool === "imageGenerate" && imageSelectionMode === "polygon") {
+      setImageDraftPoints((points) => [...points, snapWorldPointToGrid(point, canvasView.zoom)]);
       return;
     }
     if (editTool === "item") {
@@ -523,38 +549,58 @@ export default function App() {
   }
 
   async function finalizeActiveDraft() {
-    if (editTool === "imageGenerate" || editTool === "edgeExtend") {
-      await generateLayerFromDraft(editTool);
+    if (editTool === "imageGenerate") {
+      await generateImageFromPanel();
       return;
     }
     await finalizePolygon();
   }
 
-  async function generateLayerFromDraft(tool: "imageGenerate" | "edgeExtend") {
-    if (!world || draftPoints.length < 3) {
+  async function generateImageFromPanel() {
+    if (!world || imageGenerationBusy) {
       return;
     }
-    const prompt = window.prompt(tool === "edgeExtend" ? "边缘延展提示" : "区域图像提示", tool === "edgeExtend" ? "延展地图边缘，保持原地图俯视风格" : "生成适合这个区域的俯视地图元素");
-    if (!prompt?.trim()) {
+    const selectionPayload = imageSelectionFromDraft(imageDraftPoints);
+    const prompt = imagePrompt.trim();
+    const selectedLayer = selection.kind === "imageLayer" ? world.map.image_layers.find((layer) => layer.id === selection.id) ?? null : null;
+    const selectedRegion = selection.kind === "region" ? world.map.regions.find((region) => region.id === selection.id) ?? null : null;
+    const effectiveSelection = selectionPayload ?? imageSelectionFromTarget(imageGenerationMode, selectedLayer, selectedRegion);
+    if (!effectiveSelection || !prompt) {
+      setImageGenerationError(!prompt ? "请输入图像提示词" : "请先在画布上创建选区");
       return;
     }
-    const provider = enabledModelForCapability(models, "image_generation");
-    setStatus(tool === "edgeExtend" ? "正在生成边缘延展图层" : "正在生成区域图层");
+    const provider = imageGenerationProvider;
+    if (!provider || provider.provider === "mock") {
+      setImageGenerationError("未启用真实图片生成模型。请先在模型管理的图片生成高级配置中保存并启用服务。");
+      setStatus("未启用真实图片生成模型");
+      return;
+    }
+    const targetLayerId = imageGenerationMode === "repaint" && !imageCreateNewLayer ? selectedLayer?.id ?? null : null;
+    const regionId = imageGenerationMode === "repaint" ? selectedRegion?.id ?? selectedLayer?.region_id ?? null : null;
+    setImageGenerationBusy(true);
+    setImageGenerationError(null);
+    setStatus(imageModeRunningText(imageGenerationMode));
     try {
       const result = await generateMapImageLayer({
-        prompt: prompt.trim(),
-        selection: imageSelectionFromDraft(draftPoints),
-        mode: tool === "edgeExtend" ? "extension" : "region",
-        reference_background: Boolean(world.map.background_image),
-        provider_id: provider?.id ?? null
+        prompt,
+        selection: effectiveSelection,
+        mode: imageGenerationMode,
+        reference_background: imageReferenceBackground && Boolean(world.map.background_image),
+        provider_id: provider?.id ?? null,
+        target_layer_id: targetLayerId,
+        region_id: regionId
       });
       setWorld(result.world);
       setSelection({ kind: "imageLayer", id: result.layer.id });
-      setDraftPoints([]);
+      setImageDraftPoints([]);
       setEditTool("select");
-      setStatus(tool === "edgeExtend" ? "边缘延展图层已生成" : "区域图层已生成");
+      setStatus(imageModeDoneText(imageGenerationMode));
     } catch (error) {
-      setStatus(`图像生成失败：${error instanceof Error ? error.message : "接口不可用"}`);
+      const message = error instanceof Error ? error.message : "接口不可用";
+      setImageGenerationError(message);
+      setStatus(`图像生成失败：${message}`);
+    } finally {
+      setImageGenerationBusy(false);
     }
   }
 
@@ -642,6 +688,8 @@ export default function App() {
       setSelection({ kind: "agent", id: target.id });
     } else if (target.kind === "item") {
       setSelection({ kind: "item", id: target.id });
+    } else if (target.kind === "imageLayer") {
+      setSelection({ kind: "imageLayer", id: target.id });
     } else {
       activateRegion(target.id);
     }
@@ -810,17 +858,16 @@ export default function App() {
     setSegmentation(idleSegmentation());
     await updateMapPatch({ width, height });
     const provider = enabledModelForCapability(models, "image_generation");
+    if (!provider) {
+      setStatus("未启用真实图片生成模型");
+      return;
+    }
     try {
       const task = await createMapGeneration({ prompt: fullPrompt, width, height, ratio, count: 3, provider_id: provider?.id ?? null });
       setGeneration(task);
       setStatus("背景候选已生成");
     } catch (error) {
-      if (provider && provider.provider !== "mock") {
-        setStatus(`图片生成失败：${error instanceof Error ? error.message : "远程服务不可用"}`);
-        return;
-      }
-      setGeneration(createLocalGeneration(fullPrompt, width, height, ratio));
-      setStatus("本地背景候选已生成");
+      setStatus(`图片生成失败：${error instanceof Error ? error.message : "远程服务不可用"}`);
     }
   }
 
@@ -1239,6 +1286,22 @@ export default function App() {
     });
   }
 
+  function openImageGeneration(mode: ImageGenerationMode = imageGenerationMode) {
+    setImageGenerationMode(mode);
+    setEditTool("imageGenerate");
+    setImageGenerationError(null);
+    setPanels((current) => {
+      const nextZ = maxPanelZ(current) + 1;
+      setZCursor(nextZ);
+      const focusedPanel = imageGenerationPanelForViewport(nextZ);
+      if (!current.some((panel) => panel.id === "imageGeneration")) {
+        return [...current, focusedPanel];
+      }
+      return current.map((panel) => (panel.id === "imageGeneration" ? { ...focusedPanel, dockedTo: panel.dockedTo } : panel));
+    });
+    setStatus("图像生成工具已打开");
+  }
+
   function openRuntimeMonitor() {
     setPanels((current) => {
       const nextZ = maxPanelZ(current) + 1;
@@ -1251,6 +1314,11 @@ export default function App() {
     });
     setStatus("运行监控已打开");
     void refreshRuntimeStatus();
+  }
+
+  function openModelsPanel() {
+    openPanel("models");
+    setStatus("请在模型管理中配置图片生成 API");
   }
 
   function resetPanelLayout() {
@@ -1295,12 +1363,15 @@ export default function App() {
         activeRegionFunction={activeRegionFunction}
         status={status}
         appearanceMode={appearanceMode}
+        imageSelectionMode={imageSelectionMode}
+        imageAspectRatio={imageAspectRatioForPreset(imageAspectPreset, world.map.width, world.map.height)}
         onViewChange={setCanvasView}
         onWorldPoint={(point) => void handleWorldClick(point)}
+        onImageDraft={setImageDraftPoints}
         onSelect={(next) => selectFromWorld(next)}
         onAnchorContext={openAnchorMenu}
         onObjectContext={(target, screen) => openObjectMenu(target, screen)}
-        draftPoints={draftPoints}
+        draftPoints={editTool === "imageGenerate" ? imageDraftPoints : draftPoints}
         onRenameAgent={(agentId, name) => void updateAgentProfile(agentId, { name })}
         onPreviewItem={previewItemPatch}
         onCommitItem={(itemId, patch) => void updateItemPatch(itemId, patch)}
@@ -1365,16 +1436,17 @@ export default function App() {
               zoomPercent={Math.round(canvasView.zoom * 100)}
               onEditTool={(tool) => {
                 setEditTool(tool);
-                if (!["region", "imageGenerate", "edgeExtend"].includes(tool)) {
+                if (!["region", "imageGenerate"].includes(tool)) {
                   setDraftPoints([]);
+                  setImageDraftPoints([]);
                 }
                 if (tool === "region") {
                   setMapStudioStep("layers");
                   openPanel("regionDraw");
                   openPanel("regions");
                 }
-                if (tool === "imageGenerate" || tool === "edgeExtend") {
-                  openPanel("regionDraw");
+                if (tool === "imageGenerate") {
+                  openImageGeneration();
                 }
               }}
               onStep={() => void handleStep()}
@@ -1407,8 +1479,8 @@ export default function App() {
               targetFunction={regionDrawTargetFunction}
               targetLayer={world.map.region_layers.find((layer) => layer.function === regionDrawTargetFunction) ?? null}
               draftCount={draftPoints.length}
-              finishMinPoints={editTool === "imageGenerate" || editTool === "edgeExtend" ? 2 : 3}
-              title={editTool === "edgeExtend" ? "边缘延展选区" : editTool === "imageGenerate" ? "区域图像选区" : "区域绘制"}
+              finishMinPoints={3}
+              title="区域绘制"
               onOperation={setRegionDrawOperation}
               onTargetFunction={(fn) => {
                 setRegionDrawTargetFunction(fn);
@@ -1422,6 +1494,46 @@ export default function App() {
           ) : null}
           {panel.id === "narrative" ? (
             <NarrativePanel world={world} onUpdate={(patch) => void updateNarrativeConfig(patch)} />
+          ) : null}
+          {panel.id === "imageGeneration" ? (
+            <ImageGenerationPanel
+              world={world}
+              selection={selection}
+              mode={imageGenerationMode}
+              selectionMode={imageSelectionMode}
+              aspectPreset={imageAspectPreset}
+              prompt={imagePrompt}
+              referenceBackground={imageReferenceBackground}
+              createNewLayer={imageCreateNewLayer}
+              draftPoints={imageDraftPoints}
+              busy={imageGenerationBusy}
+              error={imageGenerationError}
+              providerName={imageGenerationProvider?.name ?? imageGenerationProvider?.model ?? null}
+              hasRealProvider={hasRealImageGenerationProvider}
+              onOpenModels={openModelsPanel}
+              onMode={(mode) => {
+                setImageGenerationMode(mode);
+                setImageGenerationError(null);
+                if (mode === "extension" && imageSelectionMode === "polygon") {
+                  setImageSelectionMode("rect");
+                  setImageDraftPoints([]);
+                }
+                if (mode === "extension") {
+                  setImageReferenceBackground(Boolean(world.map.background_image));
+                }
+              }}
+              onSelectionMode={(mode) => {
+                setImageSelectionMode(mode);
+                setImageDraftPoints([]);
+              }}
+              onAspectPreset={setImageAspectPreset}
+              onPrompt={setImagePrompt}
+              onReferenceBackground={setImageReferenceBackground}
+              onCreateNewLayer={setImageCreateNewLayer}
+              onGenerate={() => void generateImageFromPanel()}
+              onUndoPoint={() => setImageDraftPoints((points) => points.slice(0, -1))}
+              onClearSelection={() => setImageDraftPoints([])}
+            />
           ) : null}
           {panel.id === "agents" ? (
             <AgentPanel
@@ -1487,6 +1599,12 @@ export default function App() {
               onUpdateAgent={(agentId, patch) => void updateAgentProfile(agentId, patch)}
               onUpdateItem={(itemId, patch) => void updateItemPatch(itemId, patch)}
               onUpdateImageLayer={(layerId, patch) => void updateImageLayer(layerId, patch)}
+              onRepaintImageLayer={(layerId) => {
+                const layer = world.map.image_layers.find((candidate) => candidate.id === layerId);
+                setSelection({ kind: "imageLayer", id: layerId });
+                setImagePrompt(layer?.prompt ?? "");
+                openImageGeneration("repaint");
+              }}
               onUploadItemImage={(itemId, file) => void uploadItemImage(itemId, file)}
               onUpdateRegion={(regionId, patch) => void updateRegion(regionId, patch)}
               onRegenerateRegion={(regionId, prompt) => void regenerateRegion(regionId, prompt)}
@@ -1577,6 +1695,7 @@ function createInitialPanels(): PanelState[] {
       makePanel("properties", "属性", PANEL_MARGIN, nextY(PANEL_MINIMIZED_HEIGHT), panelWidth, 240, 40, true),
       makePanel("regions", "区域", PANEL_MARGIN, nextY(PANEL_MINIMIZED_HEIGHT), panelWidth, 220, 46, true),
       makePanel("regionDraw", "区域绘制", PANEL_MARGIN, nextY(PANEL_MINIMIZED_HEIGHT), panelWidth, 220, 47, true),
+      makePanel("imageGeneration", "图像生成", PANEL_MARGIN, nextY(PANEL_MINIMIZED_HEIGHT), panelWidth, 300, 50, true),
       makePanel("narrative", "场景叙事", PANEL_MARGIN, nextY(PANEL_MINIMIZED_HEIGHT), panelWidth, 260, 48, true),
       makePanel("mapStudio", "地图工作台", PANEL_MARGIN, nextY(PANEL_MINIMIZED_HEIGHT), panelWidth, 240, 45, true),
       makePanel("models", "模型管理", PANEL_MARGIN, nextY(PANEL_MINIMIZED_HEIGHT), panelWidth, 240, 41, true),
@@ -1596,6 +1715,7 @@ function createInitialPanels(): PanelState[] {
       makePanel("agents", "Agent 面板", rightX, 96, rightWidth, 220, 42),
       makePanel("properties", "属性", rightX, 324, rightWidth, 210, 40),
       makePanel("regionDraw", "区域绘制", rightX, 542, rightWidth, 220, 47),
+      makePanel("imageGeneration", "图像生成", rightX, 770, rightWidth, 320, 50, true),
       makePanel("runtimeMonitor", "运行监控", rightX, 770, rightWidth, 260, 49),
       makePanel("narrative", "场景叙事", rightX, 1038, rightWidth, 220, 48, true),
       makePanel("models", "模型管理", rightX, 1266, rightWidth, 220, 41, true)
@@ -1612,6 +1732,7 @@ function createInitialPanels(): PanelState[] {
     makePanel("scene", "场景列表", leftPanelX, top, 304, 260, 43),
     makePanel("regions", "区域", leftPanelX, top + 268, 304, 248, 46),
     makePanel("regionDraw", "区域绘制", centerX, top, 340, 248, 47),
+    makePanel("imageGeneration", "图像生成", centerX, top + 260, 340, 332, 50, true),
     makePanel("mapStudio", "地图工作台", centerX, top + 260, 340, 260, 45),
     makePanel("models", "模型管理", centerX, top + 528, 360, Math.max(160, height - top - 544), 41),
     makePanel("agents", "Agent 面板", rightX, top, rightWidth, 260, 42),
@@ -1642,6 +1763,16 @@ function runtimeMonitorPanelForViewport(zIndex: number): PanelState {
   const x = Math.max(PANEL_MARGIN, viewportWidth - width - PANEL_MARGIN);
   const y = Math.min(112, Math.max(PANEL_MARGIN, viewportHeight - height - PANEL_MARGIN));
   return clampPanelToViewport(makePanel("runtimeMonitor", "运行监控", x, y, width, height, zIndex, false));
+}
+
+function imageGenerationPanelForViewport(zIndex: number): PanelState {
+  const viewportWidth = typeof window === "undefined" ? 1280 : window.innerWidth;
+  const viewportHeight = typeof window === "undefined" ? 820 : window.innerHeight;
+  const width = clamp(Math.min(380, viewportWidth - PANEL_MARGIN * 2), 320, 420);
+  const height = clamp(Math.min(420, viewportHeight - 132), 320, 460);
+  const x = Math.max(PANEL_MARGIN, Math.round((viewportWidth - width) / 2));
+  const y = Math.min(128, Math.max(PANEL_MARGIN, viewportHeight - height - PANEL_MARGIN));
+  return clampPanelToViewport(makePanel("imageGeneration", "图像生成", x, y, width, height, zIndex, false));
 }
 
 function loadPanelLayout(defaultPanels: PanelState[]): PanelState[] {
@@ -1835,20 +1966,80 @@ function applyImageLayerPatch(world: WorldSnapshot, layerId: string, patch: Imag
   };
 }
 
-function imageSelectionFromDraft(points: Point[]) {
+function imageSelectionFromDraft(points: Point[]): ImageSelectionPayload | null {
   if (points.length === 2) {
     const [first, second] = points;
     const x = Math.min(first.x, second.x);
     const y = Math.min(first.y, second.y);
+    const width = Math.abs(second.x - first.x);
+    const height = Math.abs(second.y - first.y);
+    if (width < 1 || height < 1) {
+      return null;
+    }
     return {
       type: "rect" as const,
       x,
       y,
-      width: Math.max(1, Math.abs(second.x - first.x)),
-      height: Math.max(1, Math.abs(second.y - first.y))
+      width,
+      height
     };
   }
-  return { type: "polygon" as const, points };
+  if (points.length >= 3) {
+    return { type: "polygon" as const, points };
+  }
+  return null;
+}
+
+function imageSelectionFromTarget(mode: ImageGenerationMode, layer: MapImageLayer | null, region: MapRegion | null): ImageSelectionPayload | null {
+  if (mode !== "repaint") {
+    return null;
+  }
+  if (layer) {
+    return {
+      type: "rect",
+      x: layer.x,
+      y: layer.y,
+      width: layer.width,
+      height: layer.height
+    };
+  }
+  if (region && region.points.length >= 3) {
+    return { type: "polygon", points: region.points };
+  }
+  return null;
+}
+
+function imageAspectRatioForPreset(preset: ImageAspectPreset, mapWidth: number, mapHeight: number) {
+  if (preset === "4:3") {
+    return 4 / 3;
+  }
+  if (preset === "16:9") {
+    return 16 / 9;
+  }
+  if (preset === "map") {
+    return mapHeight > 0 ? mapWidth / mapHeight : 1;
+  }
+  return 1;
+}
+
+function imageModeRunningText(mode: ImageGenerationMode) {
+  if (mode === "extension") {
+    return "正在生成边缘延展图层";
+  }
+  if (mode === "repaint") {
+    return "正在重绘图层";
+  }
+  return "正在生成区域图层";
+}
+
+function imageModeDoneText(mode: ImageGenerationMode) {
+  if (mode === "extension") {
+    return "边缘延展图层已生成";
+  }
+  if (mode === "repaint") {
+    return "图层已重绘";
+  }
+  return "区域图层已生成";
 }
 
 function applyRegionPatch(world: WorldSnapshot, regionId: string, patch: Partial<Omit<MapRegion, "id" | "points" | "source">>): WorldSnapshot {
@@ -1904,6 +2095,9 @@ function mapPrompt(prompt: string, width: number, height: number, ratio: MapRati
 
 function enabledModelForCapability(models: ModelConfig[], capability: ModelConfig["capabilities"][number]) {
   const matching = models.filter((model) => model.enabled && model.capabilities.includes(capability));
+  if (capability === "image_generation") {
+    return matching.find((model) => model.provider !== "mock") ?? null;
+  }
   if (capability === "segmentation") {
     return matching.find((model) => model.provider === "embedded-mobile-sam") ?? matching[0] ?? null;
   }

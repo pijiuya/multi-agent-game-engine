@@ -3,7 +3,6 @@ import {
   Box,
   Crosshair,
   ImagePlus,
-  Expand,
   MapPin,
   MousePointer2,
   Move,
@@ -96,20 +95,12 @@ export function ToolPanel({
           <SquareDashedMousePointer size={18} />
         </button>
         <button
-          aria-label="区域生成"
-          title="区域生成"
+          aria-label="图像生成"
+          title="图像生成"
           className={editTool === "imageGenerate" ? "active" : ""}
           onClick={() => onEditTool("imageGenerate")}
         >
           <WandSparkles size={18} />
-        </button>
-        <button
-          aria-label="边缘延展"
-          title="边缘延展"
-          className={editTool === "edgeExtend" ? "active" : ""}
-          onClick={() => onEditTool("edgeExtend")}
-        >
-          <Expand size={18} />
         </button>
         <button
           aria-label="元素"

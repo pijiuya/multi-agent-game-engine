@@ -262,6 +262,7 @@ def test_api_models_generation_and_region_semantics():
             "height": 1080,
             "ratio": "16:9",
             "count": 2,
+            "provider_id": "model_mock_image",
         },
     )
     assert generation.status_code == 200
@@ -354,9 +355,8 @@ def test_api_models_generation_and_region_semantics():
     assert any(area["metadata"].get("region_id") == region_id for area in next_world["map"]["obstacles"])
 
     regenerated = client.post(f"/api/map/regions/{region_id}/regenerate", json={"prompt": "重绘为花园入口"})
-    assert regenerated.status_code == 200
-    region = next(region for region in regenerated.json()["map"]["regions"] if region["id"] == region_id)
-    assert region["image_prompt"] == "重绘为花园入口"
+    assert regenerated.status_code == 400
+    assert "未配置真实图片生成模型" in regenerated.json()["detail"]
 
 
 def test_api_manual_region_create_and_boolean_operations():
@@ -801,7 +801,7 @@ def test_api_map_generation_uses_remote_openai_images_b64(monkeypatch):
                     "id": "model_remote_image",
                     "name": "Remote image",
                     "kind": "remote",
-                    "provider": "image-http",
+                    "provider": "openai-compatible",
                     "base_url": "https://api.example.test/v1",
                     "api_key": "image-secret",
                     "model": "gpt-image-2",
@@ -905,11 +905,12 @@ def test_openai_compatible_request_falls_back_to_v1_for_relay_root(monkeypatch):
     assert data["data"][0]["id"] == "gpt-image-2"
 
 
-def test_api_image_layer_generation_without_background_creates_alpha_layer():
+def test_api_image_layer_generation_without_real_provider_returns_error():
     client = TestClient(app)
     api_main.runtime.world = api_main.GameWorld.default()
     api_main.runtime.world.map.background_image = None
     api_main.runtime.world.map.image_layers = []
+    assert client.patch("/api/models", json={"models": default_model_configs()}).status_code == 200
 
     response = client.post(
         "/api/map/image-layers/generate",
@@ -921,6 +922,32 @@ def test_api_image_layer_generation_without_background_creates_alpha_layer():
             },
             "mode": "region",
             "reference_background": False,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "未配置真实图片生成模型" in response.json()["detail"]
+    assert api_main.runtime.world.map.image_layers == []
+
+
+def test_api_image_layer_generation_explicit_mock_without_background_creates_alpha_layer():
+    client = TestClient(app)
+    api_main.runtime.world = api_main.GameWorld.default()
+    api_main.runtime.world.map.background_image = None
+    api_main.runtime.world.map.image_layers = []
+    assert client.patch("/api/models", json={"models": default_model_configs()}).status_code == 200
+
+    response = client.post(
+        "/api/map/image-layers/generate",
+        json={
+            "prompt": "透明区域花园",
+            "selection": {
+                "type": "polygon",
+                "points": [{"x": 20, "y": 30}, {"x": 180, "y": 30}, {"x": 180, "y": 140}, {"x": 20, "y": 140}],
+            },
+            "mode": "region",
+            "reference_background": False,
+            "provider_id": "model_mock_image",
         },
     )
 
@@ -993,12 +1020,58 @@ def test_api_image_layer_generation_with_background_uses_edit_path(monkeypatch):
     assert response.json()["layer"]["kind"] == "region"
 
 
+def test_api_image_layer_generation_real_provider_failure_does_not_create_mock(monkeypatch):
+    client = TestClient(app)
+    api_main.runtime.world = api_main.GameWorld.default()
+    api_main.runtime.world.map.background_image = None
+    api_main.runtime.world.map.image_layers = []
+    client.patch(
+        "/api/models",
+        json={
+            "models": [
+                {
+                    "id": "model_remote_image",
+                    "name": "Remote image",
+                    "kind": "remote",
+                    "provider": "image-http",
+                    "base_url": "https://api.example.test/v1",
+                    "api_key": "image-secret",
+                    "model": "gpt-image-2",
+                    "enabled": True,
+                    "capabilities": ["image_generation"],
+                }
+            ]
+        },
+    )
+
+    def fake_openai_json_request(config, method, path, body=None, timeout=30):
+        raise api_main.RemoteProviderError("upstream unavailable")
+
+    monkeypatch.setattr(api_main, "_openai_json_request", fake_openai_json_request)
+
+    response = client.post(
+        "/api/map/image-layers/generate",
+        json={
+            "prompt": "真实服务失败时不要 mock",
+            "selection": {"type": "rect", "x": 10, "y": 12, "width": 90, "height": 80},
+            "mode": "region",
+            "reference_background": False,
+            "provider_id": "model_remote_image",
+        },
+    )
+
+    assert response.status_code == 502
+    assert "Image generation failed" in response.json()["detail"]
+    assert api_main.runtime.world.map.image_layers == []
+
+
 def test_api_extension_layer_expands_map_and_layer_management():
     client = TestClient(app)
     api_main.runtime.world = api_main.GameWorld.default()
     api_main.runtime.world.map.width = 100
     api_main.runtime.world.map.height = 100
     api_main.runtime.world.map.image_layers = []
+    assert client.patch("/api/models", json={"models": default_model_configs()}).status_code == 200
 
     generated = client.post(
         "/api/map/image-layers/generate",
@@ -1007,6 +1080,7 @@ def test_api_extension_layer_expands_map_and_layer_management():
             "selection": {"type": "rect", "x": 80, "y": 20, "width": 90, "height": 60},
             "mode": "extension",
             "reference_background": False,
+            "provider_id": "model_mock_image",
         },
     )
     assert generated.status_code == 200

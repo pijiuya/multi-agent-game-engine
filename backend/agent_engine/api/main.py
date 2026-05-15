@@ -292,7 +292,7 @@ LLM_SMALL_MODEL = "qwen2.5:1.5b"
 LLM_VISION_MODEL = "qwen2.5vl:3b"
 LLM_REALTIME_MODEL = os.getenv("AGENT_ENGINE_REALTIME_LLM_MODEL", LLM_SMALL_MODEL)
 LLM_PREFERRED_MODELS = list(dict.fromkeys([LLM_REALTIME_MODEL, LLM_DEFAULT_MODEL, LLM_SMALL_MODEL, "gemma3:1b"]))
-OPENAI_IMAGE_PROVIDERS = {"image-http", "local-http-image"}
+OPENAI_IMAGE_PROVIDERS = {"image-http", "local-http-image", "openai-compatible"}
 IMAGE_MODEL_KEYWORDS = ("gpt-image", "image", "dall-e", "dalle", "flux", "sdxl", "stable-diffusion", "imagen")
 NON_LLM_MODEL_KEYWORDS = (
     "image",
@@ -626,13 +626,17 @@ def create_map_generation(payload: MapGenerationRequest) -> dict[str, Any]:
     height = max(128, min(payload.height, 4096))
     generation_id = new_id("gen")
     config = _image_generation_config(payload.provider_id)
-    if config is not None and config.get("provider") in OPENAI_IMAGE_PROVIDERS:
-        candidates = _call_openai_image_provider(config, generation_id, payload.prompt, width, height, payload.count)
-    else:
+    if config is None:
+        raise HTTPException(status_code=400, detail="未配置真实图片生成模型，请先在模型管理中配置图片生成 API")
+    if config.get("provider") == "mock":
         candidates = [
             _mock_generated_candidate(generation_id, index, payload.prompt, width, height)
             for index in range(max(1, min(payload.count, 4)))
         ]
+    elif config.get("provider") in OPENAI_IMAGE_PROVIDERS:
+        candidates = _call_openai_image_provider(config, generation_id, payload.prompt, width, height, payload.count)
+    else:
+        raise HTTPException(status_code=400, detail=f"图片生成服务类型暂不支持：{config.get('provider') or 'unknown'}")
     task = {
         "id": generation_id,
         "status": "done",
@@ -2758,21 +2762,22 @@ def _generate_image_layer(
         runtime.world.map.height = max(runtime.world.map.height, math.ceil(top + height))
     generation_id = new_id("layer")
     config = _image_generation_config(provider_id)
+    if config is None:
+        raise HTTPException(status_code=400, detail="未配置真实图片生成模型，请先在模型管理中配置图片生成 API")
     use_reference = reference_background and bool(runtime.world.map.background_image) and config is not None and config.get("provider") in OPENAI_IMAGE_PROVIDERS
     try:
-        if use_reference:
+        if config.get("provider") == "mock":
+            asset_name = _mock_image_layer_asset(generation_id, prompt, selection_points, left, top, int(math.ceil(width)), int(math.ceil(height)), mode)
+        elif use_reference:
             asset_name = _call_openai_image_edit_provider(config, generation_id, prompt, selection_points, int(math.ceil(width)), int(math.ceil(height)))
         elif config is not None and config.get("provider") in OPENAI_IMAGE_PROVIDERS:
             candidates = _call_openai_image_provider(config, generation_id, prompt, int(math.ceil(width)), int(math.ceil(height)), 1)
             asset_name = candidates[0]["url"].rsplit("/", 1)[-1]
             asset_name = _clip_layer_asset_to_selection(asset_name, selection_points, left, top, int(math.ceil(width)), int(math.ceil(height)))
         else:
-            asset_name = _mock_image_layer_asset(generation_id, prompt, selection_points, left, top, int(math.ceil(width)), int(math.ceil(height)), mode)
+            raise HTTPException(status_code=400, detail=f"图片生成服务类型暂不支持：{config.get('provider') or 'unknown'}")
     except HTTPException:
-        if config is None or config.get("provider") in OPENAI_IMAGE_PROVIDERS:
-            asset_name = _mock_image_layer_asset(generation_id, prompt, selection_points, left, top, int(math.ceil(width)), int(math.ceil(height)), mode)
-        else:
-            raise
+        raise
     layer_kind = "extension" if mode == "extension" else "region"
     next_layer = MapImageLayer(
         id=target_layer_id or generation_id,
@@ -2935,9 +2940,19 @@ def _image_generation_config(provider_id: str | None) -> dict[str, Any] | None:
     configs = store.load_model_configs()
     if provider_id:
         selected = next((config for config in configs if config.get("id") == provider_id), None)
-        if selected and "image_generation" in set(selected.get("capabilities", [])):
+        if selected and selected.get("enabled", True) and "image_generation" in set(selected.get("capabilities", [])):
             return selected
-    return _find_enabled_model("image_generation")
+        return None
+    return next(
+        (
+            config
+            for config in configs
+            if config.get("enabled", True)
+            and config.get("provider") != "mock"
+            and "image_generation" in set(config.get("capabilities", []))
+        ),
+        None,
+    )
 
 
 def _call_openai_image_provider(

@@ -9,6 +9,7 @@ import type {
   CanvasPoint,
   CanvasViewState,
   EditTool,
+  ImageSelectionMode,
   MapRegionFunction,
   Point,
   SelectionState,
@@ -27,10 +28,13 @@ type Props = {
   showAllRegionLayers: boolean;
   activeRegionFunction: MapRegionFunction | null;
   draftPoints: Point[];
+  imageSelectionMode: ImageSelectionMode;
+  imageAspectRatio: number;
   status: string;
   appearanceMode: "light" | "dark";
   onViewChange: (view: CanvasViewState) => void;
   onWorldPoint: (point: Point) => void;
+  onImageDraft: (points: Point[]) => void;
   onSelect: (selection: SelectionState) => void;
   onAnchorContext: (screen: Point, world: Point) => void;
   onObjectContext: (target: { kind: "agent" | "item" | "region" | "imageLayer"; id: string }, screen: Point) => void;
@@ -44,6 +48,11 @@ type PanDrag = {
   x: number;
   y: number;
   pan: Point;
+};
+
+type ImageSelectionDrag = {
+  pointerId: number;
+  start: Point;
 };
 
 type ItemTransform = {
@@ -68,10 +77,13 @@ export function SceneViewport({
   showAllRegionLayers,
   activeRegionFunction,
   draftPoints,
+  imageSelectionMode,
+  imageAspectRatio,
   status,
   appearanceMode,
   onViewChange,
   onWorldPoint,
+  onImageDraft,
   onSelect,
   onAnchorContext,
   onObjectContext,
@@ -80,6 +92,7 @@ export function SceneViewport({
   onCommitItem
 }: Props) {
   const panDragRef = useRef<PanDrag | null>(null);
+  const imageSelectionDragRef = useRef<ImageSelectionDrag | null>(null);
   const transformRef = useRef<ItemTransform | null>(null);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const gridCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -156,6 +169,13 @@ export function SceneViewport({
   function startPan(event: PointerEvent<HTMLDivElement>) {
     if (event.button === 0) {
       const point = localWorldPoint(event);
+      if (editTool === "imageGenerate" && imageSelectionMode !== "polygon") {
+        event.preventDefault();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        imageSelectionDragRef.current = { pointerId: event.pointerId, start: point };
+        onImageDraft([point, point]);
+        return;
+      }
       onWorldPoint(editTool === "anchor" ? snapWorldPointToGrid(point, canvasView.zoom) : point);
       return;
     }
@@ -174,6 +194,14 @@ export function SceneViewport({
   }
 
   function movePan(event: PointerEvent<HTMLDivElement>) {
+    const imageDrag = imageSelectionDragRef.current;
+    if (imageDrag && imageDrag.pointerId === event.pointerId) {
+      event.preventDefault();
+      const rawEnd = localWorldFromClient(event.clientX, event.clientY);
+      const end = imageSelectionMode === "ratioRect" ? lockPointToAspect(imageDrag.start, rawEnd, imageAspectRatio) : rawEnd;
+      onImageDraft([imageDrag.start, end]);
+      return;
+    }
     const transform = transformRef.current;
     if (transform && transform.pointerId === event.pointerId) {
       event.preventDefault();
@@ -199,6 +227,18 @@ export function SceneViewport({
   }
 
   function endPan(event: PointerEvent<HTMLDivElement>) {
+    const imageDrag = imageSelectionDragRef.current;
+    if (imageDrag && imageDrag.pointerId === event.pointerId) {
+      event.preventDefault();
+      imageSelectionDragRef.current = null;
+      const rawEnd = localWorldFromClient(event.clientX, event.clientY);
+      const end = imageSelectionMode === "ratioRect" ? lockPointToAspect(imageDrag.start, rawEnd, imageAspectRatio) : rawEnd;
+      onImageDraft([imageDrag.start, end]);
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      return;
+    }
     const transform = transformRef.current;
     if (transform && transform.pointerId === event.pointerId) {
       event.preventDefault();
@@ -452,7 +492,6 @@ export function SceneViewport({
             {showRegions && selectedRegion ? (
               <path
                 className="world-region-source active"
-                data-testid={`world-region-source-${selectedRegion.id}`}
                 d={polygonPath(selectedRegion.points, selectedRegion.holes)}
                 fillRule="evenodd"
                 onClick={(event) => {
@@ -462,14 +501,7 @@ export function SceneViewport({
                 onContextMenu={(event) => openObjectMenu(event, { kind: "region", id: selectedRegion.id })}
               />
             ) : null}
-            {draftPoints.length > 0 ? (
-              <g className="world-draft-area" data-testid="world-draft-area">
-                <polyline points={draftPoints.map((point) => `${point.x},${point.y}`).join(" ")} />
-                {draftPoints.map((point, index) => (
-                  <circle cx={point.x} cy={point.y} key={`${point.x}-${point.y}-${index}`} r="5" />
-                ))}
-              </g>
-            ) : null}
+            {draftPoints.length > 0 ? <DraftSelection editTool={editTool} points={draftPoints} /> : null}
           </svg>
           <div className="world-origin-marker" data-testid="origin-marker" style={pointStyle({ x: 0, y: 0 })}>
             <span />
@@ -916,6 +948,56 @@ function getGridDensity(zoom: number) {
   return "normal";
 }
 
+function DraftSelection({ editTool, points }: { editTool: EditTool; points: Point[] }) {
+  const isImageTool = editTool === "imageGenerate";
+  if (isImageTool && points.length === 2) {
+    const [first, second] = points;
+    const x = Math.min(first.x, second.x);
+    const y = Math.min(first.y, second.y);
+    const width = Math.abs(second.x - first.x);
+    const height = Math.abs(second.y - first.y);
+    return (
+      <g className="world-image-draft-area" data-testid="world-image-draft-area">
+        <rect height={height} width={width} x={x} y={y} />
+        <circle cx={first.x} cy={first.y} r="5" />
+        <circle cx={second.x} cy={second.y} r="5" />
+      </g>
+    );
+  }
+  return (
+    <g className={isImageTool ? "world-image-draft-area" : "world-draft-area"} data-testid={isImageTool ? "world-image-draft-area" : "world-draft-area"}>
+      <polyline points={points.map((point) => `${point.x},${point.y}`).join(" ")} />
+      {points.map((point, index) => (
+        <circle cx={point.x} cy={point.y} key={`${point.x}-${point.y}-${index}`} r="5" />
+      ))}
+    </g>
+  );
+}
+
+function lockPointToAspect(start: Point, end: Point, aspectRatio: number): Point {
+  if (!Number.isFinite(aspectRatio) || aspectRatio <= 0) {
+    return end;
+  }
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const width = Math.abs(dx);
+  const height = Math.abs(dy);
+  if (width < 1 || height < 1) {
+    return end;
+  }
+  const currentAspect = width / height;
+  if (currentAspect > aspectRatio) {
+    return {
+      x: start.x + Math.sign(dx || 1) * height * aspectRatio,
+      y: end.y
+    };
+  }
+  return {
+    x: end.x,
+    y: start.y + Math.sign(dy || 1) * (width / aspectRatio)
+  };
+}
+
 function modulo(value: number, divisor: number) {
   return ((value % divisor) + divisor) % divisor;
 }
@@ -924,8 +1006,7 @@ function toolLabel(tool: EditTool) {
   const labels: Record<EditTool, string> = {
     select: "选择",
     region: "区域绘制",
-    imageGenerate: "区域生成",
-    edgeExtend: "边缘延展",
+    imageGenerate: "图像生成",
     item: "元素",
     spawn: "出生点",
     move: "移动",

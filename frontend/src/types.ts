@@ -230,7 +230,13 @@ export type WorldSnapshot = {
 
 export type ViewMode = "2d" | "3d";
 
-export type EditTool = "select" | "region" | "imageGenerate" | "edgeExtend" | "item" | "spawn" | "move" | "anchor";
+export type EditTool = "select" | "region" | "imageGenerate" | "item" | "spawn" | "move" | "anchor";
+
+export type ImageGenerationMode = "region" | "extension" | "repaint";
+
+export type ImageSelectionMode = "rect" | "ratioRect" | "polygon";
+
+export type ImageAspectPreset = "1:1" | "4:3" | "16:9" | "map";
 
 export type RegionDrawOperation = "add" | "subtract";
 
@@ -242,6 +248,7 @@ export type PanelState = {
     | "properties"
     | "models"
     | "runtimeMonitor"
+    | "imageGeneration"
     | "mapStudio"
     | "regions"
     | "regionDraw"

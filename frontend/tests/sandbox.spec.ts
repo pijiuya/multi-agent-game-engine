@@ -496,11 +496,10 @@ test("workspace wheel zoom changes grid scale and density", async ({ page }) => 
 
   const scene = page.getByTestId("scene-viewport");
   const surface = page.getByTestId("workspace-surface");
-  const box = await surface.boundingBox();
-  expect(box).not.toBeNull();
+  const point = await visibleWorkspacePoint(page, surface);
 
   const before = await readGridState(scene);
-  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  await page.mouse.move(point.x, point.y);
   await page.mouse.wheel(0, -900);
   await page.mouse.wheel(0, -900);
   await page.mouse.wheel(0, -900);
@@ -530,13 +529,12 @@ test("middle mouse pans infinite grid without affecting panels", async ({ page }
 
   const scene = page.getByTestId("scene-viewport");
   const surface = page.getByTestId("workspace-surface");
-  const box = await surface.boundingBox();
-  expect(box).not.toBeNull();
+  const point = await visibleWorkspacePoint(page, surface);
 
   const before = await readGridState(scene);
-  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  await page.mouse.move(point.x, point.y);
   await page.mouse.down({ button: "middle" });
-  await page.mouse.move(box!.x + box!.width / 2 + 96, box!.y + box!.height / 2 + 44, { steps: 8 });
+  await page.mouse.move(point.x + 96, point.y + 44, { steps: 8 });
   await page.mouse.up({ button: "middle" });
 
   const after = await readGridState(scene);
@@ -561,15 +559,14 @@ test("workspace zoom and pan still work after tone inversion", async ({ page }) 
   await page.getByRole("button", { name: "切换黑白反色" }).click();
   const scene = page.getByTestId("scene-viewport");
   const surface = page.getByTestId("workspace-surface");
-  const box = await surface.boundingBox();
-  expect(box).not.toBeNull();
+  const point = await visibleWorkspacePoint(page, surface);
 
   const before = await readGridState(scene);
-  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  await page.mouse.move(point.x, point.y);
   await page.mouse.wheel(0, -900);
-  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  await page.mouse.move(point.x, point.y);
   await page.mouse.down({ button: "middle" });
-  await page.mouse.move(box!.x + box!.width / 2 + 42, box!.y + box!.height / 2 + 32, { steps: 5 });
+  await page.mouse.move(point.x + 42, point.y + 32, { steps: 5 });
   await page.mouse.up({ button: "middle" });
 
   const after = await readGridState(scene);
@@ -626,15 +623,14 @@ test("anchor tool snaps to the grid and generates empty points", async ({ page }
   await page.goto("/");
 
   const surface = page.getByTestId("workspace-surface");
-  const box = await surface.boundingBox();
-  expect(box).not.toBeNull();
+  const point = await visibleWorkspacePoint(page, surface);
 
-  await page.getByRole("button", { name: "锚点" }).click();
+  await page.getByTestId("panel-tools").getByRole("button", { name: "锚点" }).click();
   await expect(page.locator(".scene-footer").getByText("锚点", { exact: true })).toBeVisible();
-  await page.mouse.click(box!.x + box!.width / 2 + 13, box!.y + box!.height / 2 + 11);
+  await page.mouse.click(point.x + 13, point.y + 11);
   await expect(page.getByTestId("world-anchor-marker")).toBeVisible();
 
-  await page.mouse.click(box!.x + box!.width / 2 + 13, box!.y + box!.height / 2 + 11, { button: "right" });
+  await page.mouse.click(point.x + 13, point.y + 11, { button: "right" });
   await expect(page.getByTestId("anchor-context-menu")).toBeVisible();
   await page.getByRole("button", { name: "生成空点" }).click();
 
@@ -649,18 +645,18 @@ test("anchor context menu generates agents and map elements without affecting pa
 
   const scene = page.getByTestId("scene-viewport");
   const surface = page.getByTestId("workspace-surface");
-  const box = await surface.boundingBox();
-  expect(box).not.toBeNull();
+  const point = await visibleWorkspacePoint(page, surface);
 
   await page.getByRole("button", { name: "锚点" }).click();
   await expect(page.locator(".scene-footer").getByText("锚点", { exact: true })).toBeVisible();
   const agentCountBefore = await page.locator(".world-agent-marker").count();
   const itemCountBefore = await page.locator(".world-item-marker").count();
-  await page.mouse.click(box!.x + 740, box!.y + 260, { button: "right" });
+  await page.mouse.click(point.x + 40, point.y + 20, { button: "right" });
   await page.getByRole("button", { name: "生成 Agent" }).click();
   await expect(page.locator(".world-agent-marker")).toHaveCount(agentCountBefore + 1);
 
-  await page.mouse.click(box!.x + 770, box!.y + 320, { button: "right" });
+  await page.getByTestId("panel-tools").locator('button[aria-label="锚点"]').click();
+  await page.mouse.click(point.x, point.y, { button: "right" });
   await page.getByRole("button", { name: "生成地图元素" }).click();
   await expect(page.locator(".world-item-marker")).toHaveCount(itemCountBefore + 1);
   await expect(page.getByTestId("panel-properties").locator(".property-heading strong")).toHaveText("元素");
@@ -741,12 +737,11 @@ test("scene objects can be hidden, shown, and deleted from right click menus", a
   await expect(scenePanel.getByRole("button", { name: /Lamp/ })).toHaveCount(0);
 
   const surface = page.getByTestId("workspace-surface");
-  const box = await surface.boundingBox();
-  expect(box).not.toBeNull();
+  const point = await visibleWorkspacePoint(page, surface);
   await page.getByTestId("panel-tools").getByRole("button", { name: "区域绘制" }).click();
-  await page.mouse.click(box!.x + 320, box!.y + 230);
-  await page.mouse.click(box!.x + 420, box!.y + 230);
-  await page.mouse.click(box!.x + 420, box!.y + 310);
+  await page.mouse.click(point.x, point.y);
+  await page.mouse.click(point.x + 100, point.y);
+  await page.mouse.click(point.x + 100, point.y + 80);
   await page.getByRole("button", { name: "完成区域绘制" }).click();
   const regionRow = page.getByTestId("panel-regions").getByRole("button", { name: /手绘区域/ }).first();
   await expect(regionRow).toBeVisible();
@@ -887,8 +882,7 @@ test("drawing tools create vector areas and item transform handles edit items", 
   await page.goto("/");
 
   const surface = page.getByTestId("workspace-surface");
-  const box = await surface.boundingBox();
-  expect(box).not.toBeNull();
+  const point = await visibleWorkspacePoint(page, surface);
   const unselectedItemVisualState = await page.locator(".world-item-marker:not(.active)").first().evaluate((element) => {
     const style = getComputedStyle(element as HTMLElement);
     return {
@@ -908,9 +902,9 @@ test("drawing tools create vector areas and item transform handles edit items", 
   await expect(page.getByTestId("region-draw-operation").getByRole("button", { name: "增加区域" })).toHaveClass(/active/);
   await expect(page.getByTestId("region-target-grid").getByRole("button", { name: "道路" })).toHaveClass(/active/);
   await expect(page.locator('[data-testid^="world-region-layer-walkable"]')).toBeVisible();
-  await page.mouse.click(box!.x + 320, box!.y + 230);
-  await page.mouse.click(box!.x + 420, box!.y + 230);
-  await page.mouse.click(box!.x + 420, box!.y + 310);
+  await page.mouse.click(point.x, point.y);
+  await page.mouse.click(point.x + 100, point.y);
+  await page.mouse.click(point.x + 100, point.y + 80);
   await expect(page.getByTestId("world-draft-area")).toBeVisible();
   const layerCountBefore = await page.locator('[data-testid^="world-region-layer-walkable"]').count();
   await page.getByRole("button", { name: "完成区域绘制" }).click();
@@ -971,9 +965,9 @@ test("drawing tools create vector areas and item transform handles edit items", 
     });
   });
   await page.getByRole("button", { name: "减少区域" }).click();
-  await page.mouse.click(box!.x + 340, box!.y + 250);
-  await page.mouse.click(box!.x + 390, box!.y + 250);
-  await page.mouse.click(box!.x + 390, box!.y + 300);
+  await page.mouse.click(point.x + 20, point.y + 20);
+  await page.mouse.click(point.x + 70, point.y + 20);
+  await page.mouse.click(point.x + 70, point.y + 70);
   await page.keyboard.press("Enter");
   await expect(page.getByTestId("world-draft-area")).toHaveCount(0);
   await expect(page.locator(".scene-header")).toContainText("区域已扣减");
@@ -983,7 +977,7 @@ test("drawing tools create vector areas and item transform handles edit items", 
 
   await page.getByTestId("panel-tools").getByRole("button", { name: "元素" }).click();
   const itemCountBefore = await page.locator(".world-item-marker").count();
-  await page.mouse.click(box!.x + 450, box!.y + 420);
+  await page.mouse.click(point.x + 130, point.y + 190);
   await expect(page.locator(".world-item-marker")).toHaveCount(itemCountBefore + 1);
   await expect(page.getByTestId("item-transform-box")).toBeVisible();
   const itemVisualState = await page.locator(".world-item-marker.active").evaluate((element) => {
@@ -1530,9 +1524,8 @@ test("agent labels and origin icons stay crisp at a fixed screen size during zoo
   expect(labelLayerState.scaleY).toBeCloseTo(1, 2);
   expect(labelLayerState.inScaledLayer).toBe(false);
 
-  const box = await surface.boundingBox();
-  expect(box).not.toBeNull();
-  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  const point = await visibleWorkspacePoint(page, surface);
+  await page.mouse.move(point.x, point.y);
   await page.mouse.wheel(0, -1200);
   await page.mouse.wheel(0, -1200);
 
@@ -1570,6 +1563,25 @@ async function readGridState(scene: import("@playwright/test").Locator) {
       canvasHeight: canvas?.height ?? 0
     };
   });
+}
+
+async function visibleWorkspacePoint(page: import("@playwright/test").Page, surface: import("@playwright/test").Locator) {
+  const box = await surface.boundingBox();
+  expect(box).not.toBeNull();
+  const point = await page.evaluate(({ x, y, width, height }) => {
+    const candidates = [
+      { x: x + width * 0.18, y: y + height * 0.24 },
+      { x: x + width * 0.68, y: y + height * 0.26 },
+      { x: x + width * 0.72, y: y + height * 0.72 },
+      { x: x + width * 0.28, y: y + height * 0.72 },
+      { x: x + width * 0.5, y: y + height * 0.5 }
+    ];
+    return candidates.find((candidate) => {
+      const element = document.elementFromPoint(candidate.x, candidate.y);
+      return Boolean(element?.closest(".scene-canvas-shell")) && !element?.closest(".floating-panel");
+    }) ?? candidates[0];
+  }, box!);
+  return point;
 }
 
 async function readPanelBoxes(page: import("@playwright/test").Page) {

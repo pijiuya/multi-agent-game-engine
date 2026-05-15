@@ -469,6 +469,21 @@ select,
   vector-effect: non-scaling-stroke;
 }
 
+.world-image-draft-area {
+  fill: rgba(14, 165, 233, 0.12);
+  stroke: rgba(14, 165, 233, 0.95);
+  stroke-width: 2;
+  stroke-dasharray: 7 5;
+  pointer-events: none;
+  vector-effect: non-scaling-stroke;
+}
+
+.world-image-draft-area circle {
+  fill: rgba(var(--panel-rgb), 0.9);
+  stroke: rgba(14, 165, 233, 0.95);
+  vector-effect: non-scaling-stroke;
+}
+
 .world-origin-marker,
 .world-agent-marker,
 .world-item-marker,
@@ -2466,13 +2481,118 @@ textarea:focus {
 }
 
 .prompt-row input,
+.prompt-row textarea,
 .dimension-row input {
   width: 100%;
-  height: 32px;
+  min-height: 32px;
+}
+
+.prompt-row textarea {
+  resize: vertical;
+  padding: 8px;
 }
 
 .panel-action-button {
   width: 100%;
+}
+
+.image-generation-panel {
+  display: grid;
+  gap: 8px;
+}
+
+.image-mode-grid,
+.image-option-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+
+.image-generation-panel.disabled {
+  opacity: 0.74;
+}
+
+.image-mode-grid button {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  min-height: 44px;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 7px 9px;
+  color: var(--ink);
+  background: rgba(var(--material-rgb), 0.52);
+  border: 1px solid rgba(var(--grid-rgb), 0.24);
+  border-radius: 8px;
+  text-align: left;
+}
+
+.image-mode-grid button span {
+  display: grid;
+  gap: 2px;
+}
+
+.image-mode-grid button strong {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.image-mode-grid button small {
+  min-width: 0;
+  font-size: 11px;
+  color: var(--soft-muted);
+}
+
+.image-mode-grid button.active {
+  color: var(--active-ink);
+  background: var(--active-bg);
+  border-color: var(--active-bg);
+}
+
+.image-mode-grid button.active small {
+  color: color-mix(in srgb, var(--active-ink) 78%, transparent);
+}
+
+.image-selection-summary {
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+  background: rgba(var(--material-rgb), 0.38);
+  border: 1px solid rgba(var(--grid-rgb), 0.16);
+  border-radius: 8px;
+}
+
+.image-selection-summary strong {
+  font-size: 11px;
+}
+
+.image-selection-summary span {
+  font-size: 11px;
+  color: var(--soft-muted);
+}
+
+.image-config-empty {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  color: var(--ink);
+  background: rgba(var(--material-rgb), 0.42);
+  border: 1px solid rgba(var(--grid-rgb), 0.16);
+  border-radius: 8px;
+}
+
+.image-config-empty svg {
+  color: var(--label);
+}
+
+.image-config-empty strong {
+  font-size: 12px;
+}
+
+.image-config-empty span {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--soft-muted);
 }
 
 .candidate-card {

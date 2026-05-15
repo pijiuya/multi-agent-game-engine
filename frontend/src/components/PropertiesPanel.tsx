@@ -24,6 +24,7 @@ type Props = {
   onUpdateAgent: (agentId: string, patch: Partial<Omit<AgentProfile, "id">>) => void;
   onUpdateItem: (itemId: string, patch: Partial<Omit<WorldItem, "id">>) => void;
   onUpdateImageLayer: (layerId: string, patch: Partial<Omit<MapImageLayer, "id" | "kind" | "image" | "prompt" | "region_id" | "created_at">>) => void;
+  onRepaintImageLayer: (layerId: string) => void;
   onUploadItemImage: (itemId: string, file: File) => void;
   onUpdateRegion: (regionId: string, patch: Partial<Omit<MapRegion, "id" | "points" | "source">>) => void;
   onRegenerateRegion: (regionId: string, prompt: string) => void;
@@ -39,6 +40,7 @@ export function PropertiesPanel({
   onUpdateAgent,
   onUpdateItem,
   onUpdateImageLayer,
+  onRepaintImageLayer,
   onUploadItemImage,
   onUpdateRegion,
   onRegenerateRegion
@@ -59,6 +61,7 @@ export function PropertiesPanel({
         onUpdateAgent,
         onUpdateItem,
         onUpdateImageLayer,
+        onRepaintImageLayer,
         onUploadItemImage,
         onUpdateRegion,
         onRegenerateRegion
@@ -78,6 +81,7 @@ function renderEditor(props: Props) {
     onUpdateAgent,
     onUpdateItem,
     onUpdateImageLayer,
+    onRepaintImageLayer,
     onUploadItemImage,
     onUpdateRegion,
     onRegenerateRegion
@@ -173,6 +177,7 @@ function renderEditor(props: Props) {
     return (
       <div className="property-grid">
         <Editable label="名称" value={layer.name} onCommit={(name) => onUpdateImageLayer(layer.id, { name })} />
+        <button className="panel-action-button" onClick={() => onRepaintImageLayer(layer.id)} type="button">重绘这个图层</button>
         <Readonly label="类型" value={layer.kind === "extension" ? "边缘延展" : layer.kind === "background" ? "背景" : "区域生成"} />
         <Readonly label="图片" value={layer.image} />
         <EditableNumber label="X" value={layer.x} onCommit={(x) => onUpdateImageLayer(layer.id, { x })} />
