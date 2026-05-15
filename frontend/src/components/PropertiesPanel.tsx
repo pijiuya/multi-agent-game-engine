@@ -10,6 +10,7 @@ import type {
   Point,
   SelectionState,
   WorldItem,
+  WorldItemAffordance,
   WorldMap,
   WorldSnapshot
 } from "../types";
@@ -120,10 +121,16 @@ function renderEditor(props: Props) {
         <Editable label="标签" value={item.tags.join(", ")} onCommit={(tags) => onUpdateItem(item.id, { tags: parseTags(tags) })} />
         <Editable label="简介" value={item.description} onCommit={(description) => onUpdateItem(item.id, { description })} />
         <label className="property-toggle-row">
-          <span>Agent 互动</span>
-          <input type="checkbox" checked={item.movable} onChange={(event) => onUpdateItem(item.id, { movable: event.currentTarget.checked })} />
-          <small>{item.movable ? "可移动" : "不可移动"}</small>
+          <span>可互动</span>
+          <input type="checkbox" checked={item.interactable} onChange={(event) => onUpdateItem(item.id, { interactable: event.currentTarget.checked })} />
+          <small>{item.interactable ? "可 use/interact" : "禁用互动"}</small>
         </label>
+        <label className="property-toggle-row">
+          <span>可移动</span>
+          <input type="checkbox" checked={item.movable} onChange={(event) => onUpdateItem(item.id, { movable: event.currentTarget.checked })} />
+          <small>{item.movable ? "可拾取/移动" : "固定元素"}</small>
+        </label>
+        <AffordanceEditor item={item} onUpdate={(affordances) => onUpdateItem(item.id, { affordances })} />
         <label className="property-file">
           <span>图片</span>
           <input
@@ -157,6 +164,7 @@ function renderEditor(props: Props) {
         <FunctionButtons value={region.function} onCommit={(value) => onUpdateRegion(region.id, { function: value })} />
         <Editable label="备注" value={region.notes} onCommit={(notes) => onUpdateRegion(region.id, { notes })} />
         <Editable label="标签" value={region.tags.join(", ")} onCommit={(tags) => onUpdateRegion(region.id, { tags: parseTags(tags) })} />
+        {region.function === "social" ? <Readonly label="互动规则" value="处于社交区内的 Agent 对话距离 +80。" /> : null}
         <Editable
           label="局部生成提示"
           value={region.image_prompt || region.name}
@@ -212,6 +220,7 @@ function renderEditor(props: Props) {
         <Readonly label="名称" value={layer?.label ?? functionLabel(selection.id)} />
         <Readonly label="来源块" value={String(layer?.region_ids.length ?? 0)} />
         <Readonly label="整体轮廓" value={String(layer?.polygons.length ?? 0)} />
+        {selection.id === "social" ? <Readonly label="互动规则" value="处于社交区内的 Agent 对话距离 +80。" /> : null}
         <Readonly label="绘制" value="区域绘制面板会对这个功能层执行增加或扣减。" />
       </div>
     );
@@ -244,6 +253,74 @@ function renderEditor(props: Props) {
       <Readonly label="SAM 状态" value={segmentationLabel(segmentation)} />
       <Readonly label="SAM 区域数" value={String(world.map.regions.length || segmentation.region_count)} />
       <Readonly label="简介" value="地图工作台负责生成流程；这里记录地图细节和当前分层状态。" />
+    </div>
+  );
+}
+
+function AffordanceEditor({
+  item,
+  onUpdate
+}: {
+  item: WorldItem;
+  onUpdate: (affordances: WorldItemAffordance[]) => void;
+}) {
+  const affordances = item.affordances ?? [];
+
+  function updateAffordance(index: number, patch: Partial<WorldItemAffordance>) {
+    onUpdate(affordances.map((affordance, affordanceIndex) => (affordanceIndex === index ? cleanAffordance({ ...affordance, ...patch }) : affordance)));
+  }
+
+  function removeAffordance(index: number) {
+    onUpdate(affordances.filter((_, affordanceIndex) => affordanceIndex !== index));
+  }
+
+  return (
+    <div className="property-affordance-editor">
+      <dt>互动能力</dt>
+      <dd>{affordances.length ? `${affordances.length} 个` : "未配置"}</dd>
+      <button
+        className="panel-action-button"
+        onClick={() =>
+          onUpdate([
+            ...affordances,
+            {
+              action: "use",
+              label: "使用",
+              range: 120,
+              enabled: true,
+              required_item_state: {},
+              set_item_state: {}
+            }
+          ])
+        }
+        type="button"
+      >
+        添加互动能力
+      </button>
+      {affordances.map((affordance, index) => (
+        <div className="property-affordance-card" key={`${index}-${affordance.action}-${affordance.label ?? ""}`}>
+          <label className="property-edit-row">
+            <span>动作</span>
+            <select value={affordance.action} onChange={(event) => updateAffordance(index, { action: event.currentTarget.value as "interact" | "use" })}>
+              <option value="use">use</option>
+              <option value="interact">interact</option>
+            </select>
+          </label>
+          <label className="property-toggle-row">
+            <span>启用</span>
+            <input type="checkbox" checked={affordance.enabled !== false} onChange={(event) => updateAffordance(index, { enabled: event.currentTarget.checked })} />
+            <small>{affordance.enabled !== false ? "可用" : "停用"}</small>
+          </label>
+          <Editable label="名称" value={affordance.label ?? ""} onCommit={(label) => updateAffordance(index, { label })} />
+          <EditableNumber label="范围" value={affordance.range ?? 120} onCommit={(range) => updateAffordance(index, { range })} />
+          <Editable label="成功文案" value={affordance.event_message ?? ""} onCommit={(event_message) => updateAffordance(index, { event_message })} />
+          <JsonObjectEditor label="前置状态 JSON" value={affordance.required_item_state ?? {}} onCommit={(required_item_state) => updateAffordance(index, { required_item_state })} />
+          <JsonObjectEditor label="状态变更 JSON" value={affordance.set_item_state ?? {}} onCommit={(set_item_state) => updateAffordance(index, { set_item_state })} />
+          <button className="panel-action-button" onClick={() => removeAffordance(index)} type="button">
+            删除互动能力
+          </button>
+        </div>
+      ))}
     </div>
   );
 }
@@ -300,6 +377,33 @@ function EditableNumber({
   );
 }
 
+function JsonObjectEditor({
+  label,
+  value,
+  onCommit
+}: {
+  label: string;
+  value: Record<string, unknown>;
+  onCommit: (value: Record<string, unknown>) => void;
+}) {
+  function commitValue(raw: string) {
+    try {
+      const parsed = JSON.parse(raw || "{}");
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        onCommit(parsed as Record<string, unknown>);
+      }
+    } catch {
+      // Keep the last valid value while the designer is typing invalid JSON.
+    }
+  }
+  return (
+    <label className="property-edit-row">
+      <span>{label}</span>
+      <textarea key={JSON.stringify(value)} defaultValue={JSON.stringify(value)} onBlur={(event) => commitValue(event.currentTarget.value)} />
+    </label>
+  );
+}
+
 function Readonly({ label, value }: { label: string; value: string }) {
   return (
     <div>
@@ -329,6 +433,14 @@ function parseTags(value: string) {
     .split(",")
     .map((tag) => tag.trim())
     .filter(Boolean);
+}
+
+function cleanAffordance(affordance: WorldItemAffordance): WorldItemAffordance {
+  return {
+    ...affordance,
+    action: affordance.action === "interact" ? "interact" : "use",
+    range: affordance.range ? Math.max(1, affordance.range) : undefined
+  };
 }
 
 function formatPoint(point: Point) {

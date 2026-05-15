@@ -500,7 +500,13 @@ class SimulationRuntime:
             return True
         nearby_items = observation.get("nearby_items")
         if isinstance(nearby_items, list) and any(
-            isinstance(item, dict) and item.get("movable") for item in nearby_items
+            isinstance(item, dict)
+            and (
+                item.get("movable")
+                or item.get("interactable")
+                or bool(item.get("available_affordances"))
+            )
+            for item in nearby_items
         ) and ({"pick_up", "move_item", "interact", "use"} & allowed):
             return True
         recent_events = observation.get("agent_recent_events")
@@ -581,7 +587,9 @@ class SimulationRuntime:
         if action_type in {"interact", "use"}:
             target_id = str(payload.get("target_id") or payload.get("item_id") or "").strip()
             if not target_id:
-                target_id = self._first_observation_id(observation.get("nearby_items"))
+                target_id = self._first_affordance_item_id(observation, action_type)
+            if not target_id:
+                target_id = self._first_interactable_item_id(observation)
             if not target_id:
                 return self._fallback_action(response_text, allowed, request)
             return {"type": action_type, "payload": {"target_id": target_id}}
@@ -779,6 +787,29 @@ class SimulationRuntime:
                 return str(item["id"])
         return ""
 
+    def _first_interactable_item_id(self, observation: dict[str, Any]) -> str:
+        items = observation.get("nearby_items")
+        if not isinstance(items, list):
+            return ""
+        for item in items:
+            if isinstance(item, dict) and item.get("id") and item.get("interactable", True):
+                return str(item["id"])
+        return ""
+
+    def _first_affordance_item_id(self, observation: dict[str, Any], action_type: str) -> str:
+        items = observation.get("nearby_items")
+        if not isinstance(items, list):
+            return ""
+        for item in items:
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            affordances = item.get("available_affordances")
+            if not isinstance(affordances, list):
+                continue
+            if any(isinstance(affordance, dict) and affordance.get("action") == action_type for affordance in affordances):
+                return str(item["id"])
+        return ""
+
     def _first_movement_target(self, observation: dict[str, Any]) -> dict[str, Any] | None:
         targets = observation.get("movement_targets")
         if not isinstance(targets, list):
@@ -825,9 +856,9 @@ class SimulationRuntime:
         policy = profile.dialogue_policy
         identity = self._identity_for(profile)
         effective_language = self._dialogue_language(policy, identity)
-        current_regions = self._regions_at_point(state.position)
-        in_social_region = any(region.function == "social" for region in current_regions)
-        dialogue_distance = float(policy.get("distance", 180.0)) + (80.0 if in_social_region else 0.0)
+        base_dialogue_distance = float(policy.get("distance", 180.0))
+        social_range_bonus = self.rule_engine.social_range_bonus(self.world, state.position)
+        dialogue_distance = self.rule_engine.social_dialogue_range(self.world, state.position, policy)
         can_social = bool(policy.get("enabled", True)) and self.world.tick >= float(state.cooldowns.get("social_until", 0))
         movement_targets = self._movement_targets_for(agent_id)
         agent_recent_events = [
@@ -873,7 +904,12 @@ class SimulationRuntime:
                 "agent_min_center_distance": self.rule_engine.agent_min_center_distance,
                 "note": "Move targets are pre-adjusted so agent centers keep this distance from other agents.",
             },
-            "region_context": self._region_context_for(state.position, movement_targets),
+            "region_context": self._region_context_for(state.position, movement_targets, base_dialogue_distance),
+            "dialogue_range": {
+                "base": base_dialogue_distance,
+                "social_region_bonus": social_range_bonus,
+                "effective": dialogue_distance,
+            },
             "dialogue_candidates": [
                 agent for agent in nearby_agents if can_social and agent["distance"] <= dialogue_distance
             ],
@@ -1127,6 +1163,12 @@ class SimulationRuntime:
                     "position": item.position.to_dict(),
                     "distance": round(current_distance, 2),
                     "movable": item.movable,
+                    "interactable": item.interactable,
+                    "available_affordances": self.rule_engine.available_item_affordances(
+                        self.world,
+                        state.position,
+                        item,
+                    ),
                     "tags": item.tags,
                     "state": item.state,
                 }
@@ -1196,7 +1238,12 @@ class SimulationRuntime:
         targets.sort(key=lambda item: (-int(item.get("priority", 0)), float(item.get("distance", 0))))
         return targets[:10]
 
-    def _region_context_for(self, position: Point, movement_targets: list[dict[str, Any]]) -> dict[str, Any]:
+    def _region_context_for(
+        self,
+        position: Point,
+        movement_targets: list[dict[str, Any]],
+        base_dialogue_distance: float = 180.0,
+    ) -> dict[str, Any]:
         current = [self._region_summary(region, position) for region in self._regions_at_point(position)]
         nearby = [
             self._region_summary(region, position)
@@ -1204,12 +1251,15 @@ class SimulationRuntime:
             if not region.hidden and len(region.points) >= 3
         ]
         nearby.sort(key=lambda item: (float(item.get("distance", 0)), -int(item.get("priority", 0))))
+        social_bonus = self.rule_engine.social_range_bonus(self.world, position)
         return {
             "current": current,
             "nearby": nearby[:8],
             "movement_priority": ["walkable", "action", "social", "residential", "custom", "unassigned"],
             "movement_rules": "Road/walkable regions and action regions are valid for movement; prefer road/walkable targets when available.",
             "social_rules": "Social regions increase the value and range of social/say actions with nearby agents.",
+            "social_range_bonus": social_bonus,
+            "effective_dialogue_distance": base_dialogue_distance + social_bonus,
             "residential_rules": "Residential regions bias agents toward calmer local routines, short moves, waiting, and resident-like behavior.",
             "recommended_target": movement_targets[0] if movement_targets else None,
         }

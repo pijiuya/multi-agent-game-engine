@@ -628,6 +628,7 @@ def test_api_model_capability_status_and_one_click_config(monkeypatch):
 
     assert client.patch("/api/models", json={"models": default_model_configs()}).status_code == 200
     monkeypatch.setattr(api_main, "_detect_ollama_models", lambda: ["qwen2.5:1.5b", "qwen2.5:7b", "qwen2.5vl:3b"])
+    monkeypatch.setattr(api_main, "_recommended_llm_model_for_device", lambda local_environment=None: "qwen2.5:7b")
     monkeypatch.setattr(api_main, "_embedded_mobile_sam_ready", lambda: False)
     monkeypatch.setattr(
         api_main,
@@ -653,11 +654,14 @@ def test_api_model_capability_status_and_one_click_config(monkeypatch):
     llm = next(item for item in status.json()["capabilities"] if item["id"] == "llm")
     sam = next(item for item in status.json()["capabilities"] if item["id"] == "segmentation")
     assert llm["status"] == "local_available"
-    assert llm["recommended_local"]["model"] == "qwen2.5:1.5b"
+    assert llm["recommended_local"]["model"] == "qwen2.5:7b"
+    assert [option["model"] for option in llm["local_options"]]
+    assert next(option for option in llm["local_options"] if option["model"] == "qwen2.5:7b")["recommended"] is True
+    assert llm["device_recommendation"]["python_required"] is False
     assert sam["status"] == "installable"
     assert sam["installable"] is True
 
-    configured = client.post("/api/model-capabilities/llm/configure-local")
+    configured = client.post("/api/model-capabilities/llm/configure-local", json={"model": "qwen2.5:1.5b"})
     assert configured.status_code == 200
     models = configured.json()["models"]
     assert any(model["id"] == "model_local_llm" and model["model"] == "qwen2.5:1.5b" for model in models)
@@ -691,6 +695,7 @@ def test_api_llm_capability_is_installable_without_pulled_model(monkeypatch):
     assert client.patch("/api/models", json={"models": default_model_configs()}).status_code == 200
     monkeypatch.setattr(api_main, "_detect_ollama_models", lambda: [])
     monkeypatch.setattr(api_main, "_detect_local_model_services", lambda: {})
+    monkeypatch.setattr(api_main, "_recommended_llm_model_for_device", lambda local_environment=None: "qwen2.5:3b")
 
     status = client.get("/api/model-capabilities/status")
     assert status.status_code == 200
@@ -698,6 +703,8 @@ def test_api_llm_capability_is_installable_without_pulled_model(monkeypatch):
     assert llm["status"] == "installable"
     assert llm["installable"] is True
     assert llm["recommended_local"] is None
+    assert llm["device_recommendation"]["model"] == "qwen2.5:3b"
+    assert next(option for option in llm["local_options"] if option["model"] == "qwen2.5:3b")["selected_by_default"] is True
 
 
 def test_api_remote_models_filters_by_capability(monkeypatch):
@@ -959,6 +966,182 @@ def test_api_image_layer_generation_explicit_mock_without_background_creates_alp
     assert payload["world"]["map"]["image_layers"][0]["id"] == layer["id"]
     asset_name = layer["image"].rsplit("/", 1)[-1]
     assert (api_main.store.assets_dir / asset_name).exists()
+
+
+def test_api_polygon_image_layer_generation_prompt_is_shape_aware(monkeypatch):
+    client = TestClient(app)
+    api_main.runtime.world = api_main.GameWorld.default()
+    api_main.runtime.world.map.background_image = None
+    api_main.runtime.world.map.image_layers = []
+    client.patch(
+        "/api/models",
+        json={
+            "models": [
+                {
+                    "id": "model_remote_image",
+                    "name": "Remote image",
+                    "kind": "remote",
+                    "provider": "image-http",
+                    "base_url": "https://api.example.test/v1",
+                    "api_key": "image-secret",
+                    "model": "gpt-image-2",
+                    "enabled": True,
+                    "capabilities": ["image_generation"],
+                }
+            ]
+        },
+    )
+    generated_prompt = ""
+
+    def fake_openai_json_request(config, method, path, body=None, timeout=30):
+        nonlocal generated_prompt
+        assert path == "images/generations"
+        assert body["background"] == "transparent"
+        assert body["output_format"] == "png"
+        generated_prompt = body["prompt"]
+        import io
+        from PIL import Image
+
+        output = io.BytesIO()
+        Image.new("RGBA", (128, 128), (80, 180, 220, 255)).save(output, format="PNG")
+        return {"data": [{"b64_json": api_main.base64.b64encode(output.getvalue()).decode("ascii")}]}
+
+    monkeypatch.setattr(api_main, "_openai_json_request", fake_openai_json_request)
+
+    response = client.post(
+        "/api/map/image-layers/generate",
+        json={
+            "prompt": "一个三角形飞船",
+            "selection": {
+                "type": "polygon",
+                "points": [{"x": 20, "y": 20}, {"x": 160, "y": 60}, {"x": 60, "y": 180}],
+            },
+            "mode": "region",
+            "reference_background": False,
+            "provider_id": "model_remote_image",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "Create a native transparent PNG layer asset for the selected shape" in generated_prompt
+    assert "not a rectangular scene" in generated_prompt
+    assert "custom hand-drawn polygon" in generated_prompt
+    assert "Normalized polygon vertices" in generated_prompt
+
+
+def test_api_image_layer_generation_preserves_native_provider_alpha(monkeypatch):
+    client = TestClient(app)
+    api_main.runtime.world = api_main.GameWorld.default()
+    api_main.runtime.world.map.background_image = None
+    api_main.runtime.world.map.image_layers = []
+    client.patch(
+        "/api/models",
+        json={
+            "models": [
+                {
+                    "id": "model_remote_image",
+                    "name": "Remote image",
+                    "kind": "remote",
+                    "provider": "image-http",
+                    "base_url": "https://api.example.test/v1",
+                    "api_key": "image-secret",
+                    "model": "gpt-image-2",
+                    "enabled": True,
+                    "capabilities": ["image_generation"],
+                }
+            ]
+        },
+    )
+
+    def fake_openai_json_request(config, method, path, body=None, timeout=30):
+        assert body["background"] == "transparent"
+        import io
+        from PIL import Image, ImageDraw
+
+        output = io.BytesIO()
+        image = Image.new("RGBA", (128, 128), (255, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        draw.ellipse((48, 48, 80, 80), fill=(30, 160, 240, 255))
+        image.save(output, format="PNG")
+        return {"data": [{"b64_json": api_main.base64.b64encode(output.getvalue()).decode("ascii")}]}
+
+    monkeypatch.setattr(api_main, "_openai_json_request", fake_openai_json_request)
+
+    response = client.post(
+        "/api/map/image-layers/generate",
+        json={
+            "prompt": "一个原生态透明圆形能量核心",
+            "selection": {
+                "type": "polygon",
+                "points": [{"x": 0, "y": 0}, {"x": 128, "y": 0}, {"x": 128, "y": 128}, {"x": 0, "y": 128}],
+            },
+            "mode": "region",
+            "reference_background": False,
+            "provider_id": "model_remote_image",
+        },
+    )
+
+    assert response.status_code == 200
+    from PIL import Image
+
+    asset_name = response.json()["layer"]["image"].rsplit("/", 1)[-1]
+    saved = Image.open(api_main.store.assets_dir / asset_name).convert("RGBA")
+    assert saved.getpixel((8, 8))[3] == 0
+    assert saved.getpixel((64, 64))[3] == 255
+
+
+def test_api_image_layer_generation_retries_without_transparency_options_for_older_relays(monkeypatch):
+    client = TestClient(app)
+    api_main.runtime.world = api_main.GameWorld.default()
+    api_main.runtime.world.map.background_image = None
+    api_main.runtime.world.map.image_layers = []
+    client.patch(
+        "/api/models",
+        json={
+            "models": [
+                {
+                    "id": "model_remote_image",
+                    "name": "Remote image",
+                    "kind": "remote",
+                    "provider": "image-http",
+                    "base_url": "https://api.example.test/v1",
+                    "api_key": "image-secret",
+                    "model": "gpt-image-2",
+                    "enabled": True,
+                    "capabilities": ["image_generation"],
+                }
+            ]
+        },
+    )
+    bodies: list[dict[str, object]] = []
+
+    def fake_openai_json_request(config, method, path, body=None, timeout=30):
+        bodies.append(dict(body or {}))
+        if body and "background" in body:
+            raise api_main.RemoteProviderError("unknown parameter: background")
+        import io
+        from PIL import Image
+
+        output = io.BytesIO()
+        Image.new("RGBA", (64, 64), (40, 180, 90, 255)).save(output, format="PNG")
+        return {"data": [{"b64_json": api_main.base64.b64encode(output.getvalue()).decode("ascii")}]}
+
+    monkeypatch.setattr(api_main, "_openai_json_request", fake_openai_json_request)
+
+    response = client.post(
+        "/api/map/image-layers/generate",
+        json={
+            "prompt": "兼容旧中转站的透明图层",
+            "selection": {"type": "rect", "x": 10, "y": 10, "width": 64, "height": 64},
+            "mode": "region",
+            "reference_background": False,
+            "provider_id": "model_remote_image",
+        },
+    )
+
+    assert response.status_code == 200
+    assert bodies[0]["background"] == "transparent"
+    assert "background" not in bodies[1]
 
 
 def test_api_image_layer_generation_with_background_uses_edit_path(monkeypatch):
@@ -1243,6 +1426,7 @@ def test_api_llm_install_task_pulls_default_qwen_and_configures(monkeypatch):
     monkeypatch.setattr(api_main, "_wait_for_ollama_service", lambda timeout_seconds: True)
     monkeypatch.setattr(api_main, "_start_ollama_service", lambda executable: None)
     monkeypatch.setattr(api_main, "_detect_local_model_services", lambda: {})
+    monkeypatch.setattr(api_main, "_recommended_llm_model_for_device", lambda local_environment=None: "qwen2.5:1.5b")
     monkeypatch.setattr(
         api_main,
         "_detect_ollama_models",
@@ -1255,7 +1439,11 @@ def test_api_llm_install_task_pulls_default_qwen_and_configures(monkeypatch):
         return True
 
     monkeypatch.setattr(api_main, "_ollama_pull_model", fake_pull)
-    monkeypatch.setattr(api_main, "_start_llm_install_task", api_main._run_llm_install_task)
+    monkeypatch.setattr(
+        api_main,
+        "_start_llm_install_task",
+        lambda task_id, payload=None: api_main._run_llm_install_task(task_id, *api_main._selected_llm_install_models(payload)),
+    )
 
     response = client.post("/api/model-capabilities/llm/install-local")
     assert response.status_code == 200
@@ -1286,8 +1474,13 @@ def test_api_llm_install_task_uses_winget_when_ollama_missing(monkeypatch):
     monkeypatch.setattr(api_main, "_ensure_ollama_executable", fake_ensure)
     monkeypatch.setattr(api_main, "_wait_for_ollama_service", lambda timeout_seconds: True)
     monkeypatch.setattr(api_main, "_detect_ollama_models", lambda: [])
+    monkeypatch.setattr(api_main, "_recommended_llm_model_for_device", lambda local_environment=None: "qwen2.5:1.5b")
     monkeypatch.setattr(api_main, "_ollama_pull_model", lambda executable, model: True)
-    monkeypatch.setattr(api_main, "_start_llm_install_task", api_main._run_llm_install_task)
+    monkeypatch.setattr(
+        api_main,
+        "_start_llm_install_task",
+        lambda task_id, payload=None: api_main._run_llm_install_task(task_id, *api_main._selected_llm_install_models(payload)),
+    )
 
     response = client.post("/api/model-capabilities/llm/install-local")
     assert response.status_code == 200
@@ -1303,9 +1496,14 @@ def test_api_llm_install_task_surfaces_pull_failure(monkeypatch):
     monkeypatch.setattr(api_main, "_ensure_ollama_executable", lambda allow_install=True: "ollama")
     monkeypatch.setattr(api_main, "_wait_for_ollama_service", lambda timeout_seconds: True)
     monkeypatch.setattr(api_main, "_detect_ollama_models", lambda: [])
+    monkeypatch.setattr(api_main, "_recommended_llm_model_for_device", lambda local_environment=None: "qwen2.5:1.5b")
     monkeypatch.setattr(api_main, "_install_ollama_for_platform", lambda: False)
     monkeypatch.setattr(api_main, "_ollama_pull_model", lambda executable, model: False)
-    monkeypatch.setattr(api_main, "_start_llm_install_task", api_main._run_llm_install_task)
+    monkeypatch.setattr(
+        api_main,
+        "_start_llm_install_task",
+        lambda task_id, payload=None: api_main._run_llm_install_task(task_id, *api_main._selected_llm_install_models(payload)),
+    )
 
     response = client.post("/api/model-capabilities/llm/install-local")
     assert response.status_code == 200

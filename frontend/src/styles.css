@@ -1984,6 +1984,86 @@ textarea:focus {
   white-space: normal;
 }
 
+.local-model-list {
+  display: grid;
+  gap: 6px;
+  padding: 9px;
+  background: rgba(var(--material-rgb), 0.54);
+  border: 1px solid rgba(var(--grid-rgb), 0.2);
+  border-radius: 9px;
+}
+
+.local-model-list-heading {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.local-model-list-heading span {
+  font-size: 11px;
+  color: var(--label);
+}
+
+.local-model-list-heading small {
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  color: var(--soft-muted);
+}
+
+.local-model-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto minmax(54px, auto);
+  gap: 7px;
+  min-height: 38px;
+  align-items: center;
+  padding: 7px;
+  background: rgba(var(--panel-rgb), 0.5);
+  border: 1px solid rgba(var(--grid-rgb), 0.18);
+  border-radius: 8px;
+}
+
+.local-model-option.selected {
+  border-color: rgba(var(--grid-rgb), 0.42);
+}
+
+.local-model-option input {
+  width: 14px;
+  height: 14px;
+}
+
+.local-model-option span {
+  min-width: 0;
+}
+
+.local-model-option strong,
+.local-model-option small {
+  display: block;
+  overflow: hidden;
+  font-style: normal;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.local-model-option strong {
+  font-size: 11px;
+}
+
+.local-model-option small {
+  font-size: 10px;
+  color: var(--soft-muted);
+}
+
+.local-model-option em {
+  min-width: 34px;
+  font-style: normal;
+  font-size: 10px;
+  color: var(--ink);
+  text-align: center;
+}
+
 .model-setup-steps ol {
   display: grid;
   gap: 4px;

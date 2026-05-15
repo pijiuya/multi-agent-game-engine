@@ -1,6 +1,7 @@
 import { Bot, CheckCircle2, Cloud, ImagePlus, Layers3, RefreshCw, WandSparkles } from "lucide-react";
 import { useEffect, useState } from "react";
 import type {
+  LocalModelOption,
   ModelCapabilityId,
   ModelCapabilityStatus,
   ModelCapabilityTask,
@@ -21,8 +22,8 @@ type Props = {
   tasks: Partial<Record<ModelCapabilityId, ModelCapabilityTask>>;
   models: ModelConfig[];
   onRefresh: () => void;
-  onConfigureLocal: (capability: ModelCapabilityId) => void;
-  onInstallLocal: (capability: ModelCapabilityId) => void;
+  onConfigureLocal: (capability: ModelCapabilityId, selection?: { model?: string; models?: string[] }) => void;
+  onInstallLocal: (capability: ModelCapabilityId, selection?: { model?: string; models?: string[] }) => void;
   onConfigureRemote: (capability: ModelCapabilityId, draft: RemoteDraft) => void;
   onFetchRemoteModels: (capability: ModelCapabilityId, draft: RemoteDraft) => Promise<RemoteModelOption[]>;
   onTestRemote: (capability: ModelCapabilityId, draft: RemoteDraft) => Promise<RemoteModelTestResult>;
@@ -93,6 +94,7 @@ export function ModelManagerPanel({
   }));
   const [remoteModelOptions, setRemoteModelOptions] = useState<Partial<Record<ModelCapabilityId, RemoteModelOption[]>>>({});
   const [remoteStatus, setRemoteStatus] = useState<Partial<Record<ModelCapabilityId, { loading: boolean; message: string; ok: boolean | null }>>>({});
+  const [selectedLocalModels, setSelectedLocalModels] = useState<Partial<Record<ModelCapabilityId, string[]>>>({});
   const statusMap = new Map(statuses.map((status) => [status.id, status]));
 
   useEffect(() => {
@@ -113,6 +115,26 @@ export function ModelManagerPanel({
       return changed ? next : current;
     });
   }, [models]);
+
+  useEffect(() => {
+    setSelectedLocalModels((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const status of statuses) {
+        if (current[status.id]?.length || !status.local_options.length) {
+          continue;
+        }
+        const defaults = status.local_options
+          .filter((option) => option.selectedByDefault || option.recommended)
+          .map((option) => option.model);
+        if (defaults.length) {
+          next[status.id] = defaults;
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [statuses]);
 
   function updateRemoteDraft(capability: ModelCapabilityId, patch: Partial<RemoteDraft>) {
     setRemoteDrafts((current) => ({
@@ -209,9 +231,16 @@ export function ModelManagerPanel({
         onInstallLocal={onInstallLocal}
         onConfigureRemote={() => onConfigureRemote(activeCapability, remoteDrafts[activeCapability])}
         onLoadRemoteModels={() => void loadRemoteModels(activeCapability)}
+        onSelectLocalModel={(model, selected) => {
+          setSelectedLocalModels((current) => ({
+            ...current,
+            [activeCapability]: toggleLocalModel(current[activeCapability] ?? [], model, selected)
+          }));
+        }}
         onRefresh={onRefresh}
         onTestRemote={() => void testRemote(activeCapability)}
         task={tasks[activeCapability] ?? null}
+        selectedLocalModels={selectedLocalModels[activeCapability] ?? []}
         onToggleAdvanced={() => setAdvancedOpen((current) => ({ ...current, [activeCapability]: !current[activeCapability] }))}
         onUpdateDraft={(patch) => updateRemoteDraft(activeCapability, patch)}
         status={statusMap.get(activeCapability) ?? fallbackStatus(activeCapability)}
@@ -228,11 +257,13 @@ function CapabilityDetail({
   remoteStatus,
   advancedOpen,
   task,
+  selectedLocalModels,
   onRefresh,
   onConfigureLocal,
   onInstallLocal,
   onConfigureRemote,
   onLoadRemoteModels,
+  onSelectLocalModel,
   onTestRemote,
   onToggleAdvanced,
   onUpdateDraft
@@ -244,24 +275,29 @@ function CapabilityDetail({
   remoteStatus: { loading: boolean; message: string; ok: boolean | null } | null;
   advancedOpen: boolean;
   task: ModelCapabilityTask | null;
+  selectedLocalModels: string[];
   onRefresh: () => void;
-  onConfigureLocal: (capability: ModelCapabilityId) => void;
-  onInstallLocal: (capability: ModelCapabilityId) => void;
+  onConfigureLocal: (capability: ModelCapabilityId, selection?: { model?: string; models?: string[] }) => void;
+  onInstallLocal: (capability: ModelCapabilityId, selection?: { model?: string; models?: string[] }) => void;
   onConfigureRemote: () => void;
   onLoadRemoteModels: () => void;
+  onSelectLocalModel: (model: string, selected: boolean) => void;
   onTestRemote: () => void;
   onToggleAdvanced: () => void;
   onUpdateDraft: (patch: Partial<RemoteDraft>) => void;
 }) {
   const meta = CAPABILITY_META[capability];
-  const canUseLocal = Boolean(status.recommended_local);
-  const canInstallLocal = (capability === "llm" || capability === "segmentation") && status.installable;
+  const localSelection = localSelectionPayload(status, selectedLocalModels);
+  const selectedInstalledLocal = status.local_options.some((option) => selectedLocalModels.includes(option.model) && option.installed);
+  const hasSelectedInstallModels = capability !== "llm" || selectedLocalModels.length > 0 || !status.local_options.length;
+  const canUseLocal = Boolean(status.recommended_local) || selectedInstalledLocal;
+  const canInstallLocal = (capability === "llm" || capability === "segmentation") && status.installable && hasSelectedInstallModels;
   const isInstalling = task?.status === "running";
   const isReady = status.status === "ready";
   const actionLabel = isInstalling
     ? `安装中 ${task.progress}%`
     : canInstallLocal
-      ? installActionLabel(capability)
+      ? installActionLabel(capability, selectedLocalModels.length, localSelection?.model ?? "")
       : isReady
         ? readyActionLabel(capability)
         : meta.localLabel;
@@ -282,6 +318,20 @@ function CapabilityDetail({
           <strong>{status.recommended_local.name}</strong>
           <small>{status.recommended_local.model || status.recommended_local.provider}</small>
         </div>
+      ) : null}
+      {capability === "llm" && status.device_recommendation ? (
+        <div className="model-dialogue-row">
+          <span>本机推荐</span>
+          <strong>{status.device_recommendation.name} · {status.device_recommendation.model}</strong>
+          <small>{status.device_recommendation.reason}</small>
+        </div>
+      ) : null}
+      {capability === "llm" && status.local_options.length ? (
+        <LocalModelList
+          options={status.local_options}
+          selectedModels={selectedLocalModels}
+          onSelect={onSelectLocalModel}
+        />
       ) : null}
       {status.suggestions.map((suggestion) => (
         <div className="model-suggestion" key={suggestion}>{suggestion}</div>
@@ -308,7 +358,7 @@ function CapabilityDetail({
         <button
           className="panel-action-button"
           disabled={isInstalling || (!canUseLocal && !canInstallLocal)}
-          onClick={() => (canInstallLocal ? onInstallLocal(capability) : onConfigureLocal(capability))}
+          onClick={() => (canInstallLocal ? onInstallLocal(capability, localSelection) : onConfigureLocal(capability, localSelection))}
           title={isReady ? "重新确认当前本地模型配置，并在这里显示结果" : undefined}
           type="button"
         >
@@ -410,14 +460,72 @@ function readyActionLabel(capability: ModelCapabilityId) {
   return "重新启用本地模型";
 }
 
-function installActionLabel(capability: ModelCapabilityId) {
+function installActionLabel(capability: ModelCapabilityId, selectedCount = 0, primaryModel = "") {
   if (capability === "llm") {
-    return "下载并启用 qwen2.5:7b";
+    if (selectedCount > 1) {
+      return `下载并启用 ${selectedCount} 个本地模型`;
+    }
+    return primaryModel ? `下载并启用 ${primaryModel}` : "下载并启用本地 LLM";
   }
   if (capability === "segmentation") {
     return "安装并启用内置 SAM";
   }
   return "安装并启用本地模型";
+}
+
+function LocalModelList({
+  options,
+  selectedModels,
+  onSelect
+}: {
+  options: LocalModelOption[];
+  selectedModels: string[];
+  onSelect: (model: string, selected: boolean) => void;
+}) {
+  return (
+    <div className="local-model-list" data-testid="local-model-list-llm">
+      <div className="local-model-list-heading">
+        <span>本地模型尺寸</span>
+        <small>可多选下载；推荐项会作为主模型启用</small>
+      </div>
+      {options.map((option) => {
+        const selected = selectedModels.includes(option.model);
+        return (
+          <label className={selected ? "local-model-option selected" : "local-model-option"} key={option.id}>
+            <input
+              checked={selected}
+              onChange={(event) => onSelect(option.model, event.currentTarget.checked)}
+              type="checkbox"
+            />
+            <span>
+              <strong>{option.name}</strong>
+              <small>{option.model}</small>
+            </span>
+            <em>{option.sizeLabel}</em>
+            <small>{option.installed ? "已安装" : option.reason || "可安装"}</small>
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
+function toggleLocalModel(current: string[], model: string, selected: boolean) {
+  if (selected) {
+    return current.includes(model) ? current : [...current, model];
+  }
+  return current.filter((item) => item !== model);
+}
+
+function localSelectionPayload(status: ModelCapabilityStatus, selectedModels: string[]) {
+  if (status.id !== "llm") {
+    return undefined;
+  }
+  const recommended = status.local_options.find((option) => option.recommended && selectedModels.includes(option.model));
+  const installed = status.local_options.find((option) => option.installed && selectedModels.includes(option.model));
+  const primary = recommended?.model ?? installed?.model ?? selectedModels[0] ?? status.device_recommendation?.model ?? status.recommended_local?.model ?? "";
+  const models = selectedModels.length ? selectedModels : primary ? [primary] : [];
+  return { model: primary, models };
 }
 
 function defaultRemoteDraft(capability: ModelCapabilityId, models: ModelConfig[]): RemoteDraft {
@@ -442,6 +550,8 @@ function fallbackStatus(capability: ModelCapabilityId): ModelCapabilityStatus {
     local_available: false,
     installable: capability === "llm" || capability === "segmentation",
     recommended_local: null,
+    local_options: [],
+    device_recommendation: null,
     suggestions: [
       capability === "llm"
         ? "点击一键安装并启用本地 LLM；默认会准备 qwen2.5:7b。"

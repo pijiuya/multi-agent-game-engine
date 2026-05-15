@@ -198,6 +198,37 @@ class MapImageLayer:
         )
 
 
+def normalize_item_affordances(data: Any) -> list[dict[str, Any]]:
+    if not isinstance(data, list):
+        return []
+    affordances: list[dict[str, Any]] = []
+    for raw in data:
+        if not isinstance(raw, dict):
+            continue
+        action = str(raw.get("action") or "").strip()
+        if action not in {"interact", "use"}:
+            continue
+        affordance: dict[str, Any] = {
+            "action": action,
+            "enabled": bool(raw.get("enabled", True)),
+        }
+        for key in ("label", "event_message", "status"):
+            value = raw.get(key)
+            if isinstance(value, str) and value.strip():
+                affordance[key] = value.strip()
+        if "range" in raw:
+            try:
+                affordance["range"] = max(1.0, float(raw["range"]))
+            except (TypeError, ValueError):
+                pass
+        for key in ("required_item_state", "set_item_state"):
+            value = raw.get(key)
+            if isinstance(value, dict):
+                affordance[key] = dict(value)
+        affordances.append(affordance)
+    return affordances
+
+
 @dataclass(slots=True)
 class WorldItem:
     id: str
@@ -212,6 +243,8 @@ class WorldItem:
     state: dict[str, Any] = field(default_factory=dict)
     hidden: bool = False
     movable: bool = True
+    interactable: bool = True
+    affordances: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -227,6 +260,8 @@ class WorldItem:
             "state": self.state,
             "hidden": self.hidden,
             "movable": self.movable,
+            "interactable": self.interactable,
+            "affordances": normalize_item_affordances(self.affordances),
         }
 
     @classmethod
@@ -244,6 +279,8 @@ class WorldItem:
             state=dict(data.get("state", {})),
             hidden=bool(data.get("hidden", False)),
             movable=bool(data.get("movable", True)),
+            interactable=bool(data.get("interactable", True)),
+            affordances=normalize_item_affordances(data.get("affordances")),
         )
 
 

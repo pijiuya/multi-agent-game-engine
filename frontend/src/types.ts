@@ -71,6 +71,19 @@ export type WorldItem = {
   state: Record<string, unknown>;
   hidden: boolean;
   movable: boolean;
+  interactable: boolean;
+  affordances: WorldItemAffordance[];
+};
+
+export type WorldItemAffordance = {
+  action: "interact" | "use";
+  label?: string;
+  range?: number;
+  enabled?: boolean;
+  required_item_state?: Record<string, unknown>;
+  set_item_state?: Record<string, unknown>;
+  event_message?: string;
+  status?: string;
 };
 
 export type WorldMap = {
@@ -314,7 +327,31 @@ export type ModelCapabilityStatus = {
   local_available: boolean;
   installable: boolean;
   recommended_local: ModelConfig | null;
+  local_options: LocalModelOption[];
+  device_recommendation: LocalDeviceRecommendation | null;
   suggestions: string[];
+};
+
+export type LocalModelOption = {
+  id: string;
+  name: string;
+  model: string;
+  sizeLabel: string;
+  memoryGb: number | null;
+  diskGb: number | null;
+  description: string;
+  installed: boolean;
+  recommended: boolean;
+  selectedByDefault: boolean;
+  reason: string;
+};
+
+export type LocalDeviceRecommendation = {
+  model: string;
+  name: string;
+  sizeLabel: string;
+  reason: string;
+  pythonRequired: boolean;
 };
 
 export type ModelCapabilityTask = {

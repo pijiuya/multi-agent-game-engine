@@ -4,7 +4,7 @@ from time import perf_counter
 from agent_engine.engine.geometry import distance
 from agent_engine.engine.simulation import SimulationRuntime
 from agent_engine.engine.scene_director import SceneDirectorRequest, SceneDirectorResponse
-from agent_engine.engine.world import AgentAction, GameWorld, Memory, Point, Relationship, WorldItem
+from agent_engine.engine.world import AgentAction, GameWorld, MapRegion, Memory, Point, Relationship, WorldItem
 from agent_engine.models.provider import ModelProvider, ModelRequest, ModelResponse
 
 
@@ -171,6 +171,8 @@ def test_observation_includes_llm_action_context():
             name="Lamp",
             position=Point(250, 225),
             movable=True,
+            interactable=True,
+            affordances=[{"action": "use", "label": "Light", "range": 120}],
         )
     )
     runtime = SimulationRuntime(world)
@@ -193,6 +195,8 @@ def test_observation_includes_llm_action_context():
     assert observation["map"]["width"] == world.map.width
     assert observation["nearby_items"][0]["id"] == "item_lamp"
     assert observation["nearby_items"][0]["movable"] is True
+    assert observation["nearby_items"][0]["interactable"] is True
+    assert observation["nearby_items"][0]["available_affordances"][0]["action"] == "use"
     assert observation["movement_targets"]
     assert all("point" in target for target in observation["movement_targets"])
     assert observation["narrative_state"] == {"focus": "lamp"}
@@ -208,6 +212,38 @@ def test_observation_includes_llm_action_context():
     assert observation["conversation_focus"]["nearby_agents"]
     assert observation["effective_dialogue_language"] == "en-US"
     assert observation["movement_constraints"]["agent_min_center_distance"] == runtime.rule_engine.agent_min_center_distance
+
+
+def test_social_region_dialogue_range_matches_observation_and_rules():
+    world = GameWorld.default()
+    world.agent_states["agent_mira"].position = Point(240, 220)
+    world.agent_states["agent_tao"].position = Point(450, 220)
+    world.agent_profiles["agent_ren"].hidden = True
+    world.map.regions = [
+        MapRegion(
+            id="region_social",
+            name="Long Table",
+            function="social",
+            points=[Point(200, 180), Point(280, 180), Point(280, 260), Point(200, 260)],
+        )
+    ]
+    world.map.sync_functional_regions()
+    runtime = SimulationRuntime(world)
+
+    observation = runtime._observation_for("agent_mira")
+    result = runtime.submit_action(
+        AgentAction(
+            agent_id="agent_mira",
+            type="social",
+            payload={"target_agent_id": "agent_tao", "text": "Can you hear me from there?"},
+        )
+    )
+
+    assert observation["dialogue_range"]["base"] == 180.0
+    assert observation["dialogue_range"]["social_region_bonus"] == runtime.rule_engine.social_region_dialogue_bonus
+    assert observation["dialogue_range"]["effective"] == 260.0
+    assert observation["dialogue_candidates"][0]["id"] == "agent_tao"
+    assert result["ok"] is True
 
 
 def test_movement_targets_and_motion_keep_agent_centers_apart():
@@ -282,6 +318,28 @@ def test_model_actions_are_coerced_from_observation_context():
     assert move == {"type": "move_to", "payload": {"target": {"x": 360, "y": 220}}}
     assert pickup == {"type": "pick_up", "payload": {"item_id": "item_lamp"}}
     assert wait_as_move == {"type": "move_to", "payload": {"target": {"x": 360, "y": 220}}}
+
+
+def test_model_interact_and_use_prefer_available_affordance_items():
+    runtime = SimulationRuntime(GameWorld.default())
+    request = ModelRequest(
+        agent_id="agent_mira",
+        role="mediator",
+        identity="test identity",
+        action_space=["interact", "use", "wait"],
+        observation={
+            "nearby_items": [
+                {"id": "item_plain", "interactable": True, "available_affordances": []},
+                {"id": "item_switch", "interactable": True, "available_affordances": [{"action": "use", "label": "Switch"}]},
+            ],
+        },
+    )
+
+    use_action = runtime._coerce_model_action({"type": "use", "payload": {}}, "", request)
+    interact_action = runtime._coerce_model_action({"type": "interact", "payload": {}}, "", request)
+
+    assert use_action == {"type": "use", "payload": {"target_id": "item_switch"}}
+    assert interact_action == {"type": "interact", "payload": {"target_id": "item_plain"}}
 
 
 def test_social_action_updates_relationship():

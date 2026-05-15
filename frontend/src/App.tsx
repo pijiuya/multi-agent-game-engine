@@ -1008,7 +1008,7 @@ export default function App() {
     }
   }
 
-  async function configureLocalModelCapability(capability: ModelCapabilityId) {
+  async function configureLocalModelCapability(capability: ModelCapabilityId, selection?: { model?: string; models?: string[] }) {
     const optimisticTask: ModelCapabilityTask = {
       id: makeId("local_model_task"),
       capability,
@@ -1021,7 +1021,7 @@ export default function App() {
     };
     setModelCapabilityTasks((current) => ({ ...current, [capability]: optimisticTask }));
     setStatus(optimisticTask.message);
-    const result = await configureLocalCapability(capability);
+    const result = await configureLocalCapability(capability, selection);
     if (result) {
       setModels(result.models);
       setModelCapabilityStatuses((current) => mergeCapabilityStatus(current, result.capability));
@@ -1120,7 +1120,8 @@ export default function App() {
     return result;
   }
 
-  async function installLocalModelCapability(capability: ModelCapabilityId) {
+  async function installLocalModelCapability(capability: ModelCapabilityId, selection?: { model?: string; models?: string[] }) {
+    const selectedCount = selection?.models?.length ?? 0;
     const optimisticTask: ModelCapabilityTask = {
       id: makeId("local_model_task"),
       capability,
@@ -1128,12 +1129,14 @@ export default function App() {
       status: "running",
       stage: "connecting",
       progress: 4,
-      message: capability === "llm" ? "正在连接 Ollama 并准备本地 LLM" : "正在连接本机引擎并启动安装",
+      message: capability === "llm"
+        ? `正在连接 Ollama 并准备本地 LLM${selectedCount > 1 ? `（${selectedCount} 个尺寸）` : ""}`
+        : "正在连接本机引擎并启动安装",
       error: null
     };
     setModelCapabilityTasks((current) => ({ ...current, [capability]: optimisticTask }));
     setStatus(capability === "llm" ? "正在准备本地 LLM" : "正在启动内置模型安装");
-    const result = await installLocalCapability(capability);
+    const result = await installLocalCapability(capability, selection);
     if (!result) {
       setModelCapabilityTasks((current) => ({
         ...current,
@@ -1597,8 +1600,8 @@ export default function App() {
               statuses={modelCapabilityStatuses}
               tasks={modelCapabilityTasks}
               onRefresh={() => void refreshModelCapabilities()}
-              onConfigureLocal={(capability) => void configureLocalModelCapability(capability)}
-              onInstallLocal={(capability) => void installLocalModelCapability(capability)}
+              onConfigureLocal={(capability, selection) => void configureLocalModelCapability(capability, selection)}
+              onInstallLocal={(capability, selection) => void installLocalModelCapability(capability, selection)}
               onConfigureRemote={(capability, draft) => void configureRemoteModelCapability(capability, draft)}
               onFetchRemoteModels={loadRemoteModelsForCapability}
               onTestRemote={testRemoteModelCapability}

@@ -88,6 +88,8 @@ def test_world_loads_agent_event_and_item_defaults():
     world = GameWorld.from_dict(GameWorld.default().to_dict())
     item = WorldItem.from_dict({"id": "legacy", "name": "Legacy", "position": {"x": 1, "y": 2}})
     assert item.movable is True
+    assert item.interactable is True
+    assert item.affordances == []
     profile = world.agent_profiles["agent_mira"]
     state = world.agent_states["agent_mira"]
     assert profile.animation is None

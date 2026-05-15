@@ -47,6 +47,7 @@ from agent_engine.engine.world import (
     normalize_action_space,
     normalize_agent_animation,
     normalize_dialogue_policy,
+    normalize_item_affordances,
     normalize_narrative_config,
 )
 from agent_engine.models.provider import MockProvider, OllamaProvider, OpenAICompatibleProvider
@@ -161,6 +162,8 @@ class WorldItemPatch(BaseModel):
     state: dict[str, Any] | None = None
     hidden: bool | None = None
     movable: bool | None = None
+    interactable: bool | None = None
+    affordances: list[dict[str, Any]] | None = None
 
 
 class ModelConfigPayload(BaseModel):
@@ -194,6 +197,11 @@ class CapabilityConfigurePayload(BaseModel):
     base_url: str = ""
     api_key: str = ""
     model: str = ""
+
+
+class LocalCapabilityPayload(BaseModel):
+    model: str = ""
+    models: list[str] = Field(default_factory=list)
 
 
 class RemoteModelOption(BaseModel):
@@ -293,7 +301,55 @@ LLM_DEFAULT_MODEL = "qwen2.5:7b"
 LLM_SMALL_MODEL = "qwen2.5:1.5b"
 LLM_VISION_MODEL = "qwen2.5vl:3b"
 LLM_REALTIME_MODEL = os.getenv("AGENT_ENGINE_REALTIME_LLM_MODEL", LLM_SMALL_MODEL)
-LLM_PREFERRED_MODELS = list(dict.fromkeys([LLM_REALTIME_MODEL, LLM_DEFAULT_MODEL, LLM_SMALL_MODEL, "gemma3:1b"]))
+LLM_LOCAL_MODEL_OPTIONS = [
+    {
+        "id": "gemma3_1b",
+        "name": "轻量 1B",
+        "model": "gemma3:1b",
+        "size_label": "1B",
+        "memory_gb": 6,
+        "disk_gb": 1.2,
+        "description": "低内存设备和快速烟测优先，响应轻但推理能力有限。",
+    },
+    {
+        "id": "qwen25_15b",
+        "name": "实时 1.5B",
+        "model": LLM_SMALL_MODEL,
+        "size_label": "1.5B",
+        "memory_gb": 8,
+        "disk_gb": 1.5,
+        "description": "适合多 agent 实时互动，也会作为上下文压缩小模型使用。",
+    },
+    {
+        "id": "qwen25_3b",
+        "name": "均衡 3B",
+        "model": "qwen2.5:3b",
+        "size_label": "3B",
+        "memory_gb": 12,
+        "disk_gb": 2.5,
+        "description": "比 1.5B 更稳，仍适合普通笔记本长时间运行。",
+    },
+    {
+        "id": "qwen25_7b",
+        "name": "推荐 7B",
+        "model": LLM_DEFAULT_MODEL,
+        "size_label": "7B",
+        "memory_gb": 16,
+        "disk_gb": 5.0,
+        "description": "剧情表达、行动规划和稳定性更好，是多数新机器的首选。",
+    },
+    {
+        "id": "qwen25_14b",
+        "name": "高质量 14B",
+        "model": "qwen2.5:14b",
+        "size_label": "14B",
+        "memory_gb": 32,
+        "disk_gb": 9.0,
+        "description": "适合高内存工作站，质量更高但并发和延迟压力明显增加。",
+    },
+]
+LLM_KNOWN_LOCAL_MODELS = [str(option["model"]) for option in LLM_LOCAL_MODEL_OPTIONS]
+LLM_PREFERRED_MODELS = list(dict.fromkeys([LLM_REALTIME_MODEL, LLM_DEFAULT_MODEL, LLM_SMALL_MODEL, "gemma3:1b", *LLM_KNOWN_LOCAL_MODELS]))
 OPENAI_IMAGE_PROVIDERS = {"image-http", "local-http-image", "openai-compatible"}
 IMAGE_MODEL_KEYWORDS = ("gpt-image", "image", "dall-e", "dalle", "flux", "sdxl", "stable-diffusion", "imagen")
 NON_LLM_MODEL_KEYWORDS = (
@@ -465,11 +521,12 @@ def model_capabilities_status() -> dict[str, Any]:
     configs = store.load_model_configs()
     ollama_models = _detect_ollama_models()
     local_services = _detect_local_model_services()
+    local_environment = _local_runtime_environment()
     return {
         "capabilities": [
-            _capability_status("llm", configs, ollama_models, local_services),
-            _capability_status("image_generation", configs, ollama_models, local_services),
-            _capability_status("segmentation", configs, ollama_models, local_services),
+            _capability_status("llm", configs, ollama_models, local_services, local_environment),
+            _capability_status("image_generation", configs, ollama_models, local_services, local_environment),
+            _capability_status("segmentation", configs, ollama_models, local_services, local_environment),
         ],
         "environment": {
             "ollama": {
@@ -479,6 +536,7 @@ def model_capabilities_status() -> dict[str, Any]:
             "local_services": local_services,
             "docker": shutil.which("docker") is not None,
             "nvidia": shutil.which("nvidia-smi") is not None,
+            "python": local_environment["python"],
         },
     }
 
@@ -528,11 +586,12 @@ def local_llm_mac_diagnostics() -> dict[str, Any]:
 
 
 @app.post("/api/model-capabilities/{capability}/configure-local")
-def configure_local_capability(capability: str) -> dict[str, Any]:
+def configure_local_capability(capability: str, payload: LocalCapabilityPayload | None = None) -> dict[str, Any]:
     configs = store.load_model_configs()
     ollama_models = _detect_ollama_models()
     local_services = _detect_local_model_services()
-    recommendation = _recommended_local_config(capability, ollama_models, local_services)
+    requested_model = _selected_primary_local_model(payload)
+    recommendation = _recommended_local_config(capability, ollama_models, local_services, requested_model=requested_model)
     if recommendation is None:
         raise HTTPException(status_code=400, detail=_missing_capability_message(capability))
     next_configs = _upsert_model_config(configs, recommendation)
@@ -545,15 +604,15 @@ def configure_local_capability(capability: str) -> dict[str, Any]:
     _sync_runtime_model_providers()
     return {
         "models": [_public_model_config(config) for config in next_configs],
-        "capability": _capability_status(capability, next_configs, ollama_models, local_services),
+        "capability": _capability_status(capability, next_configs, ollama_models, local_services, _local_runtime_environment()),
     }
 
 
 @app.post("/api/model-capabilities/{capability}/install-local")
-def install_local_capability(capability: str) -> dict[str, Any]:
+def install_local_capability(capability: str, payload: LocalCapabilityPayload | None = None) -> dict[str, Any]:
     if capability == "llm":
         task = _create_capability_task(capability, title="安装并启用本地 LLM")
-        _start_llm_install_task(task["id"])
+        _start_llm_install_task(task["id"], payload)
         return {"task": task}
     if capability != "segmentation":
         raise HTTPException(status_code=400, detail="当前只有 SAM 分层支持内置安装")
@@ -594,7 +653,7 @@ def configure_remote_capability(capability: str, payload: CapabilityConfigurePay
     _sync_runtime_model_providers()
     return {
         "models": [_public_model_config(item) for item in configs],
-        "capability": _capability_status(capability, configs, _detect_ollama_models(), _detect_local_model_services()),
+        "capability": _capability_status(capability, configs, _detect_ollama_models(), _detect_local_model_services(), _local_runtime_environment()),
     }
 
 
@@ -1095,6 +1154,8 @@ def patch_item(item_id: str, payload: WorldItemPatch) -> dict[str, Any]:
     data = _payload_data(payload)
     if "position" in data:
         item.position = Point.from_dict(data.pop("position"))
+    if "affordances" in data:
+        data["affordances"] = normalize_item_affordances(data["affordances"])
     for field_name, value in data.items():
         setattr(item, field_name, value)
     store.save_world(runtime.world)
@@ -1565,10 +1626,15 @@ def _capability_status(
     configs: list[dict[str, Any]],
     ollama_models: list[str],
     local_services: dict[str, dict[str, Any]],
+    local_environment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    local_environment = local_environment or _local_runtime_environment()
     configured = _configured_model_for_capability(configs, capability)
     mock_config = _mock_model_for_capability(configs, capability)
     recommendation = _recommended_local_config(capability, ollama_models, local_services)
+    default_local_model = str(recommendation.get("model") or "") if recommendation else None
+    local_options = _local_model_options_for_capability(capability, ollama_models, local_environment, default_model=default_local_model)
+    device_recommendation = _device_recommendation_for_capability(capability, local_environment)
     label = {
         "llm": "语言模型 LLM",
         "image_generation": "图片生成",
@@ -1593,7 +1659,8 @@ def _capability_status(
         summary = f"检测到可用本地方案：{recommendation['name']}"
     elif capability == "llm":
         status = "installable"
-        summary = f"可安装并启用本地 LLM：默认下载 {LLM_REALTIME_MODEL}"
+        recommended_model = str((device_recommendation or {}).get("model") or LLM_REALTIME_MODEL)
+        summary = f"可安装并启用本地 LLM：推荐下载 {recommended_model}"
     elif mock_config:
         status = "mock_only"
         summary = "当前只有测试 Mock，不能当作真实模型能力"
@@ -1617,6 +1684,8 @@ def _capability_status(
         "configured_model_name": configured.get("name") if configured else None,
         "local_available": recommendation is not None,
         "recommended_local": _public_model_config(recommendation) if recommendation else None,
+        "local_options": local_options,
+        "device_recommendation": device_recommendation,
         "installable": (
             (
                 capability == "llm"
@@ -1679,9 +1748,15 @@ def _recommended_local_config(
     capability: str,
     ollama_models: list[str],
     local_services: dict[str, dict[str, Any]],
+    *,
+    requested_model: str | None = None,
 ) -> dict[str, Any] | None:
     if capability == "llm":
-        model = _preferred_model(ollama_models, LLM_PREFERRED_MODELS)
+        installed = set(ollama_models)
+        if requested_model and requested_model in installed and _is_allowed_local_llm_model(requested_model):
+            model = requested_model
+        else:
+            model = _recommended_installed_llm_model(ollama_models)
         if not model:
             return None
         return _local_llm_config(model)
@@ -2088,14 +2163,16 @@ def _set_capability_task(
             task["error"] = error
 
 
-def _start_llm_install_task(task_id: str) -> None:
-    thread = threading.Thread(target=_run_llm_install_task, args=(task_id,), daemon=True)
+def _start_llm_install_task(task_id: str, payload: LocalCapabilityPayload | None = None) -> None:
+    selected_models, primary_model = _selected_llm_install_models(payload)
+    thread = threading.Thread(target=_run_llm_install_task, args=(task_id, selected_models, primary_model), daemon=True)
     thread.start()
 
 
-def _run_llm_install_task(task_id: str) -> None:
+def _run_llm_install_task(task_id: str, selected_models: list[str], primary_model: str) -> None:
     try:
-        _set_capability_task(task_id, stage="checking", progress=8, message="检查 Ollama")
+        model_count = len(selected_models)
+        _set_capability_task(task_id, stage="checking", progress=8, message="检查 Ollama；LLM 安装不需要系统 Python")
         if shutil.which("ollama") is None:
             _set_capability_task(task_id, stage="install_ollama", progress=12, message="尝试安装 Ollama")
         executable = _ensure_ollama_executable()
@@ -2108,10 +2185,12 @@ def _run_llm_install_task(task_id: str) -> None:
 
         _set_capability_task(task_id, stage="checking", progress=42, message="检查已安装的 Ollama 模型")
         ollama_models = _detect_ollama_models()
-        model = _preferred_model(ollama_models, LLM_PREFERRED_MODELS)
-        if not model:
-            model = LLM_REALTIME_MODEL
-            _set_capability_task(task_id, stage="pull_model", progress=50, message=f"下载 {model}")
+        installed = set(ollama_models)
+        for index, model in enumerate(selected_models):
+            if model in installed:
+                continue
+            progress = 48 + int((index / max(1, model_count)) * 30)
+            _set_capability_task(task_id, stage="pull_model", progress=progress, message=f"下载本地 LLM {index + 1}/{model_count}：{model}")
             if not _ollama_pull_model(executable, model):
                 _set_capability_task(task_id, stage="install_ollama", progress=55, message="尝试安装或修复 Ollama")
                 if _install_ollama_for_platform():
@@ -2122,7 +2201,9 @@ def _run_llm_install_task(task_id: str) -> None:
                 if not _ollama_pull_model(executable, model):
                     raise RuntimeError(f"Ollama 下载 {model} 失败，请检查网络或手动运行 ollama pull {model}。")
             ollama_models = _detect_ollama_models()
-        if model == LLM_DEFAULT_MODEL and LLM_SMALL_MODEL not in set(ollama_models):
+            installed = set(ollama_models)
+        model = primary_model if primary_model in installed else _recommended_installed_llm_model(ollama_models) or primary_model
+        if model != LLM_SMALL_MODEL and LLM_SMALL_MODEL not in set(ollama_models):
             _set_capability_task(task_id, stage="pull_small_model", progress=76, message=f"准备上下文压缩小模型：{LLM_SMALL_MODEL}")
             _ollama_pull_model(executable, LLM_SMALL_MODEL)
             ollama_models = _detect_ollama_models()
@@ -2586,6 +2667,160 @@ def _detect_local_model_services() -> dict[str, dict[str, Any]]:
     }
 
 
+def _local_runtime_environment() -> dict[str, Any]:
+    total_memory = _total_memory_bytes()
+    return {
+        "platform": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+        },
+        "memory_total_bytes": total_memory,
+        "memory_total_gb": round(total_memory / (1024**3), 1) if total_memory else None,
+        "cpu_count": os.cpu_count() or _sysctl_int("hw.ncpu"),
+        "chip": _sysctl_text("machdep.cpu.brand_string") if sys.platform == "darwin" else platform.processor(),
+        "python": {
+            "required_for_llm_install": False,
+            "bundled_runtime": bool(getattr(sys, "frozen", False)),
+            "executable": sys.executable,
+            "version": platform.python_version(),
+            "note": "桌面版使用内置后端运行一键 LLM 安装；用户电脑不需要预装 Python。",
+        },
+    }
+
+
+def _total_memory_bytes() -> int | None:
+    if sys.platform == "darwin":
+        value = _sysctl_int("hw.memsize")
+        if value:
+            return value
+    if hasattr(os, "sysconf"):
+        try:
+            pages = int(os.sysconf("SC_PHYS_PAGES"))
+            page_size = int(os.sysconf("SC_PAGE_SIZE"))
+            return pages * page_size
+        except (OSError, ValueError):
+            return None
+    return None
+
+
+def _local_model_options_for_capability(
+    capability: str,
+    ollama_models: list[str],
+    local_environment: dict[str, Any],
+    *,
+    default_model: str | None = None,
+) -> list[dict[str, Any]]:
+    if capability != "llm":
+        return []
+    installed = set(ollama_models)
+    recommended_model = _recommended_llm_model_for_device(local_environment)
+    selected_model = default_model or recommended_model
+    return [
+        {
+            **option,
+            "installed": str(option["model"]) in installed,
+            "recommended": str(option["model"]) == recommended_model,
+            "selected_by_default": str(option["model"]) == selected_model,
+            "reason": _llm_option_reason(option, local_environment, recommended_model),
+        }
+        for option in LLM_LOCAL_MODEL_OPTIONS
+    ]
+
+
+def _device_recommendation_for_capability(capability: str, local_environment: dict[str, Any]) -> dict[str, Any] | None:
+    if capability != "llm":
+        return None
+    recommended_model = _recommended_llm_model_for_device(local_environment)
+    option = next((item for item in LLM_LOCAL_MODEL_OPTIONS if item["model"] == recommended_model), LLM_LOCAL_MODEL_OPTIONS[1])
+    memory_gb = local_environment.get("memory_total_gb")
+    if memory_gb is None:
+        reason = f"无法读取内存容量，先推荐 {option['size_label']} 作为稳妥默认。"
+    else:
+        reason = f"检测到约 {memory_gb}GB 内存，推荐 {option['size_label']} 作为质量和实时性的平衡点。"
+    return {
+        "model": option["model"],
+        "name": option["name"],
+        "size_label": option["size_label"],
+        "reason": reason,
+        "python_required": False,
+    }
+
+
+def _recommended_llm_model_for_device(local_environment: dict[str, Any] | None = None) -> str:
+    memory_gb = (local_environment or _local_runtime_environment()).get("memory_total_gb")
+    try:
+        memory_value = float(memory_gb)
+    except (TypeError, ValueError):
+        memory_value = 0.0
+    if memory_value >= 48:
+        return "qwen2.5:14b"
+    if memory_value >= 24:
+        return LLM_DEFAULT_MODEL
+    if memory_value >= 16:
+        return "qwen2.5:3b"
+    if memory_value >= 8:
+        return LLM_SMALL_MODEL
+    return "gemma3:1b"
+
+
+def _recommended_installed_llm_model(ollama_models: list[str]) -> str | None:
+    installed = [model for model in ollama_models if _is_allowed_local_llm_model(model)]
+    if not installed:
+        return _preferred_model(ollama_models, LLM_PREFERRED_MODELS)
+    recommended = _recommended_llm_model_for_device()
+    if recommended in installed:
+        return recommended
+    target_index = LLM_KNOWN_LOCAL_MODELS.index(recommended) if recommended in LLM_KNOWN_LOCAL_MODELS else len(LLM_KNOWN_LOCAL_MODELS) - 1
+    for model in reversed(LLM_KNOWN_LOCAL_MODELS[: target_index + 1]):
+        if model in installed:
+            return model
+    return _preferred_model(installed, LLM_KNOWN_LOCAL_MODELS)
+
+
+def _llm_option_reason(option: dict[str, Any], local_environment: dict[str, Any], recommended_model: str) -> str:
+    if option["model"] == recommended_model:
+        return "本机推荐"
+    memory_gb = local_environment.get("memory_total_gb")
+    if memory_gb is not None and float(option["memory_gb"]) > float(memory_gb):
+        return "可能超过本机舒适内存"
+    return "可选安装"
+
+
+def _selected_primary_local_model(payload: LocalCapabilityPayload | None) -> str | None:
+    if payload is None:
+        return None
+    model = str(payload.model or "").strip()
+    if model:
+        return model
+    for candidate in payload.models:
+        model = str(candidate or "").strip()
+        if model:
+            return model
+    return None
+
+
+def _selected_llm_install_models(payload: LocalCapabilityPayload | None) -> tuple[list[str], str]:
+    requested = []
+    if payload is not None:
+        requested = [str(model or "").strip() for model in payload.models]
+        if payload.model:
+            requested.insert(0, str(payload.model).strip())
+    models = [model for model in dict.fromkeys(requested) if _is_allowed_local_llm_model(model)]
+    if not models:
+        models = [_recommended_llm_model_for_device()]
+    primary = str(payload.model or "").strip() if payload and payload.model else models[0]
+    if not _is_allowed_local_llm_model(primary):
+        primary = models[0]
+    if primary not in models:
+        models.insert(0, primary)
+    return models, primary
+
+
+def _is_allowed_local_llm_model(model: str) -> bool:
+    return model in set(LLM_KNOWN_LOCAL_MODELS)
+
+
 def _http_endpoint_reachable(url: str) -> bool:
     try:
         request = urlrequest.Request(url, method="GET")
@@ -2612,8 +2847,12 @@ def _capability_suggestions(
 ) -> list[str]:
     if capability == "llm":
         if ollama_models:
-            return ["可以直接使用已安装的 Ollama 模型。"]
-        return [f"点击一键安装并启用本地 LLM；默认会准备实时模型 {LLM_REALTIME_MODEL}。"]
+            return ["可以直接使用已安装的 Ollama 模型，也可以从本地模型列表补充其他尺寸。"]
+        recommended = _recommended_llm_model_for_device()
+        return [
+            f"点击一键安装并启用本地 LLM；默认会准备本机推荐模型 {recommended}。",
+            "桌面版一键安装 LLM 不要求用户电脑预装 Python；后端运行时随应用打包。"
+        ]
     if capability == "image_generation":
         if local_services.get("image_generation", {}).get("available"):
             return ["检测到本地图片生成服务，可以一键配置。"]
@@ -2629,7 +2868,7 @@ def _capability_suggestions(
 
 def _missing_capability_message(capability: str) -> str:
     messages = {
-        "llm": f"未检测到可用本地 LLM；可一键安装 Ollama 并准备 {LLM_REALTIME_MODEL}。",
+        "llm": f"未检测到可用本地 LLM；可一键安装 Ollama 并准备 {_recommended_llm_model_for_device()}。",
         "image_generation": "未检测到本地图片生成器；可先导入图片，或在高级配置接入图片生成服务。",
         "segmentation": "未检测到可直接启用的 SAM；可以安装内置 MobileSAM。",
     }
@@ -2932,7 +3171,7 @@ def _generate_image_layer(
             asset_name = _call_openai_image_layer_generation_provider(
                 config,
                 generation_id,
-                prompt,
+                _layer_generation_prompt(prompt, mode, selection_points),
                 selection_points,
                 left,
                 top,
@@ -3047,9 +3286,57 @@ def _call_openai_image_layer_generation_provider(
     width: int,
     height: int,
 ) -> str:
-    candidates = _call_openai_image_provider(config, generation_id, prompt, width, height, 1)
+    candidates = _call_openai_image_provider(
+        config,
+        generation_id,
+        prompt,
+        width,
+        height,
+        1,
+        transparent_layer=True,
+    )
     asset_name = candidates[0]["url"].rsplit("/", 1)[-1]
     return _clip_layer_asset_to_selection(asset_name, points, left, top, width, height)
+
+
+def _layer_generation_prompt(prompt: str, mode: str, points: list[Point]) -> str:
+    if mode == "extension":
+        return prompt
+    shape = _selection_shape_prompt(points)
+    return (
+        f"{prompt}\n\n"
+        "Create a native transparent PNG layer asset for the selected shape, not a rectangular scene. "
+        "The final artwork must be composed specifically for the visible alpha silhouette described below. "
+        "Keep the subject fully inside that silhouette with natural margins; do not create an important object that crosses the silhouette border and then gets cut off. "
+        "Everything outside the silhouette should be transparent/empty. "
+        "Do not fill the whole rectangular canvas, do not add a rectangular background, frame, UI, label, or checkerboard. "
+        f"{shape}"
+    )
+
+
+def _selection_shape_prompt(points: list[Point]) -> str:
+    left, top, width, height = _points_bounds(points)
+    normalized = [
+        (
+            round((point.x - left) / max(1.0, width), 3),
+            round((point.y - top) / max(1.0, height), 3),
+        )
+        for point in points
+    ]
+    if len(points) == 4 and _points_form_axis_aligned_rect(points):
+        return "Selected shape: axis-aligned rectangle covering the full canvas."
+    coords = "; ".join(f"({x:.3f}, {y:.3f})" for x, y in normalized)
+    return (
+        "Selected shape: custom hand-drawn polygon. "
+        "Normalized polygon vertices within the generation canvas, clockwise or counter-clockwise: "
+        f"{coords}. Compose for this polygon silhouette as the actual artwork boundary."
+    )
+
+
+def _points_form_axis_aligned_rect(points: list[Point]) -> bool:
+    xs = {round(point.x, 4) for point in points}
+    ys = {round(point.y, 4) for point in points}
+    return len(xs) == 2 and len(ys) == 2
 
 
 def _reference_edit_prompt(prompt: str, mode: str, points: list[Point], original_map_width: int, original_map_height: int) -> str:
@@ -3073,14 +3360,17 @@ def _reference_edit_prompt(prompt: str, mode: str, points: list[Point], original
 def _reference_fallback_prompt(prompt: str, mode: str, points: list[Point], original_map_width: int, original_map_height: int) -> str:
     action = "extend the selected edge of the existing scene" if mode == "extension" else "create a transparent layer for the selected area"
     reference = _background_reference_summary(points, original_map_width, original_map_height)
+    shape = "" if mode == "extension" else _selection_shape_prompt(points)
     return (
         f"{prompt}\n\n"
         f"The configured image provider does not support image edit/inpaint requests, so {action} from text plus extracted background cues. "
         "The new image must look like a continuation of the existing background, not a new unrelated illustration. "
         "Preserve the original scene type, camera angle, scale, lighting, color temperature, texture density, and palette. "
+        "For transparent layer generation, compose the subject natively for the selected silhouette instead of making a full rectangular scene that will be cropped. "
         "Do not switch to a top-down fantasy map unless the source background is already that style. "
         "Do not create an indoor room unless the source background is already an indoor room. "
         "Do not create a flat colored placeholder, stripe pattern, UI panel, or text label. "
+        f"{shape} "
         f"{reference}"
     )
 
@@ -3186,14 +3476,12 @@ def _edit_context_bounds(
 
 
 def _clip_layer_asset_to_selection(asset_name: str, points: list[Point], left: float, top: float, width: int, height: int) -> str:
-    from PIL import Image, ImageDraw
+    from PIL import Image
 
     path = store.assets_dir / asset_name
     image = Image.open(path).convert("RGBA").resize((width, height))
-    mask = Image.new("L", (width, height), 0)
-    draw = ImageDraw.Draw(mask)
-    draw.polygon([(point.x - left, point.y - top) for point in points], fill=255)
-    image.putalpha(mask)
+    mask = _selection_alpha_mask(points, left, top, width, height)
+    _apply_selection_boundary_alpha(image, mask)
     clipped_name = f"{Path(asset_name).stem}_alpha.png"
     image.save(store.assets_dir / clipped_name, format="PNG")
     return clipped_name
@@ -3211,7 +3499,7 @@ def _crop_edit_asset_to_selection(
     edit_width: int,
     edit_height: int,
 ) -> str:
-    from PIL import Image, ImageDraw
+    from PIL import Image
 
     path = store.assets_dir / asset_name
     image = Image.open(path).convert("RGBA").resize((edit_width, edit_height))
@@ -3219,13 +3507,43 @@ def _crop_edit_asset_to_selection(
     crop_top = int(round(top - edit_top))
     cropped = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     cropped.alpha_composite(image.crop((crop_left, crop_top, crop_left + width, crop_top + height)), (0, 0))
-    mask = Image.new("L", (width, height), 0)
-    draw = ImageDraw.Draw(mask)
-    draw.polygon([(point.x - left, point.y - top) for point in points], fill=255)
-    cropped.putalpha(mask)
+    mask = _selection_alpha_mask(points, left, top, width, height)
+    _apply_selection_boundary_alpha(cropped, mask)
     cropped_name = f"{Path(asset_name).stem}_selection_alpha.png"
     cropped.save(store.assets_dir / cropped_name, format="PNG")
     return cropped_name
+
+
+def _selection_alpha_mask(points: list[Point], left: float, top: float, width: int, height: int) -> Any:
+    from PIL import Image, ImageDraw
+
+    scale = 4
+    mask = Image.new("L", (width * scale, height * scale), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.polygon(
+        [((point.x - left) * scale, (point.y - top) * scale) for point in points],
+        fill=255,
+    )
+    return mask.resize((width, height), Image.Resampling.LANCZOS)
+
+
+def _apply_selection_boundary_alpha(image: Any, selection_mask: Any) -> None:
+    from PIL import ImageChops
+
+    native_alpha = image.getchannel("A")
+    if _alpha_channel_has_native_transparency(native_alpha):
+        image.putalpha(ImageChops.multiply(native_alpha, selection_mask))
+        return
+    image.putalpha(selection_mask)
+
+
+def _alpha_channel_has_native_transparency(alpha: Any) -> bool:
+    extrema = alpha.getextrema()
+    if not extrema or extrema[0] >= 250:
+        return False
+    histogram = alpha.histogram()
+    transparent_pixels = sum(histogram[:250])
+    return transparent_pixels >= max(4, int(alpha.width * alpha.height * 0.01))
 
 
 def _background_reference_summary(points: list[Point], original_map_width: int, original_map_height: int) -> str:
@@ -3383,6 +3701,7 @@ def _call_openai_image_provider(
     width: int,
     height: int,
     count: int,
+    transparent_layer: bool = False,
 ) -> list[dict[str, Any]]:
     model = str(config.get("model") or "").strip()
     if not model:
@@ -3393,16 +3712,24 @@ def _call_openai_image_provider(
         "n": max(1, min(count, 4)),
         "size": _openai_image_size(width, height),
     }
-    try:
-        data = _openai_json_request(
-            config,
-            "POST",
-            "images/generations",
-            body,
-            timeout=float(os.getenv("AGENT_ENGINE_REMOTE_IMAGE_TIMEOUT", "180")),
+    if transparent_layer:
+        body.update(
+            {
+                "background": "transparent",
+                "output_format": "png",
+            }
         )
+    try:
+        data = _request_openai_image_generation(config, body)
     except RemoteProviderError as exc:
-        raise HTTPException(status_code=502, detail=f"Image generation failed: {exc}") from exc
+        if transparent_layer and _remote_error_looks_like_unsupported_transparency(exc):
+            fallback_body = {key: value for key, value in body.items() if key not in {"background", "output_format"}}
+            try:
+                data = _request_openai_image_generation(config, fallback_body)
+            except RemoteProviderError as fallback_exc:
+                raise HTTPException(status_code=502, detail=f"Image generation failed: {fallback_exc}") from fallback_exc
+        else:
+            raise HTTPException(status_code=502, detail=f"Image generation failed: {exc}") from exc
     raw_images = data.get("data") if isinstance(data, dict) else None
     if not isinstance(raw_images, list) or not raw_images:
         raise HTTPException(status_code=502, detail="Image generation response had no images")
@@ -3424,6 +3751,33 @@ def _call_openai_image_provider(
     if not candidates:
         raise HTTPException(status_code=502, detail="Image generation response could not be saved")
     return candidates
+
+
+def _request_openai_image_generation(config: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
+    return _openai_json_request(
+        config,
+        "POST",
+        "images/generations",
+        body,
+        timeout=float(os.getenv("AGENT_ENGINE_REMOTE_IMAGE_TIMEOUT", "180")),
+    )
+
+
+def _remote_error_looks_like_unsupported_transparency(error: RemoteProviderError) -> bool:
+    message = str(error).lower()
+    return any(
+        token in message
+        for token in (
+            "background",
+            "output_format",
+            "unsupported",
+            "not supported",
+            "unknown parameter",
+            "unrecognized",
+            "invalid parameter",
+            "extra fields",
+        )
+    )
 
 
 def _openai_image_size(width: int, height: int) -> str:

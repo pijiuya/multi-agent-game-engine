@@ -77,7 +77,9 @@ export const fallbackWorld: WorldSnapshot = {
         tags: ["light"],
         state: { mood: "warm" },
         hidden: false,
-        movable: true
+        movable: true,
+        interactable: true,
+        affordances: []
       }
     ],
     triggers: [],

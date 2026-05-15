@@ -1183,7 +1183,42 @@ test("llm capability starts local Ollama model install when no model is availabl
             local_available: false,
             installable: !installed,
             recommended_local: null,
-            suggestions: ["点击一键安装并启用本地 LLM；默认会准备 qwen2.5:7b。"]
+            device_recommendation: {
+              model: "qwen2.5:7b",
+              name: "推荐 7B",
+              size_label: "7B",
+              reason: "检测到约 32GB 内存，推荐 7B 作为质量和实时性的平衡点。",
+              python_required: false
+            },
+            local_options: [
+              {
+                id: "qwen25_15b",
+                name: "实时 1.5B",
+                model: "qwen2.5:1.5b",
+                size_label: "1.5B",
+                memory_gb: 8,
+                disk_gb: 1.5,
+                description: "适合多 agent 实时互动",
+                installed: false,
+                recommended: false,
+                selected_by_default: false,
+                reason: "可选安装"
+              },
+              {
+                id: "qwen25_7b",
+                name: "推荐 7B",
+                model: "qwen2.5:7b",
+                size_label: "7B",
+                memory_gb: 16,
+                disk_gb: 5,
+                description: "多数新机器首选",
+                installed: installed,
+                recommended: true,
+                selected_by_default: true,
+                reason: "本机推荐"
+              }
+            ],
+            suggestions: ["点击一键安装并启用本地 LLM；默认会准备 qwen2.5:7b。", "桌面版一键安装 LLM 不要求用户电脑预装 Python。"]
           },
           {
             id: "image_generation",
@@ -1257,6 +1292,8 @@ test("llm capability starts local Ollama model install when no model is availabl
 
   await page.goto("/");
   const modelsPanel = page.getByTestId("panel-models");
+  await expect(modelsPanel.getByTestId("local-model-list-llm")).toContainText("推荐 7B");
+  await expect(modelsPanel).toContainText("不要求用户电脑预装 Python");
   const installButton = modelsPanel.getByRole("button", { name: /qwen2\.5:7b/ });
   await expect(installButton).toBeEnabled();
   await installButton.click();

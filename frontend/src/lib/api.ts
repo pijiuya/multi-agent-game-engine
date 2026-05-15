@@ -158,9 +158,16 @@ export async function getModelCapabilityStatus(): Promise<ModelCapabilityStatus[
   }
 }
 
-export async function configureLocalCapability(capability: ModelCapabilityId): Promise<{ models: ModelConfig[]; capability: ModelCapabilityStatus } | null> {
+export async function configureLocalCapability(
+  capability: ModelCapabilityId,
+  payload: { model?: string; models?: string[] } = {}
+): Promise<{ models: ModelConfig[]; capability: ModelCapabilityStatus } | null> {
   try {
-    const response = await fetch(`${apiBase}/api/model-capabilities/${capability}/configure-local`, { method: "POST" });
+    const response = await fetch(`${apiBase}/api/model-capabilities/${capability}/configure-local`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: payload.model ?? "", models: payload.models ?? [] })
+    });
     const data = await response.json();
     if (!response.ok) {
       throw new Error(String(data.detail ?? "local configure failed"));
@@ -238,9 +245,16 @@ export async function testRemoteCapability(
   };
 }
 
-export async function installLocalCapability(capability: ModelCapabilityId): Promise<{ task: ModelCapabilityTask; models: ModelConfig[] } | null> {
+export async function installLocalCapability(
+  capability: ModelCapabilityId,
+  payload: { model?: string; models?: string[] } = {}
+): Promise<{ task: ModelCapabilityTask; models: ModelConfig[] } | null> {
   try {
-    const response = await fetch(`${apiBase}/api/model-capabilities/${capability}/install-local`, { method: "POST" });
+    const response = await fetch(`${apiBase}/api/model-capabilities/${capability}/install-local`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: payload.model ?? "", models: payload.models ?? [] })
+    });
     const data = await response.json();
     if (!response.ok) {
       throw new Error(String(data.detail ?? "local install failed"));
@@ -701,7 +715,9 @@ export function normalizeWorldSnapshot(snapshot: WorldSnapshot): WorldSnapshot {
         tags: item.tags ?? [],
         state: item.state ?? {},
         hidden: Boolean(item.hidden),
-        movable: item.movable !== false
+        movable: item.movable !== false,
+        interactable: item.interactable !== false,
+        affordances: normalizeItemAffordances(item.affordances)
       })),
       triggers: map.triggers ?? [],
       spawn_points: map.spawn_points ?? []
@@ -733,6 +749,44 @@ export function normalizeWorldSnapshot(snapshot: WorldSnapshot): WorldSnapshot {
         }
       : undefined
   };
+}
+
+function normalizeItemAffordances(value: WorldItem["affordances"] | unknown): WorldItem["affordances"] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .map((item) => {
+      const action = item.action === "use" ? "use" : item.action === "interact" ? "interact" : null;
+      if (!action) {
+        return null;
+      }
+      const affordance: WorldItem["affordances"][number] = {
+        action,
+        enabled: item.enabled !== false
+      };
+      if (typeof item.label === "string" && item.label.trim()) {
+        affordance.label = item.label.trim();
+      }
+      if (typeof item.event_message === "string" && item.event_message.trim()) {
+        affordance.event_message = item.event_message.trim();
+      }
+      if (typeof item.status === "string" && item.status.trim()) {
+        affordance.status = item.status.trim();
+      }
+      if (typeof item.range === "number" && Number.isFinite(item.range)) {
+        affordance.range = Math.max(1, item.range);
+      }
+      if (item.required_item_state && typeof item.required_item_state === "object" && !Array.isArray(item.required_item_state)) {
+        affordance.required_item_state = item.required_item_state as Record<string, unknown>;
+      }
+      if (item.set_item_state && typeof item.set_item_state === "object" && !Array.isArray(item.set_item_state)) {
+        affordance.set_item_state = item.set_item_state as Record<string, unknown>;
+      }
+      return affordance;
+    })
+    .filter((item): item is WorldItem["affordances"][number] => item !== null);
 }
 
 function normalizeNarrative(value: unknown): NarrativeConfig {
@@ -1118,7 +1172,38 @@ function capabilityStatusFromApi(data: Record<string, unknown>): ModelCapability
     local_available: Boolean(data.local_available),
     installable: Boolean(data.installable),
     recommended_local: data.recommended_local && typeof data.recommended_local === "object" ? modelFromApi(data.recommended_local as Record<string, unknown>) : null,
+    local_options: Array.isArray(data.local_options) ? data.local_options.map(localModelOptionFromApi) : [],
+    device_recommendation: data.device_recommendation && typeof data.device_recommendation === "object"
+      ? localDeviceRecommendationFromApi(data.device_recommendation as Record<string, unknown>)
+      : null,
     suggestions: Array.isArray(data.suggestions) ? data.suggestions.map(String) : []
+  };
+}
+
+function localModelOptionFromApi(data: unknown) {
+  const item = data && typeof data === "object" ? data as Record<string, unknown> : {};
+  return {
+    id: String(item.id ?? item.model ?? ""),
+    name: String(item.name ?? item.model ?? ""),
+    model: String(item.model ?? ""),
+    sizeLabel: String(item.size_label ?? item.sizeLabel ?? ""),
+    memoryGb: nullableNumber(item.memory_gb ?? item.memoryGb),
+    diskGb: nullableNumber(item.disk_gb ?? item.diskGb),
+    description: String(item.description ?? ""),
+    installed: Boolean(item.installed),
+    recommended: Boolean(item.recommended),
+    selectedByDefault: Boolean(item.selected_by_default ?? item.selectedByDefault),
+    reason: String(item.reason ?? "")
+  };
+}
+
+function localDeviceRecommendationFromApi(data: Record<string, unknown>) {
+  return {
+    model: String(data.model ?? ""),
+    name: String(data.name ?? ""),
+    sizeLabel: String(data.size_label ?? data.sizeLabel ?? ""),
+    reason: String(data.reason ?? ""),
+    pythonRequired: Boolean(data.python_required ?? data.pythonRequired)
   };
 }
 
@@ -1330,7 +1415,9 @@ function defaultCapabilityStatus(): ModelCapabilityStatus[] {
       local_available: false,
       installable: false,
       recommended_local: null,
-      suggestions: ["桌面版会自动启动本机引擎；如果一直没有连接，请确认 Python 依赖已安装。"]
+      local_options: [],
+      device_recommendation: null,
+      suggestions: ["桌面版会自动启动内置后端；普通用户不需要预装 Python。"]
     },
     {
       id: "image_generation",
@@ -1343,6 +1430,8 @@ function defaultCapabilityStatus(): ModelCapabilityStatus[] {
       local_available: false,
       installable: false,
       recommended_local: null,
+      local_options: [],
+      device_recommendation: null,
       suggestions: ["现在可以先导入图片；连接本机引擎后再检测本地图片生成器。"]
     },
     {
@@ -1356,6 +1445,8 @@ function defaultCapabilityStatus(): ModelCapabilityStatus[] {
       local_available: false,
       installable: true,
       recommended_local: null,
+      local_options: [],
+      device_recommendation: null,
       suggestions: ["桌面版会自动启动本机引擎；连接完成后点击安装并启用内置 SAM。"]
     }
   ];

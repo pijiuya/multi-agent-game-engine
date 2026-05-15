@@ -140,3 +140,114 @@ def test_rule_engine_stop_social_and_movable_item_actions():
         AgentAction(agent_id="agent_mira", type="pick_up", payload={"item_id": "item_crate"}),
     )
     assert not rejected.ok
+
+
+def test_fixed_interactable_item_can_be_used_but_not_picked_up():
+    world = GameWorld.default()
+    rules = RuleEngine()
+    world.map.items.append(
+        WorldItem(
+            id="item_terminal",
+            name="Terminal",
+            position=Point(242, 220),
+            movable=False,
+            interactable=True,
+        )
+    )
+
+    used = rules.apply(
+        world,
+        AgentAction(agent_id="agent_mira", type="use", payload={"target_id": "item_terminal"}),
+    )
+    interacted = rules.apply(
+        world,
+        AgentAction(agent_id="agent_mira", type="interact", payload={"target_id": "item_terminal"}),
+    )
+    picked_up = rules.apply(
+        world,
+        AgentAction(agent_id="agent_mira", type="pick_up", payload={"item_id": "item_terminal"}),
+    )
+
+    assert used.ok
+    assert interacted.ok
+    assert not picked_up.ok
+
+
+def test_item_affordance_conditions_and_state_changes_are_applied():
+    world = GameWorld.default()
+    rules = RuleEngine()
+    world.map.items.append(
+        WorldItem(
+            id="item_switch",
+            name="Switch",
+            position=Point(242, 220),
+            movable=False,
+            interactable=True,
+            state={"enabled": True},
+            affordances=[
+                {
+                    "action": "use",
+                    "label": "Turn off",
+                    "range": 120,
+                    "required_item_state": {"enabled": True},
+                    "set_item_state": {"enabled": False},
+                    "event_message": "The switch clicks off.",
+                    "status": "use",
+                }
+            ],
+        )
+    )
+
+    used = rules.apply(
+        world,
+        AgentAction(agent_id="agent_mira", type="use", payload={"target_id": "item_switch"}),
+    )
+    rejected = rules.apply(
+        world,
+        AgentAction(agent_id="agent_mira", type="use", payload={"target_id": "item_switch"}),
+    )
+
+    assert used.ok
+    assert world.map.items[-1].state["enabled"] is False
+    assert world.events[-2].message == "The switch clicks off."
+    assert not rejected.ok
+
+
+def test_non_interactable_item_and_blocked_item_placement_are_rejected():
+    world = GameWorld.default()
+    rules = RuleEngine()
+    mira = world.agent_states["agent_mira"]
+    world.map.items.append(
+        WorldItem(
+            id="item_statue",
+            name="Statue",
+            position=Point(242, 220),
+            interactable=False,
+        )
+    )
+    world.map.items.append(WorldItem(id="item_crate", name="Crate", position=Point(242, 220)))
+    world.map.obstacles = [
+        PolygonArea(
+            id="obs_table",
+            name="Table",
+            points=[Point(300, 300), Point(420, 300), Point(420, 420), Point(300, 420)],
+        )
+    ]
+
+    use_statue = rules.apply(
+        world,
+        AgentAction(agent_id="agent_mira", type="use", payload={"target_id": "item_statue"}),
+    )
+    pickup = rules.apply(
+        world,
+        AgentAction(agent_id="agent_mira", type="pick_up", payload={"item_id": "item_crate"}),
+    )
+    drop_blocked = rules.apply(
+        world,
+        AgentAction(agent_id="agent_mira", type="drop_item", payload={"position": {"x": 350, "y": 350}}),
+    )
+
+    assert not use_statue.ok
+    assert pickup.ok
+    assert mira.held_item_id == "item_crate"
+    assert not drop_blocked.ok

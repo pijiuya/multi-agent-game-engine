@@ -129,7 +129,7 @@ npx playwright test tests/sandbox.spec.ts -g "agent panel controls|scene objects
 
 模型管理面板按能力划分：
 
-- `语言模型 LLM`：推荐安装 Ollama，并准备 `qwen2.5:7b`、`qwen2.5:1.5b` 或 `gemma3:1b`。点击“重新检测”后可一键启用本地 LLM。
+- `语言模型 LLM`：模型管理面板会列出 1B、1.5B、3B、7B、14B 等本地模型尺寸，并按本机内存推荐一个默认主模型。可多选后点击一键安装；桌面版使用随应用打包的后端运行安装流程，普通用户不需要预装 Python。
 - `图片生成`：当前可导入图片或使用 mock 候选；如需真实生成，可在高级配置接入 ComfyUI 或兼容服务。
 - `SAM 分层`：可一键安装并启用内置 MobileSAM。模型权重默认缓存到 `runtime_project/models/mobile_sam/`。
 - `图像识别`：检测到 Ollama 视觉模型时会注册为 vision labeling 能力，例如 `qwen2.5vl:3b`。
@@ -138,6 +138,7 @@ npx playwright test tests/sandbox.spec.ts -g "agent panel controls|scene objects
 
 ```powershell
 ollama pull qwen2.5:7b
+ollama pull qwen2.5:3b
 ollama pull qwen2.5:1.5b
 ollama pull gemma3:1b
 ollama pull qwen2.5vl:3b

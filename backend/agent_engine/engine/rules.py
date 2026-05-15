@@ -22,6 +22,7 @@ class RuleEngine:
     interaction_range = 120.0
     agent_radius = 24.0
     agent_min_center_distance = agent_radius * 2
+    social_region_dialogue_bonus = 80.0
 
     def __init__(self, action_extensions: list[ActionExtension] | None = None):
         self.action_extensions = action_extensions or []
@@ -90,7 +91,7 @@ class RuleEngine:
             policy = profile.dialogue_policy
             if not bool(policy.get("enabled", True)):
                 return ActionResult(False, "dialogue is disabled for this agent")
-            maximum = float(policy.get("distance", 180.0))
+            maximum = self.social_dialogue_range(world, state.position, policy)
             if distance(state.position.to_dict(), target_state.position.to_dict()) > maximum:
                 return ActionResult(False, f"{target_profile.name} is out of dialogue range")
             if world.tick < float(state.cooldowns.get("social_until", 0)):
@@ -117,7 +118,7 @@ class RuleEngine:
                 return ActionResult(False, "pick_up requires a valid item_id")
             if state.held_item_id and state.held_item_id != item.id:
                 return ActionResult(False, "agent is already holding an item")
-            return self._validate_item_interaction(world, state.position, item, "pick_up")
+            return self._validate_movable_item_interaction(world, state.position, item, "pick_up")
 
         if action.type == "drop_item":
             if not state.held_item_id:
@@ -126,20 +127,25 @@ class RuleEngine:
             if item is None or item.hidden or not item.movable:
                 return ActionResult(False, "held item is not movable")
             target = self._point_from_payload(action.payload)
-            if target is not None and not world.map.is_inside_bounds(target):
+            drop_target = target or state.position
+            if not world.map.is_inside_bounds(drop_target):
                 return ActionResult(False, "drop position is outside map bounds")
+            if not world.map.is_walkable(drop_target):
+                return ActionResult(False, "drop position is outside walkable space or inside an obstacle")
             return ActionResult(True, "drop_item accepted")
 
         if action.type == "move_item":
             item = self._item_from_payload(world, action.payload)
             if item is None:
                 return ActionResult(False, "move_item requires a valid item_id")
-            result = self._validate_item_interaction(world, state.position, item, "move_item")
+            result = self._validate_movable_item_interaction(world, state.position, item, "move_item")
             if not result.ok:
                 return result
             target = self._point_from_payload(action.payload)
             if target is not None and not world.map.is_inside_bounds(target):
                 return ActionResult(False, "item target is outside map bounds")
+            if target is not None and not world.map.is_walkable(target):
+                return ActionResult(False, "item target is outside walkable space or inside an obstacle")
             return ActionResult(True, "move_item accepted")
 
         if action.type in {"observe", "wait"}:
@@ -275,6 +281,27 @@ class RuleEngine:
         if action.type in {"interact", "use"}:
             target_id = str(action.payload["target_id"])
             state.status = action.type
+            item = world.map.item_by_id(target_id)
+            if item is not None:
+                affordance = self._available_item_affordance(world, state.position, item, action.type)
+                if affordance is not None:
+                    item.state.update(dict(affordance.get("set_item_state") or {}))
+                    state.status = str(affordance.get("status") or action.type)
+                message = str(affordance.get("event_message") or "") if affordance is not None else ""
+                if not message:
+                    message = f"{profile.name} {action.type}s {item.name}."
+                event = world.add_event(
+                    "interaction",
+                    message,
+                    agent_id=profile.id,
+                    payload={
+                        "action": action.to_dict(),
+                        "target_id": target_id,
+                        "item_id": item.id,
+                        "affordance": dict(affordance) if affordance is not None else None,
+                    },
+                )
+                return ActionResult(True, f"{action.type} applied", event.to_dict())
             event = world.add_event(
                 "interaction",
                 f"{profile.name} {action.type}s {target_id}.",
@@ -473,6 +500,30 @@ class RuleEngine:
         world.relationships.append(relationship)
         return relationship
 
+    def social_range_bonus(self, world: GameWorld, position: Point) -> float:
+        if any(zone.contains(position) for zone in world.map.interaction_zones):
+            return self.social_region_dialogue_bonus
+        return 0.0
+
+    def social_dialogue_range(self, world: GameWorld, position: Point, policy: dict[str, Any]) -> float:
+        return float(policy.get("distance", 180.0)) + self.social_range_bonus(world, position)
+
+    def available_item_affordances(
+        self,
+        world: GameWorld,
+        agent_position: Point,
+        item: WorldItem,
+        action_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if item.hidden or not item.interactable:
+            return []
+        affordances = [
+            affordance
+            for affordance in self._item_affordances_for_action(item, action_type)
+            if self._affordance_available(world, agent_position, item, affordance)
+        ]
+        return [dict(affordance) for affordance in affordances]
+
     def _item_from_payload(self, world: GameWorld, payload: dict[str, Any]) -> WorldItem | None:
         item_id = str(payload.get("item_id") or payload.get("target_id") or "").strip()
         if not item_id:
@@ -488,8 +539,83 @@ class RuleEngine:
     ) -> ActionResult:
         if item.hidden:
             return ActionResult(False, f"{item.id} is hidden")
+        if not item.interactable:
+            return ActionResult(False, f"{item.name} is not interactable")
+        action_affordances = self._configured_item_affordances_for_action(item, action_type)
+        if action_affordances:
+            affordance = self._available_item_affordance(world, agent_position, item, action_type)
+            if affordance is None:
+                return ActionResult(False, f"{item.name} has no available {action_type} affordance")
+            return ActionResult(True, f"{action_type} accepted")
+        if distance(agent_position.to_dict(), item.position.to_dict()) > self.interaction_range:
+            return ActionResult(False, f"{item.id} is out of range")
+        return ActionResult(True, f"{action_type} accepted")
+
+    def _validate_movable_item_interaction(
+        self,
+        world: GameWorld,
+        agent_position: Point,
+        item: WorldItem,
+        action_type: str,
+    ) -> ActionResult:
+        if item.hidden:
+            return ActionResult(False, f"{item.id} is hidden")
         if not item.movable:
             return ActionResult(False, f"{item.name} is not movable")
         if distance(agent_position.to_dict(), item.position.to_dict()) > self.interaction_range:
             return ActionResult(False, f"{item.id} is out of range")
         return ActionResult(True, f"{action_type} accepted")
+
+    def _available_item_affordance(
+        self,
+        world: GameWorld,
+        agent_position: Point,
+        item: WorldItem,
+        action_type: str,
+    ) -> dict[str, Any] | None:
+        for affordance in self._item_affordances_for_action(item, action_type):
+            if self._affordance_available(world, agent_position, item, affordance):
+                return affordance
+        return None
+
+    def _item_affordances_for_action(self, item: WorldItem, action_type: str | None) -> list[dict[str, Any]]:
+        affordances: list[dict[str, Any]] = []
+        for raw in self._configured_item_affordances_for_action(item, action_type):
+            if not bool(raw.get("enabled", True)):
+                continue
+            affordances.append(dict(raw))
+        return affordances
+
+    def _configured_item_affordances_for_action(self, item: WorldItem, action_type: str | None) -> list[dict[str, Any]]:
+        affordances: list[dict[str, Any]] = []
+        for raw in item.affordances:
+            if not isinstance(raw, dict):
+                continue
+            action = str(raw.get("action") or "").strip()
+            if action not in {"interact", "use"}:
+                continue
+            if action_type is not None and action != action_type:
+                continue
+            affordances.append(dict(raw))
+        return affordances
+
+    def _affordance_available(
+        self,
+        world: GameWorld,
+        agent_position: Point,
+        item: WorldItem,
+        affordance: dict[str, Any],
+    ) -> bool:
+        del world
+        try:
+            maximum = float(affordance.get("range", self.interaction_range))
+        except (TypeError, ValueError):
+            maximum = self.interaction_range
+        if distance(agent_position.to_dict(), item.position.to_dict()) > max(1.0, maximum):
+            return False
+        required = affordance.get("required_item_state")
+        if isinstance(required, dict):
+            for key, value in required.items():
+                if item.state.get(str(key)) != value:
+                    return False
+        return True

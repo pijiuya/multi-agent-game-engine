@@ -38,7 +38,9 @@ export function addItemToMap(map: WorldMap, point: Point): WorldMap {
         tags: [],
         state: {},
         hidden: false,
-        movable: true
+        movable: true,
+        interactable: true,
+        affordances: []
       }
     ]
   };
