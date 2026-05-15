@@ -469,7 +469,14 @@ DEFAULT_ACTION_SPACE = [
     "drop_item",
     "move_item",
 ]
-DEFAULT_DIALOGUE_POLICY = {"enabled": True, "distance": 180.0, "cooldown_ticks": 10, "language": "auto"}
+DEFAULT_DIALOGUE_POLICY = {
+    "enabled": True,
+    "distance": 240.0,
+    "cooldown_ticks": 6,
+    "language": "auto",
+    "item_interaction_chance": 0.35,
+    "item_mention_chance": 0.12,
+}
 DEFAULT_NARRATIVE_CONFIG = {
     "enabled": False,
     "premise": "",
@@ -477,6 +484,9 @@ DEFAULT_NARRATIVE_CONFIG = {
     "cadence_ticks": 50,
     "last_tick": -999,
     "recent_summary": "",
+    "model_provider": "",
+    "dedicated_service_enabled": False,
+    "service_model": "",
 }
 SUPPORTED_DIALOGUE_LANGUAGES = {"auto", "zh-CN", "en-US"}
 BUILTIN_ANIMATION_STATES = ["idle", "moving", "social", "speaking", "interact", "use", "waiting", "stopped"]
@@ -501,6 +511,11 @@ def normalize_narrative_config(data: Any) -> dict[str, Any]:
                 "cadence_ticks": int(data.get("cadence_ticks", narrative["cadence_ticks"])),
                 "last_tick": int(data.get("last_tick", narrative["last_tick"])),
                 "recent_summary": str(data.get("recent_summary", narrative["recent_summary"])),
+                "model_provider": str(data.get("model_provider", narrative["model_provider"])),
+                "dedicated_service_enabled": bool(
+                    data.get("dedicated_service_enabled", narrative["dedicated_service_enabled"])
+                ),
+                "service_model": str(data.get("service_model", narrative["service_model"])),
             }
         )
     return narrative
@@ -518,9 +533,23 @@ def normalize_dialogue_policy(data: Any) -> dict[str, Any]:
                 "distance": float(data.get("distance", policy["distance"])),
                 "cooldown_ticks": int(data.get("cooldown_ticks", policy["cooldown_ticks"])),
                 "language": language,
+                "item_interaction_chance": _clamp_probability(
+                    data.get("item_interaction_chance", policy["item_interaction_chance"])
+                ),
+                "item_mention_chance": _clamp_probability(
+                    data.get("item_mention_chance", policy["item_mention_chance"])
+                ),
             }
         )
     return policy
+
+
+def _clamp_probability(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(1.0, number))
 
 
 def normalize_agent_animation(data: Any) -> dict[str, Any] | None:

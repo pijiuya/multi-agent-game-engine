@@ -55,8 +55,9 @@ async def test_mock_provider_mentions_preferred_item_name():
                 "item_context": {
                     "nearby_named_items": [
                         {"id": "item_generic", "name": "Item"},
-                        {"id": "item_archive", "name": "绝密档案3"},
-                    ]
+                        {"id": "item_archive", "name": "绝密档案3", "available_affordances": [{"action": "use"}]},
+                    ],
+                    "recent_item_events": [{"item_id": "item_archive", "type": "interaction"}],
                 },
             },
             action_space=["say", "wait"],

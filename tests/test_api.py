@@ -1,7 +1,9 @@
 from fastapi.testclient import TestClient
 
+from agent_engine import narrative_service
 from agent_engine.api import main as api_main
 from agent_engine.api.main import app
+from agent_engine.engine.scene_director import SceneDirectorResponse
 
 
 def test_api_health_world_action_and_websocket():
@@ -43,6 +45,7 @@ def test_api_patch_narrative_updates_saved_snapshot():
             "premise": "A storm is turning every quiet errand into a clue.",
             "tone": "tense but grounded",
             "cadence_ticks": 12,
+            "model_provider": "model_remote_llm",
         },
     )
 
@@ -55,8 +58,133 @@ def test_api_patch_narrative_updates_saved_snapshot():
         "cadence_ticks": 12,
         "last_tick": -999,
         "recent_summary": "",
+        "model_provider": "model_remote_llm",
+        "dedicated_service_enabled": False,
+        "service_model": "",
     }
     assert client.get("/api/world").json()["narrative"] == narrative
+
+
+def test_api_narrative_subtitle_endpoint_is_dedicated_read_model(monkeypatch):
+    client = TestClient(app)
+    api_main.runtime.world = api_main.GameWorld.default()
+    api_main.runtime.world.narrative["enabled"] = True
+    api_main.runtime.world.narrative["model_provider"] = "model_agent_llm"
+    api_main.runtime.world.agent_profiles["agent_mira"].model_provider = "model_agent_llm"
+    monkeypatch.setattr(
+        api_main.store,
+        "load_model_configs",
+        lambda: [
+            {"id": "model_agent_llm", "enabled": True, "capabilities": ["llm"]},
+            {"id": "model_scene_llm", "enabled": True, "capabilities": ["llm"]},
+        ],
+    )
+    api_main.runtime.world.add_event(
+        "system",
+        "旧版导演字幕也能单独读取。",
+        payload={"source": "scene_director", "guidance": "next beat"},
+    )
+
+    response = client.get("/api/narrative/subtitle")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert payload["line"]["message"] == "旧版导演字幕也能单独读取。"
+    assert payload["line"]["payload"]["source"] == "scene_director"
+    assert payload["pending"] is False
+    assert payload["model_conflict"] is True
+    assert payload["recommended_model_provider"] == "model_scene_llm"
+
+
+def test_api_narrative_patch_makes_old_subtitle_stale():
+    client = TestClient(app)
+    api_main.runtime.world = api_main.GameWorld.default()
+    api_main.runtime.world.narrative["enabled"] = True
+    api_main.runtime.world.add_event(
+        "narration",
+        "旧字幕不应该继续挂在新剧本下面。",
+        payload={"source": "scene_director"},
+    )
+
+    response = client.patch("/api/narrative", json={"premise": "三个杀手组成的故事"})
+
+    assert response.status_code == 200
+    subtitle = client.get("/api/narrative/subtitle").json()
+    assert subtitle["line"] is None
+    assert subtitle["status"] == "waiting_for_run"
+    assert subtitle["recent_summary"] == ""
+
+
+def test_api_narrative_service_patch_persists_model_choice():
+    client = TestClient(app)
+    api_main.runtime.world = api_main.GameWorld.default()
+
+    response = client.patch("/api/narrative/service", json={"enabled": True, "model": "gemma3:1b"})
+
+    assert response.status_code == 200
+    assert api_main.runtime.world.narrative["dedicated_service_enabled"] is True
+    assert api_main.runtime.world.narrative["service_model"] == "gemma3:1b"
+    assert api_main.runtime.world.narrative["last_tick"] == -999
+    assert response.json()["model"] == "gemma3:1b"
+
+
+def test_api_narrative_service_lists_configured_ollama_models_when_sidecar_offline(monkeypatch):
+    client = TestClient(app)
+    api_main.runtime.world = api_main.GameWorld.default()
+    monkeypatch.setenv("AGENT_ENGINE_DISABLE_NARRATIVE_AUTOSTART", "1")
+    monkeypatch.setattr(api_main, "_narrative_service_url", lambda: "http://127.0.0.1:9")
+    monkeypatch.setattr(
+        api_main.store,
+        "load_model_configs",
+        lambda: [
+            {"id": "model_local_a", "provider": "ollama", "model": "qwen2.5:7b", "enabled": True, "capabilities": ["llm"]},
+            {"id": "model_remote", "provider": "openai-compatible", "model": "remote", "enabled": True, "capabilities": ["llm"]},
+        ],
+    )
+
+    response = client.get("/api/narrative/service")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["healthy"] is False
+    assert "qwen2.5:7b" in payload["available_models"]
+    assert "remote" not in payload["available_models"]
+
+
+def test_narrative_sidecar_generate_returns_director_response(monkeypatch):
+    client = TestClient(narrative_service.app)
+
+    async def fake_models():
+        return ["qwen2.5:1.5b"]
+
+    async def fake_generate(self, request):
+        assert self.model_name == "qwen2.5:1.5b"
+        assert request.tick == 7
+        return SceneDirectorResponse(
+            text="门后的沉默忽然有了重量。",
+            proposal={
+                "events": [
+                    {
+                        "type": "narration",
+                        "message": "门后的沉默忽然有了重量。",
+                        "payload": {"source": "scene_director"},
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(narrative_service, "_ollama_models", fake_models)
+    monkeypatch.setattr(narrative_service.LLMSceneDirector, "generate", fake_generate)
+
+    response = client.post(
+        "/api/narrative/subtitle/generate",
+        json={"request": {"tick": 7, "map": {}, "agents": [], "recent_events": []}, "model": ""},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["text"] == "门后的沉默忽然有了重量。"
+    assert response.json()["proposal"]["events"][0]["type"] == "narration"
 
 
 def test_create_agent_defaults_to_runtime_provider():
@@ -220,12 +348,20 @@ def test_api_patch_editor_entities():
                 "width": 64,
                 "height": 64,
             },
-            "dialogue_policy": {"enabled": True, "distance": 140, "cooldown_ticks": 7},
+            "dialogue_policy": {
+                "enabled": True,
+                "distance": 140,
+                "cooldown_ticks": 7,
+                "item_interaction_chance": 0.8,
+                "item_mention_chance": 0.25,
+            },
         },
     )
     animated = patched_animation.json()["agent_profiles"][animation_id]
     assert animated["animation"]["clips"]["idle"]["kind"] == "gif"
     assert animated["dialogue_policy"]["distance"] == 140
+    assert animated["dialogue_policy"]["item_interaction_chance"] == 0.8
+    assert animated["dialogue_policy"]["item_mention_chance"] == 0.25
 
     created_region = client.post(
         "/api/map/regions",

@@ -16,6 +16,7 @@ import type {
   AgentAnimationClip,
   AgentProfile,
   DialoguePolicy,
+  ModelConfig,
   Point,
   SelectionState,
   WorldSnapshot
@@ -23,6 +24,7 @@ import type {
 
 type Props = {
   world: WorldSnapshot;
+  models: ModelConfig[];
   selection: SelectionState;
   onSelect: (selection: SelectionState) => void;
   onLocateAgent: (agentId: string) => void;
@@ -43,6 +45,7 @@ const DEFAULT_STATUSES = ["idle", "moving", "social", "speaking", "interact", "u
 
 export function AgentPanel({
   world,
+  models,
   selection,
   onSelect,
   onLocateAgent,
@@ -193,7 +196,9 @@ export function AgentPanel({
                 <AgentDetail
                   agent={agent}
                   extensionActions={extensionActions}
+                  models={models}
                   world={world}
+                  onUpdateAgent={(patch) => onUpdateAgent(agent.id, patch)}
                   onActionToggle={(action, enabled) => commitActionSpace(agent, action, enabled)}
                   onStop={() => void stopAgent(agent.id)}
                   onUpdatePolicy={(patch) => commitDialoguePolicy(agent, patch)}
@@ -300,16 +305,20 @@ export function AgentPanel({
 function AgentDetail({
   agent,
   world,
+  models,
   extensionActions,
   onStop,
+  onUpdateAgent,
   onUpdatePolicy,
   onUpdateAnimation,
   onActionToggle
 }: {
   agent: AgentProfile;
   world: WorldSnapshot;
+  models: ModelConfig[];
   extensionActions: ActionExtension[];
   onStop: () => void;
+  onUpdateAgent: (patch: Partial<Omit<AgentProfile, "id">>) => void;
   onUpdatePolicy: (patch: Partial<DialoguePolicy>) => void;
   onUpdateAnimation: (animation: AgentAnimation | null) => void;
   onActionToggle: (action: string, enabled: boolean) => void;
@@ -319,6 +328,7 @@ function AgentDetail({
   const nearby = state ? nearbyAgents(world, agent.id) : [];
   const animation = agent.animation;
   const statuses = Array.from(new Set([...DEFAULT_STATUSES, ...Object.keys(animation?.clips ?? {})]));
+  const llmModels = llmModelOptions(models, agent.model_provider);
 
   return (
     <div className="agent-detail-panel" data-testid={`agent-detail-${agent.id}`}>
@@ -334,6 +344,21 @@ function AgentDetail({
         <PauseCircle size={14} />
         停止移动
       </button>
+
+      <label className="agent-model-row">
+        <span>Agent LLM</span>
+        <select
+          aria-label={`${agent.name} LLM`}
+          value={agent.model_provider || "mock"}
+          onChange={(event) => onUpdateAgent({ model_provider: event.currentTarget.value })}
+        >
+          {llmModels.map((model) => (
+            <option key={model.id} value={model.id}>
+              {model.name}
+            </option>
+          ))}
+        </select>
+      </label>
 
       <div className="agent-nearby-list">
         <span>附近 Agent 距离</span>
@@ -361,16 +386,45 @@ function AgentDetail({
           aria-label="对话距离"
           key={`${agent.id}-dialogue-distance-${agent.dialogue_policy.distance}`}
           defaultValue={agent.dialogue_policy.distance}
-          onBlur={(event) => onUpdatePolicy({ distance: Number(event.currentTarget.value) || 180 })}
+          onBlur={(event) => onUpdatePolicy({ distance: Number(event.currentTarget.value) || 240 })}
           type="number"
         />
         <input
           aria-label="对话冷却"
           key={`${agent.id}-dialogue-cooldown-${agent.dialogue_policy.cooldown_ticks}`}
           defaultValue={agent.dialogue_policy.cooldown_ticks}
-          onBlur={(event) => onUpdatePolicy({ cooldown_ticks: Number(event.currentTarget.value) || 10 })}
+          onBlur={(event) => onUpdatePolicy({ cooldown_ticks: Number(event.currentTarget.value) || 6 })}
           type="number"
         />
+      </div>
+
+      <div className="agent-item-policy">
+        <label>
+          <span>Item 互动可能性</span>
+          <strong>{Math.round((agent.dialogue_policy.item_interaction_chance ?? 0.35) * 100)}%</strong>
+          <input
+            aria-label="Item 互动可能性"
+            max="1"
+            min="0"
+            step="0.05"
+            type="range"
+            value={agent.dialogue_policy.item_interaction_chance ?? 0.35}
+            onChange={(event) => onUpdatePolicy({ item_interaction_chance: Number(event.currentTarget.value) })}
+          />
+        </label>
+        <label>
+          <span>Item 提及可能性</span>
+          <strong>{Math.round((agent.dialogue_policy.item_mention_chance ?? 0.12) * 100)}%</strong>
+          <input
+            aria-label="Item 提及可能性"
+            max="1"
+            min="0"
+            step="0.05"
+            type="range"
+            value={agent.dialogue_policy.item_mention_chance ?? 0.12}
+            onChange={(event) => onUpdatePolicy({ item_mention_chance: Number(event.currentTarget.value) })}
+          />
+        </label>
       </div>
 
       <div className="agent-action-space">
@@ -715,6 +769,22 @@ function clampWorldHeight(value: string) {
     return 72;
   }
   return Math.max(8, Math.min(800, parsed));
+}
+
+function llmModelOptions(models: ModelConfig[], currentProvider: string) {
+  const options = models
+    .filter((model) => model.enabled && model.capabilities.includes("llm"))
+    .map((model) => ({
+      id: model.id,
+      name: model.name || model.model || model.id
+    }));
+  if (!options.some((option) => option.id === "mock")) {
+    options.unshift({ id: "mock", name: "Mock LLM" });
+  }
+  if (currentProvider && !options.some((option) => option.id === currentProvider)) {
+    options.push({ id: currentProvider, name: `${currentProvider}（当前不可用）` });
+  }
+  return options;
 }
 
 function stateLabel(status?: string) {

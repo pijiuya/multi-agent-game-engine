@@ -23,7 +23,7 @@ from .context_compressor import ContextCompressor
 from .environment_ai import EnvironmentArbiter
 from .geometry import distance, lerp_point, point_in_polygon
 from .rules import RuleEngine
-from .scene_director import MockSceneDirector, SceneDirector, SceneDirectorRequest
+from .scene_director import LLMSceneDirector, MockSceneDirector, SceneDirector, SceneDirectorRequest
 from .world import AgentAction, GameWorld, Point
 
 
@@ -43,6 +43,7 @@ REGION_INFLUENCE = {
     "custom": "custom point of interest; inspect notes/tags before interacting",
     "unassigned": "unknown region; use cautiously",
 }
+LOW_INFORMATION_ITEM_NAMES = {"item", "object", "element", "thing", "物体", "元素", "道具", "未命名"}
 
 
 @dataclass(slots=True)
@@ -72,6 +73,7 @@ class SimulationRuntime:
         self.providers = providers or {"mock": MockProvider()}
         self.default_provider_id = "mock"
         self.scene_director = scene_director or MockSceneDirector()
+        self.scene_directors: dict[str, SceneDirector] = {}
         self.environment_arbiter = environment_arbiter or EnvironmentArbiter()
         self.context_compressor = ContextCompressor(
             context_budget_chars=_env_int("AGENT_ENGINE_CONTEXT_BUDGET_CHARS", 6000),
@@ -86,7 +88,7 @@ class SimulationRuntime:
         self.action_prefilter_enabled = _env_bool("AGENT_ENGINE_ACTION_PREFILTER", True)
         self.agent_decision_interval_ticks = max(
             1,
-            int(ceil(_env_float("AGENT_ENGINE_AGENT_DECISION_SECONDS", 3.0) * self.tick_rate)),
+            int(ceil(_env_float("AGENT_ENGINE_AGENT_DECISION_SECONDS", 2.0) * self.tick_rate)),
         )
         self.model_watchdog_ticks = max(
             1,
@@ -126,11 +128,14 @@ class SimulationRuntime:
         self._loop_task = asyncio.create_task(self._run_loop())
 
     async def stop_background(self) -> None:
-        self.pause()
+        self.world.running = False
+        self.world.add_event("system", "Simulation paused.")
         if self._loop_task:
             self._loop_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._loop_task
+            with suppress(asyncio.CancelledError, TimeoutError):
+                await asyncio.wait_for(self._loop_task, timeout=1.0)
+            if self._loop_task.done():
+                self._loop_task = None
 
     async def _run_loop(self) -> None:
         interval = 1 / self.tick_rate
@@ -177,6 +182,7 @@ class SimulationRuntime:
         payload["scene_director"] = {
             "pending": bool(self._director_task and not self._director_task.done()),
             "last_tick": self.world.narrative.get("last_tick", -999),
+            "model_provider": self._scene_director_provider_id(),
             "started_tick": self._director_started_tick,
             "age_ticks": max(0, self.world.tick - self._director_started_tick)
             if self._director_task and not self._director_task.done()
@@ -527,6 +533,8 @@ class SimulationRuntime:
         last_tick = int(self.world.narrative.get("last_tick", -999))
         if self.world.tick - last_tick < interval:
             return
+        if self._scene_director_should_wait_for_agent_models():
+            return
         compressed = self.context_compressor.compress_world(self.world)
         if compressed.should_compress and compressed.summary:
             if not str(self.world.narrative.get("recent_summary") or "").strip():
@@ -558,9 +566,51 @@ class SimulationRuntime:
                 if event.type in {"hint", "narration"} and (event.agent_id is None or event.agent_id in self.world.agent_profiles)
             ][-8:],
         )
-        self._director_task = asyncio.create_task(self.scene_director.generate(request))
+        self._director_task = asyncio.create_task(self._scene_director_for_current_narrative().generate(request))
         self._director_started_tick = self.world.tick
         self.world.narrative["last_tick"] = self.world.tick
+
+    def _scene_director_provider_id(self) -> str:
+        if self._uses_dedicated_narrative_service():
+            return "local_narrative_service"
+        requested = str(self.world.narrative.get("model_provider") or "").strip()
+        return requested or self.default_provider_id or "mock"
+
+    def _scene_director_provider_name(self) -> str:
+        provider_id = self._scene_director_provider_id()
+        provider = self.providers.get(provider_id)
+        if provider is not None:
+            return str(getattr(provider, "name", provider_id))
+        return provider_id
+
+    def _scene_director_should_wait_for_agent_models(self) -> bool:
+        if self._uses_dedicated_narrative_service():
+            return False
+        provider_name = self._scene_director_provider_name()
+        if provider_name == "mock":
+            return False
+        same_provider_tasks = [
+            record for record in self._model_tasks.values() if record.provider_name == provider_name and not record.task.done()
+        ]
+        return len(same_provider_tasks) >= self.model_concurrency
+
+    def _scene_director_for_current_narrative(self) -> SceneDirector:
+        if not self.scene_directors:
+            return self.scene_director
+        if self._uses_dedicated_narrative_service():
+            return self.scene_directors["local_narrative_service"]
+        provider_id = self._scene_director_provider_id()
+        if provider_id in self.scene_directors:
+            return self.scene_directors[provider_id]
+        provider = self.providers.get(provider_id)
+        if provider is not None:
+            return LLMSceneDirector(provider)
+        if self.default_provider_id in self.scene_directors:
+            return self.scene_directors[self.default_provider_id]
+        return self.scene_directors.get("mock") or self.scene_director
+
+    def _uses_dedicated_narrative_service(self) -> bool:
+        return bool(self.world.narrative.get("dedicated_service_enabled", True)) and "local_narrative_service" in self.scene_directors
 
     def _harvest_director_task(self) -> None:
         if not self._director_task or not self._director_task.done():
@@ -571,20 +621,76 @@ class SimulationRuntime:
         try:
             response = task.result()
         except Exception as exc:  # pragma: no cover - defensive API runtime path
-            self.world.add_event("scene_director_error", str(exc))
+            self._record_scene_director_failure(exc)
             return
         review = self.environment_arbiter.apply_proposal(self.world, response.proposal)
+        has_visible_caption = any(
+            accepted.get("kind") == "event"
+            and accepted.get("event", {}).get("type") in {"narration", "hint", "weather", "environment"}
+            for accepted in review.accepted
+        )
         director_text = self._item_grounded_scene_text(response.text)
         if director_text:
             self.world.narrative["recent_summary"] = director_text[:500]
+            if not any(
+                accepted.get("kind") == "state_change"
+                and accepted.get("value", {}).get("op") == "set_agent_narrative_state"
+                for accepted in review.accepted
+            ):
+                self._apply_caption_guidance_to_visible_agents(director_text)
         if director_text:
             self.world.add_event(
-                "system",
+                "system" if has_visible_caption else "narration",
                 director_text,
                 payload={
                     "source": "scene_director",
+                    "guidance": "Use this as scene pressure for the next agent choices; do not quote it as dialogue.",
                     "accepted": len(review.accepted),
                     "rejected": len(review.rejected),
+                },
+            )
+
+    def _apply_caption_guidance_to_visible_agents(self, director_text: str) -> None:
+        tone = str(self.world.narrative.get("tone") or "charged").strip()[:80]
+        focus = director_text[:80]
+        for agent_id, profile in self.world.agent_profiles.items():
+            if profile.hidden:
+                continue
+            state = self.world.agent_states.get(agent_id)
+            if state is None:
+                continue
+            state.narrative_state["mood"] = tone or "charged"
+            state.narrative_state["focus"] = focus
+            state.narrative_state["urgency"] = "rising"
+
+    def _record_scene_director_failure(self, exc: Exception) -> None:
+        raw_message = str(exc) or exc.__class__.__name__
+        dedicated = self._uses_dedicated_narrative_service()
+        if dedicated and _looks_like_connection_failure(raw_message):
+            message = "独立叙事服务暂未连接，场景叙事已临时关闭；Agent 对话会继续运行。"
+            self.world.narrative["enabled"] = False
+            self.world.narrative["dedicated_service_enabled"] = False
+            self.world.narrative["recent_summary"] = ""
+            self.world.narrative["last_tick"] = -999
+        else:
+            message = raw_message
+        recent_duplicate = next(
+            (
+                event
+                for event in reversed(self.world.events[-8:])
+                if event.type == "scene_director_error" and event.message == message
+            ),
+            None,
+        )
+        if recent_duplicate is None:
+            self.world.add_event(
+                "scene_director_error",
+                message,
+                payload={
+                    "source": "scene_director",
+                    "raw_error": raw_message,
+                    "dedicated_service": dedicated,
+                    "narrative_disabled": bool(dedicated and _looks_like_connection_failure(raw_message)),
                 },
             )
 
@@ -800,6 +906,9 @@ class SimulationRuntime:
     ) -> dict[str, Any] | None:
         if self._item_interaction_cooldown_active(agent_id):
             return None
+        interaction_chance = self._item_interaction_chance(agent_id)
+        if interaction_chance <= 0 or not self._chance_gate(agent_id, "item_interaction", interaction_chance):
+            return None
         if "use" in allowed:
             item_id = self._first_affordance_item_id(observation, "use")
             if item_id and not self._recent_item_action(observation, item_id, {"use", "interact"}):
@@ -971,24 +1080,27 @@ class SimulationRuntime:
 
     def _preferred_observation_item_name(self, observation: dict[str, Any]) -> str:
         names = self._observation_item_names(observation)
-        if not names:
-            return ""
-        for name in names:
-            if name.strip().lower() not in {"item", "object"}:
-                return name
-        return names[0]
+        return names[0] if names else ""
 
     def _observation_item_names(self, observation: dict[str, Any]) -> list[str]:
         item_context = observation.get("item_context")
         candidates = item_context.get("nearby_named_items") if isinstance(item_context, dict) else observation.get("nearby_items")
         if not isinstance(candidates, list):
             return []
+        recent_item_ids = set()
+        if isinstance(item_context, dict) and isinstance(item_context.get("recent_item_events"), list):
+            recent_item_ids = {
+                str(event.get("item_id"))
+                for event in item_context["recent_item_events"]
+                if isinstance(event, dict) and event.get("item_id")
+            }
         names: list[str] = []
         for item in candidates:
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name") or "").strip()
-            if name and name not in names:
+            item_id = str(item.get("id") or "")
+            if name and name not in names and self._is_quality_dialogue_item_anchor(item, recent_item_ids, item_id):
                 names.append(name)
         return names
 
@@ -1009,16 +1121,7 @@ class SimulationRuntime:
         return f"{cleaned} I just noticed {item_name}."
 
     def _item_grounded_scene_text(self, text: str) -> str:
-        cleaned = str(text or "").strip()
-        if not cleaned:
-            return ""
-        names = self._visible_item_names_for_language()
-        if not names or any(name and name in cleaned for name in names):
-            return cleaned
-        item_clause = "、".join(names[:2])
-        if self._contains_cjk(cleaned):
-            return f"{cleaned} 可见物体如{item_clause}正在成为行动和对话的线索。"
-        return f"{cleaned} Visible items such as {', '.join(names[:2])} are becoming anchors for action and dialogue."
+        return str(text or "").strip()
 
     def _should_reference_item_in_dialogue(self, agent_id: str, observation: dict[str, Any]) -> bool:
         names = self._observation_item_names(observation)
@@ -1027,10 +1130,33 @@ class SimulationRuntime:
         state = self.world.agent_states.get(agent_id)
         if state is not None and self.world.tick < float(state.cooldowns.get("item_dialogue_reference_until", 0)):
             return False
-        visible_dialogue = [event for event in self.world.events if event.type in {"speech", "dialogue"}]
-        if len(visible_dialogue) < 9:
+        mention_chance = self._item_mention_chance(agent_id)
+        if mention_chance <= 0 or not self._chance_gate(agent_id, "item_mention", mention_chance):
             return False
-        return not any(self._text_mentions_any_item(event.message, names) for event in visible_dialogue[-9:])
+        visible_dialogue = [event for event in self.world.events if event.type in {"speech", "dialogue"}]
+        return not any(self._text_mentions_any_item(event.message, names) for event in visible_dialogue[-16:])
+
+    def _item_interaction_chance(self, agent_id: str) -> float:
+        profile = self.world.agent_profiles.get(agent_id)
+        if profile is None:
+            return 0.0
+        return _clamp_probability(profile.dialogue_policy.get("item_interaction_chance", 0.35))
+
+    def _item_mention_chance(self, agent_id: str) -> float:
+        profile = self.world.agent_profiles.get(agent_id)
+        if profile is None:
+            return 0.0
+        return _clamp_probability(profile.dialogue_policy.get("item_mention_chance", 0.12))
+
+    def _chance_gate(self, agent_id: str, salt: str, chance: float) -> bool:
+        chance = _clamp_probability(chance)
+        if chance >= 1:
+            return True
+        if chance <= 0:
+            return False
+        bucket = self.world.tick // max(1, self.agent_decision_interval_ticks)
+        sample = _stable_probability(f"{agent_id}:{salt}:{bucket}")
+        return sample < chance
 
     def _mark_item_dialogue_reference_if_needed(
         self,
@@ -1046,10 +1172,10 @@ class SimulationRuntime:
             return
         state = self.world.agent_states.get(agent_id)
         if state is not None:
-            state.cooldowns["item_dialogue_reference_until"] = self.world.tick + 90
+            state.cooldowns["item_dialogue_reference_until"] = self.world.tick + 180
 
     def _text_mentions_any_item(self, text: str, names: list[str]) -> bool:
-        return any(name and name in text for name in names)
+        return any(name and not self._is_low_information_item_name(name) and name in text for name in names)
 
     def _visible_item_names_for_language(self) -> list[str]:
         names: list[str] = []
@@ -1057,9 +1183,32 @@ class SimulationRuntime:
             if item.hidden:
                 continue
             name = str(item.name or item.id).strip()
-            if name and name not in names:
+            if name and not self._is_low_information_item_name(name) and name not in names:
                 names.append(name)
-        return sorted(names, key=lambda name: (name.lower() in {"item", "object"}, name))
+        return sorted(names)
+
+    def _is_low_information_item_name(self, name: str) -> bool:
+        normalized = str(name or "").strip().lower()
+        if not normalized:
+            return True
+        if normalized in LOW_INFORMATION_ITEM_NAMES:
+            return True
+        return re.fullmatch(r"(item|object|element|thing)[\s_-]*\d*", normalized) is not None
+
+    def _is_quality_dialogue_item_anchor(self, item: dict[str, Any], recent_item_ids: set[str], item_id: str) -> bool:
+        name = str(item.get("name") or "").strip()
+        if self._is_low_information_item_name(name):
+            return False
+        has_recent_event = bool(item_id and item_id in recent_item_ids)
+        return bool(
+            has_recent_event
+            or item.get("description")
+            or item.get("tags")
+            or item.get("available_affordances")
+            or item.get("configured_affordances")
+            or item.get("affordances")
+            or item.get("state")
+        )
 
     def _clean_utterance_text(
         self,
@@ -1425,8 +1574,11 @@ class SimulationRuntime:
             and (event.agent_id is None or event.agent_id == agent_id)
         ][-5:]
         return {
-            "mode": "weak_background",
-            "instruction": "Use as background mood only; do not treat narration as the agent's own speech.",
+            "mode": "directional_scene_pressure",
+            "instruction": (
+                "Use cues as pressure for the next choice, topic, or hesitation; do not quote narration "
+                "as the agent's own speech."
+            ),
             "recent_summary": str(self.world.narrative.get("recent_summary") or ""),
             "agent_narrative_state": dict(self.world.agent_states[agent_id].narrative_state),
             "memories": [memory.to_dict() for memory in self.world.memories if memory.agent_id == "__scene__"][-5:],
@@ -1464,20 +1616,28 @@ class SimulationRuntime:
                 "approach_point": item.get("approach_point"),
                 "movable": item.get("movable"),
                 "interactable": item.get("interactable"),
+                "description": item.get("description") or "",
+                "tags": item.get("tags") or [],
                 "available_affordances": item.get("available_affordances") or [],
                 "configured_affordances": item.get("configured_affordances") or [],
                 "state": item.get("state") or {},
             }
             for item in nearby_items[:5]
+            if not self._is_low_information_item_name(str(item.get("name") or ""))
         ]
         return {
             "instruction": (
                 "Treat nearby_named_items as optional scene anchors. "
-                "Mention a relevant item by name only occasionally, about one in ten visible utterances, when it fits the moment."
+                "Mention a relevant item by name only when item_policy allows it and it has a specific name plus a recent interaction, useful affordance, tag, or description."
             ),
             "agent_id": agent_id,
             "nearby_named_items": nearby_named_items,
             "recent_item_events": recent_item_events[-6:],
+            "item_policy": {
+                "interaction_chance": self._item_interaction_chance(agent_id),
+                "mention_chance": self._item_mention_chance(agent_id),
+                "instruction": "Higher interaction_chance means this agent is more willing to use/interact/pick up nearby items; higher mention_chance means item names can enter speech more often.",
+            },
         }
 
     def _relationship_context_for(self, agent_id: str, nearby_agents: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1612,7 +1772,7 @@ class SimulationRuntime:
     def _director_item_summaries(self) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         for item in self.world.map.items:
-            if item.hidden:
+            if item.hidden or self._is_low_information_item_name(item.name):
                 continue
             items.append(
                 {
@@ -1913,3 +2073,33 @@ def _env_bool(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _clamp_probability(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(1.0, number))
+
+
+def _stable_probability(seed: str) -> float:
+    value = 0
+    for char in seed:
+        value = (value * 131 + ord(char)) % 10000
+    return value / 10000.0
+
+
+def _looks_like_connection_failure(message: str) -> bool:
+    lowered = str(message or "").lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "all connection attempts failed",
+            "connection refused",
+            "connecterror",
+            "connection failed",
+            "failed to establish",
+            "errno 61",
+        )
+    )

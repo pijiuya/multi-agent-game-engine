@@ -53,6 +53,241 @@ test("renders the transparent 2D workstation with floating panels", async ({ pag
   await expect(page.getByTestId("panel-properties").locator(".property-heading strong")).toHaveText("Agent");
 });
 
+test("pause button keeps simulation visually paused", async ({ page }) => {
+  const runningWorld = { ...fallbackWorld, running: true, tick: 3 };
+  const pausedWorld = { ...fallbackWorld, running: false, tick: 3 };
+  await page.route("**/api/world", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(runningWorld) })
+  );
+  await page.route("**/api/simulation/pause", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(pausedWorld) })
+  );
+
+  await page.goto("/");
+  const controls = page.getByTestId("transport-controls");
+  await expect(controls.getByRole("button", { name: "运行", exact: true })).toHaveClass(/active/);
+  await controls.getByRole("button", { name: "暂停", exact: true }).click();
+  await expect(controls.getByRole("button", { name: "暂停", exact: true })).toHaveClass(/active/);
+});
+
+test("scene subtitle stays visible after canvas click and keyboard input", async ({ page }) => {
+  await page.unroute("**/api/**");
+  const world = structuredClone(fallbackWorld);
+  world.narrative = {
+    ...world.narrative,
+    enabled: true,
+    model_provider: "model_remote_llm",
+    recent_summary: "叙事摘要"
+  };
+  world.events.push({
+    id: "evt_scene_caption",
+    type: "narration",
+    message: "风从街口压低，场景叙事仍然稳定显示。",
+    tick: 4,
+    timestamp: Date.now() / 1000,
+    payload: { source: "scene_director" }
+  });
+  await page.route("**/api/world", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify(world) }));
+  await page.route("**/api/narrative/subtitle", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        status: "ready",
+        line: {
+          id: "evt_scene_caption_api",
+          type: "narration",
+          message: "门后的沉默突然变重，下一步选择会暴露真正的目标。",
+          tick: 5,
+          timestamp: Date.now() / 1000,
+          payload: { source: "scene_director" }
+        },
+        error: null,
+        pending: false,
+        recent_summary: "门后的沉默突然变重，下一步选择会暴露真正的目标。",
+        model_provider: "model_remote_llm",
+        model_conflict: false,
+        recommended_model_provider: ""
+      })
+    })
+  );
+  await page.route("**/api/models", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        models: [
+          {
+            id: "model_remote_llm",
+            name: "远程叙事 LLM",
+            kind: "remote",
+            provider: "openai-compatible",
+            model: "story-model",
+            enabled: true,
+            capabilities: ["llm"]
+          }
+        ]
+      })
+    })
+  );
+  await page.route("**/api/model-capabilities/status", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ capabilities: [] }) }));
+  await page.route("**/api/runtime/status", (route) => route.abort());
+
+  await page.goto("/");
+  await expect(page.getByTestId("scene-subtitle")).toContainText("门后的沉默突然变重");
+  await page.mouse.click(620, 430);
+  await page.keyboard.press("A");
+  await page.keyboard.press("Escape");
+
+  await expect(page.getByTestId("scene-viewport")).toBeVisible();
+  await expect(page.getByTestId("scene-subtitle")).toContainText("门后的沉默突然变重");
+  await expect(page.locator(".renderer-recovery-panel")).toHaveCount(0);
+});
+
+test("scene subtitle can fall back to legacy scene director system events", async ({ page }) => {
+  await page.unroute("**/api/**");
+  const world = structuredClone(fallbackWorld);
+  world.narrative = { ...world.narrative, enabled: true, recent_summary: "旧版叙事摘要" };
+  world.events.push({
+    id: "evt_scene_system_caption",
+    type: "system",
+    message: "旧版导演文本仍然显示为字幕。",
+    tick: 5,
+    timestamp: Date.now() / 1000,
+    payload: { source: "scene_director" }
+  });
+  await page.route("**/api/world", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify(world) }));
+  await page.route("**/api/narrative/subtitle", (route) => route.abort());
+  await page.route("**/api/models", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ models: [] }) }));
+  await page.route("**/api/model-capabilities/status", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ capabilities: [] }) }));
+  await page.route("**/api/runtime/status", (route) => route.abort());
+
+  await page.goto("/");
+
+  await expect(page.getByTestId("scene-subtitle")).toContainText("旧版导演文本仍然显示为字幕。");
+});
+
+test("narrative panel explains waiting, pending, and error subtitle states", async ({ page }) => {
+  await page.setViewportSize({ width: 1500, height: 1180 });
+  await page.unroute("**/api/**");
+  const world = structuredClone(fallbackWorld);
+  world.narrative = { ...world.narrative, enabled: true };
+  await page.route("**/api/world", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify(world) }));
+  await page.route("**/api/narrative/subtitle", (route) => {
+    const error = [...world.events].reverse().find((event) => event.type === "scene_director_error") ?? null;
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        status: error ? "error" : world.scene_director?.pending ? "pending" : world.running ? "waiting_for_cadence" : "waiting_for_run",
+        line: null,
+        error,
+        pending: Boolean(world.scene_director?.pending),
+        recent_summary: world.narrative.recent_summary,
+        model_provider: world.narrative.model_provider,
+        model_conflict: false,
+        recommended_model_provider: ""
+      })
+    });
+  });
+  await page.route("**/api/models", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ models: [] }) }));
+  await page.route("**/api/model-capabilities/status", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ capabilities: [] }) }));
+  await page.route("**/api/runtime/status", (route) => route.abort());
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "展开 场景叙事" }).evaluate((element) => (element as HTMLElement).click());
+  await expect(page.locator(".narrative-caption-preview")).toContainText("等待运行");
+  await expect(page.locator(".narrative-caption-preview")).toContainText("叙事已开启，运行模拟后会生成独立画布字幕。");
+
+  world.running = true;
+  world.scene_director = { pending: true, last_tick: 0 };
+  await page.waitForTimeout(2100);
+  await expect(page.locator(".narrative-caption-preview")).toContainText("生成中");
+  await expect(page.locator(".narrative-caption-preview")).toContainText("场景导演正在生成第一条独立字幕。");
+
+  world.scene_director = { pending: false, last_tick: 0 };
+  world.events.push({
+    id: "evt_scene_director_error",
+    type: "scene_director_error",
+    message: "导演模型不可用",
+    tick: 6,
+    timestamp: Date.now() / 1000,
+    payload: {}
+  });
+  await page.waitForTimeout(2100);
+  await expect(page.locator(".narrative-caption-preview")).toContainText("生成错误");
+  await expect(page.getByText("导演模型不可用")).toBeVisible();
+});
+
+test("narrative and agent panels save independent LLM choices", async ({ page }) => {
+  await page.setViewportSize({ width: 1500, height: 1180 });
+  await page.unroute("**/api/**");
+  const world = structuredClone(fallbackWorld);
+  world.narrative = { ...world.narrative, enabled: true, model_provider: "model_scene_llm" };
+  const models = [
+    {
+      id: "model_scene_llm",
+      name: "场景导演 LLM",
+      kind: "remote",
+      provider: "openai-compatible",
+      model: "scene-model",
+      enabled: true,
+      capabilities: ["llm"]
+    },
+    {
+      id: "model_agent_llm",
+      name: "Agent 行为 LLM",
+      kind: "remote",
+      provider: "openai-compatible",
+      model: "agent-model",
+      enabled: true,
+      capabilities: ["llm"]
+    }
+  ];
+  await page.route("**/api/world", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify(world) }));
+  await page.route("**/api/models", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ models }) }));
+  await page.route("**/api/narrative/subtitle", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        status: "waiting_for_run",
+        line: null,
+        error: null,
+        pending: false,
+        recent_summary: "",
+        model_provider: world.narrative.model_provider,
+        model_conflict: false,
+        recommended_model_provider: "model_agent_llm"
+      })
+    })
+  );
+  await page.route("**/api/model-capabilities/status", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ capabilities: [] }) }));
+  await page.route("**/api/runtime/status", (route) => route.abort());
+  await page.route("**/api/narrative", async (route) => {
+    const patch = route.request().postDataJSON();
+    Object.assign(world.narrative, patch);
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify(world) });
+  });
+  await page.route("**/api/agents/agent_mira", async (route) => {
+    const patch = route.request().postDataJSON();
+    Object.assign(world.agent_profiles.agent_mira, patch);
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify(world) });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "展开 场景叙事" }).evaluate((element) => (element as HTMLElement).click());
+  await expect(page.getByLabel("场景导演模型")).toBeVisible();
+  await expect(page.getByText("可用独立模型：Agent 行为 LLM。")).toBeVisible();
+  await page.getByLabel("场景前提").fill("新的场景前提不会被轮询覆盖");
+  await page.getByLabel("场景导演模型").selectOption("model_agent_llm");
+  await page.waitForTimeout(2300);
+  await expect(page.getByLabel("场景前提")).toHaveValue("新的场景前提不会被轮询覆盖");
+  await expect(page.getByLabel("场景导演模型")).toHaveValue("model_agent_llm");
+  await page.locator(".narrative-panel .panel-action-button").click();
+  await expect.poll(() => world.narrative.model_provider).toBe("model_agent_llm");
+
+  await page.getByTestId("panel-agents").locator(".agent-card").first().click();
+  await page.getByLabel("Mira LLM").selectOption("model_scene_llm");
+  await expect.poll(() => world.agent_profiles.agent_mira.model_provider).toBe("model_scene_llm");
+});
+
 test("runtime monitor shows model groups and local device pressure", async ({ page }) => {
   await page.route("**/api/runtime/status", (route) =>
     route.fulfill({
@@ -830,6 +1065,11 @@ test("agent panel controls animation, stop, dialogue, and item mobility", async 
   await page.getByLabel("对话距离").fill("210");
   await page.getByLabel("对话距离").blur();
   expect((agentPatches[agentPatches.length - 1]?.dialogue_policy as Record<string, unknown>).distance).toBe(210);
+
+  await page.getByLabel("Item 互动可能性").fill("0.8");
+  expect((agentPatches[agentPatches.length - 1]?.dialogue_policy as Record<string, unknown>).item_interaction_chance).toBe(0.8);
+  await page.getByLabel("Item 提及可能性").fill("0.25");
+  expect((agentPatches[agentPatches.length - 1]?.dialogue_policy as Record<string, unknown>).item_mention_chance).toBe(0.25);
 
   const gif = Buffer.from(
     "R0lGODlhAQABAPAAAP///wAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==",

@@ -13,9 +13,10 @@ def main() -> None:
     host = os.environ.get("AGENT_ENGINE_HOST", "127.0.0.1")
     port = int(os.environ.get("AGENT_ENGINE_PORT", "8000"))
     log_level = os.environ.get("AGENT_ENGINE_LOG_LEVEL", "info")
+    uvicorn_app = os.environ.get("AGENT_ENGINE_UVICORN_APP", "agent_engine.api.main:app")
 
     uvicorn.run(
-        "agent_engine.api.main:app",
+        uvicorn_app,
         host=host,
         port=port,
         log_level=log_level,

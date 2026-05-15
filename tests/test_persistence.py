@@ -51,6 +51,9 @@ def test_project_store_loads_legacy_snapshots_without_narrative_state(tmp_path):
         "cadence_ticks": 50,
         "last_tick": -999,
         "recent_summary": "",
+        "model_provider": "",
+        "dedicated_service_enabled": False,
+        "service_model": "",
     }
     assert all(state.narrative_state == {} for state in loaded.agent_states.values())
 

@@ -50,29 +50,33 @@ class MockSceneDirector:
 
     async def generate(self, request: SceneDirectorRequest) -> SceneDirectorResponse:
         active_agents = [agent for agent in request.agents if agent.get("status") != "hidden"]
-        visible_items = [item for item in request.items if not item.get("hidden")]
         premise = str(request.narrative.get("premise") or "The scene keeps changing in small ways.")
-        item_names = ", ".join(str(item.get("name") or item.get("id")) for item in visible_items[:3])
-        item_clause = f" Nearby scene items: {item_names}." if item_names else ""
-        cue = f"{premise} {len(active_agents)} visible agent(s) are present.{item_clause}"
+        agent_names = ", ".join(str(agent.get("name") or agent.get("id")) for agent in active_agents[:3])
+        agent_clause = f"{agent_names} 的下一步会暴露真正的目标" if agent_names else "每一次停顿都像在倒数"
+        cue = f"{premise}：空气骤然收紧，{agent_clause}。"
         return SceneDirectorResponse(
-            text="Scene director updated the shared narrative context.",
+            text=cue,
             proposal={
                 "events": [
                     {
                         "type": "narration",
                         "message": cue,
-                        "payload": {"source": "scene_director"},
+                        "payload": {
+                            "source": "scene_director",
+                            "guidance": "Use this as dramatic pressure for the next agent choices; do not quote it as dialogue.",
+                        },
                     }
                 ],
                 "state_changes": [
                     {
-                        "op": "add_memory",
-                        "agent_id": "__scene__",
-                        "kind": "scene",
-                        "text": cue,
+                        "op": "set_agent_narrative_state",
+                        "agent_id": agent.get("id"),
+                        "key": "focus",
+                        "value": "respond_to_scene_pressure",
                     }
+                    for agent in active_agents[:3]
                 ],
+                "memories": [{"agent_id": "__scene__", "kind": "scene", "text": cue}],
             },
             raw={"mock": True},
         )
@@ -94,11 +98,19 @@ class LLMSceneDirector:
                 action_space=["wait"],
                 observation=request.to_dict(),
                 system_prompt=(
-                    "Return JSON for scene direction with keys text and proposal. "
-                    "proposal may contain events and state_changes only. "
-                    "Allowed state_changes are set_agent_narrative_state and add_memory. "
-                    "Do not include agent actions. Tie narration to concrete map items in observation.items "
-                    "or recent item interaction events whenever they exist. Use item names exactly."
+                    "Return ONLY valid JSON for scene direction with keys text and proposal. "
+                    "The top-level text must be an independent visible subtitle, preferably in natural zh-CN unless the premise is clearly English. "
+                    "Write one short cinematic/stage-like line with pressure, danger, desire, or a turning point. "
+                    "Hint at the next trend or choice without speaking for any agent. "
+                    "Never write explanatory bookkeeping such as 'visible objects include...' or 'nearby scene items'. "
+                    "proposal.events must include exactly one narration/hint/weather/environment event with the same subtitle. "
+                    "Use payload.source='scene_director' and include payload.guidance as a brief next-beat directive for agents. "
+                    "proposal.state_changes may include set_agent_narrative_state only with keys mood, focus, or urgency, "
+                    "for up to three visible agents. Use these to bias the next agent actions/speech trends. "
+                    "Allowed memories are scene/cue memories for agent_id '__scene__'. "
+                    "Do not include agent actions. Do not quote the subtitle as agent dialogue. "
+                    "Use concrete map items only when they have specific non-default names and are genuinely dramatic; ignore generic names such as Item or Object. "
+                    "Use item and agent names exactly when you use them."
                 ),
             )
         )
@@ -114,6 +126,33 @@ class LLMSceneDirector:
             text=str(payload.get("text") or model_response.text or ""),
             proposal=proposal,
             raw=model_response.raw,
+        )
+
+
+class RemoteNarrativeDirector:
+    name = "remote-narrative-director"
+
+    def __init__(self, base_url: str, default_model: str = "", timeout_seconds: float = 75.0):
+        self.base_url = base_url.rstrip("/")
+        self.default_model = default_model
+        self.timeout_seconds = max(1.0, float(timeout_seconds))
+
+    async def generate(self, request: SceneDirectorRequest) -> SceneDirectorResponse:
+        import httpx
+
+        model = str(request.narrative.get("service_model") or self.default_model or "").strip()
+        async with httpx.AsyncClient(timeout=self.timeout_seconds, trust_env=False) as client:
+            response = await client.post(
+                f"{self.base_url}/api/narrative/subtitle/generate",
+                json={"request": request.to_dict(), "model": model},
+            )
+            response.raise_for_status()
+            data = response.json()
+        proposal = data.get("proposal")
+        return SceneDirectorResponse(
+            text=str(data.get("text") or ""),
+            proposal=proposal if isinstance(proposal, dict) else {},
+            raw=data if isinstance(data, dict) else {},
         )
 
 

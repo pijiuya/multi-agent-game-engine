@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
+import re
 
 
 @dataclass(slots=True)
@@ -193,17 +194,45 @@ def _mock_item_name(observation: dict[str, Any]) -> str:
     candidates = item_context.get("nearby_named_items") if isinstance(item_context, dict) else observation.get("nearby_items")
     if not isinstance(candidates, list):
         return ""
-    names: list[str] = []
+    recent_item_ids = set()
+    if isinstance(item_context, dict) and isinstance(item_context.get("recent_item_events"), list):
+        recent_item_ids = {
+            str(event.get("item_id"))
+            for event in item_context["recent_item_events"]
+            if isinstance(event, dict) and event.get("item_id")
+        }
     for item in candidates:
         if not isinstance(item, dict):
             continue
         name = str(item.get("name") or "").strip()
-        if name and name not in names:
-            names.append(name)
-    for name in names:
-        if name.lower() not in {"item", "object"}:
+        item_id = str(item.get("id") or "")
+        if _mock_quality_item_anchor(item, recent_item_ids, item_id):
             return name
-    return names[0] if names else ""
+    return ""
+
+
+def _mock_low_information_item_name(name: str) -> bool:
+    normalized = str(name or "").strip().lower()
+    if not normalized:
+        return True
+    if normalized in {"item", "object", "element", "thing", "物体", "元素", "道具", "未命名"}:
+        return True
+    return re.fullmatch(r"(item|object|element|thing)[\s_-]*\d*", normalized) is not None
+
+
+def _mock_quality_item_anchor(item: dict[str, Any], recent_item_ids: set[str], item_id: str) -> bool:
+    name = str(item.get("name") or "").strip()
+    if _mock_low_information_item_name(name):
+        return False
+    return bool(
+        (item_id and item_id in recent_item_ids)
+        or item.get("description")
+        or item.get("tags")
+        or item.get("available_affordances")
+        or item.get("configured_affordances")
+        or item.get("affordances")
+        or item.get("state")
+    )
 
 
 def _mock_should_reference_item(observation: dict[str, Any], agent_id: str) -> bool:
@@ -385,8 +414,10 @@ def _request_to_prompt(request: ModelRequest) -> str:
         "a move target that would collide.\n"
         "Base speech and social choices primarily on identity, observation.relationships, nearby agents/items, "
         "observation.item_context, "
-        "and observation.agent_recent_events. observation.scene_context is weak background mood only; "
-        "do not quote narration as the agent's own speech.\n"
+        "and observation.agent_recent_events. observation.scene_context is directional scene pressure: use it to bias "
+        "what the agent notices, avoids, asks, or moves toward, but do not quote narration as the agent's own speech. "
+        "When scene_context provides a cue and there is a concrete nearby person, object, or recent event, prefer a "
+        "specific say/social beat over silent waiting unless movement or interaction is clearly stronger.\n"
         "Use observation.region_context: road/walkable targets have higher movement priority than action areas; "
         "social regions favor social/say actions; residential regions favor calm local routines.\n"
         "Do not invent ids. For social use only observation.dialogue_candidates ids; for interact/use/pick_up use visible nearby item ids. "

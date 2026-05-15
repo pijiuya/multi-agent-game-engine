@@ -125,6 +125,8 @@ export type DialoguePolicy = {
   distance: number;
   cooldown_ticks: number;
   language: string;
+  item_interaction_chance: number;
+  item_mention_chance: number;
 };
 
 export type ActionExtensionCheckIssue = {
@@ -209,6 +211,9 @@ export type NarrativeConfig = {
   cadence_ticks: number;
   last_tick: number;
   recent_summary: string;
+  model_provider: string;
+  dedicated_service_enabled: boolean;
+  service_model: string;
 };
 
 export type WorldSnapshot = {
@@ -249,6 +254,7 @@ export type WorldSnapshot = {
   scene_director?: {
     pending: boolean;
     last_tick: number;
+    model_provider?: string;
     started_tick?: number;
     age_ticks?: number;
     watchdog_age_ticks?: number;
@@ -464,6 +470,28 @@ export type RuntimeStatus = {
   };
   models: RuntimeModelStatus[];
   hardware: RuntimeHardwareStatus;
+};
+
+export type NarrativeSubtitleStatus = {
+  status: "ready" | "error" | "pending" | "disabled" | "waiting_for_run" | "waiting_for_cadence";
+  line: WorldEvent | null;
+  error: WorldEvent | null;
+  pending: boolean;
+  recent_summary: string;
+  model_provider: string;
+  model_conflict?: boolean;
+  recommended_model_provider?: string;
+  service?: NarrativeServiceStatus;
+};
+
+export type NarrativeServiceStatus = {
+  enabled: boolean;
+  url: string;
+  healthy: boolean;
+  model: string;
+  available_models: string[];
+  pending: number;
+  last_error: string;
 };
 
 export type GeneratedImageCandidate = {

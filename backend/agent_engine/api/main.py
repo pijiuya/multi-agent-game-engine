@@ -31,7 +31,7 @@ from agent_engine.engine.action_extensions import (
     compile_action_extensions,
 )
 from agent_engine.engine.simulation import SimulationRuntime
-from agent_engine.engine.scene_director import LLMSceneDirector, MockSceneDirector
+from agent_engine.engine.scene_director import LLMSceneDirector, MockSceneDirector, RemoteNarrativeDirector
 from agent_engine.engine.world import (
     AgentAction,
     AgentProfile,
@@ -58,6 +58,8 @@ PROJECT_DIR = Path(os.getenv("AGENT_ENGINE_PROJECT_DIR", "runtime_project"))
 store = ProjectStore(PROJECT_DIR)
 runtime = SimulationRuntime(store.load_world())
 arbiter = EnvironmentArbiter()
+narrative_service_process: subprocess.Popen[Any] | None = None
+narrative_service_last_start_attempt = 0.0
 
 app = FastAPI(title="Multi-Agent AI Game Engine", version="0.1.0")
 app.add_middleware(
@@ -110,6 +112,14 @@ class NarrativePatch(BaseModel):
     premise: str | None = None
     tone: str | None = None
     cadence_ticks: int | None = None
+    model_provider: str | None = None
+    dedicated_service_enabled: bool | None = None
+    service_model: str | None = None
+
+
+class NarrativeServicePatch(BaseModel):
+    enabled: bool | None = None
+    model: str | None = None
 
 
 class WorldMapPatch(BaseModel):
@@ -296,6 +306,9 @@ capability_tasks_lock = threading.Lock()
 embedded_sam_cache: dict[str, Any] = {}
 
 OLLAMA_BASE_URL = "http://127.0.0.1:11434"
+NARRATIVE_SERVICE_ID = "local_narrative_service"
+NARRATIVE_SERVICE_HOST = os.getenv("AGENT_ENGINE_NARRATIVE_HOST", "127.0.0.1")
+NARRATIVE_SERVICE_PORT = os.getenv("AGENT_ENGINE_NARRATIVE_PORT", "8011")
 LLM_LOCAL_MODEL_ID = "model_local_llm"
 LLM_DEFAULT_MODEL = "qwen2.5:7b"
 LLM_SMALL_MODEL = "qwen2.5:1.5b"
@@ -412,14 +425,293 @@ def replace_world(payload: dict[str, Any]) -> dict[str, Any]:
 
 @app.patch("/api/narrative")
 def patch_narrative(payload: NarrativePatch) -> dict[str, Any]:
+    before = dict(runtime.world.narrative)
+    patch = _payload_data(payload)
     runtime.world.narrative = normalize_narrative_config(
         {
             **runtime.world.narrative,
-            **_payload_data(payload),
+            **patch,
         }
     )
+    reset_keys = {"premise", "tone", "model_provider", "dedicated_service_enabled", "service_model"}
+    if any(before.get(key) != runtime.world.narrative.get(key) for key in reset_keys):
+        runtime.world.narrative["recent_summary"] = ""
+        runtime.world.narrative["last_tick"] = -999
+        runtime.world.add_event(
+            "narrative_config_updated",
+            "Narrative settings updated; waiting for the next scene director subtitle.",
+            payload={"source": "narrative_config", "changed": sorted(patch.keys())},
+        )
     store.save_world(runtime.world)
     return runtime.snapshot()
+
+
+@app.get("/api/narrative/service")
+def narrative_service_status() -> dict[str, Any]:
+    return _narrative_service_status()
+
+
+@app.patch("/api/narrative/service")
+def patch_narrative_service(payload: NarrativeServicePatch) -> dict[str, Any]:
+    patch = _payload_data(payload)
+    changed: list[str] = []
+    if "enabled" in patch:
+        enabled = bool(patch["enabled"])
+        if runtime.world.narrative.get("dedicated_service_enabled") != enabled:
+            runtime.world.narrative["dedicated_service_enabled"] = enabled
+            changed.append("dedicated_service_enabled")
+    if "model" in patch:
+        model = str(patch.get("model") or "").strip()
+        if runtime.world.narrative.get("service_model") != model:
+            runtime.world.narrative["service_model"] = model
+            changed.append("service_model")
+    if changed:
+        runtime.world.narrative["recent_summary"] = ""
+        runtime.world.narrative["last_tick"] = -999
+        runtime.world.add_event(
+            "narrative_config_updated",
+            "Narrative subtitle service settings updated; waiting for the next scene director subtitle.",
+            payload={"source": "narrative_service_config", "changed": changed},
+        )
+        store.save_world(runtime.world)
+    return _narrative_service_status()
+
+
+@app.get("/api/narrative/subtitle")
+def narrative_subtitle() -> dict[str, Any]:
+    line = _latest_narrative_caption()
+    error = next(
+        (event.to_dict() for event in reversed(runtime.world.events) if event.type == "scene_director_error"),
+        None,
+    )
+    pending = bool(runtime.snapshot().get("scene_director", {}).get("pending"))
+    model_provider = str(runtime.world.narrative.get("model_provider") or runtime.default_provider_id or "mock")
+    model_conflict = _scene_director_model_conflicts_with_agent(model_provider)
+    if line:
+        status = "ready"
+    elif error:
+        status = "error"
+    elif pending:
+        status = "pending"
+    elif not bool(runtime.world.narrative.get("enabled", False)):
+        status = "disabled"
+    elif not runtime.world.running:
+        status = "waiting_for_run"
+    else:
+        status = "waiting_for_cadence"
+    return {
+        "status": status,
+        "line": line,
+        "error": error,
+        "pending": pending,
+        "recent_summary": str(runtime.world.narrative.get("recent_summary") or ""),
+        "model_provider": model_provider,
+        "model_conflict": model_conflict,
+        "recommended_model_provider": _recommended_scene_director_model_provider(model_provider),
+        "service": _narrative_service_status(),
+    }
+
+
+def _narrative_service_status() -> dict[str, Any]:
+    enabled = bool(runtime.world.narrative.get("dedicated_service_enabled", True))
+    url = _narrative_service_url()
+    model = str(runtime.world.narrative.get("service_model") or os.getenv("AGENT_ENGINE_NARRATIVE_LLM_MODEL") or LLM_SMALL_MODEL)
+    configured_models = _configured_narrative_service_models()
+    payload: dict[str, Any] = {
+        "enabled": enabled,
+        "url": url,
+        "healthy": False,
+        "model": model,
+        "available_models": configured_models,
+        "pending": 0,
+        "last_error": "",
+    }
+    if enabled and bool(runtime.world.narrative.get("enabled", False)):
+        _ensure_narrative_service_process()
+    try:
+        request = urlrequest.Request(f"{url}/api/narrative/status", method="GET")
+        with urlrequest.urlopen(request, timeout=1.5) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, ValueError, OSError, json.JSONDecodeError) as exc:
+        payload["last_error"] = f"独立叙事服务未连接：{exc}"
+        return payload
+    models = [str(item) for item in data.get("available_models", []) if str(item).strip()]
+    models = _unique_strings([*configured_models, *models])
+    service_model = str(data.get("model") or model)
+    if runtime.world.narrative.get("service_model"):
+        service_model = model
+    return {
+        **payload,
+        "healthy": bool(data.get("healthy")),
+        "model": service_model,
+        "available_models": models,
+        "pending": int(data.get("pending") or 0),
+        "last_error": str(data.get("last_error") or ""),
+    }
+
+
+def _configured_narrative_service_models() -> list[str]:
+    models: list[str] = []
+    for config in store.load_model_configs():
+        if not config.get("enabled", True) or "llm" not in set(config.get("capabilities", [])):
+            continue
+        provider = str(config.get("provider") or "").strip()
+        if provider != "ollama":
+            continue
+        model = str(config.get("model") or "").strip()
+        if model:
+            models.append(model)
+    configured = str(runtime.world.narrative.get("service_model") or "").strip()
+    return _unique_strings([configured, *models, os.getenv("AGENT_ENGINE_NARRATIVE_LLM_MODEL") or LLM_SMALL_MODEL])
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        item = str(value or "").strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def _narrative_service_url() -> str:
+    configured = os.getenv("AGENT_ENGINE_NARRATIVE_URL", "").strip()
+    if configured:
+        return configured.rstrip("/")
+    return f"http://{NARRATIVE_SERVICE_HOST}:{NARRATIVE_SERVICE_PORT}"
+
+
+def _ensure_narrative_service_process() -> None:
+    global narrative_service_last_start_attempt, narrative_service_process
+    if not _narrative_autostart_enabled():
+        return
+    if _narrative_service_healthy():
+        return
+    if narrative_service_process and narrative_service_process.poll() is None:
+        return
+    now = time.time()
+    if now - narrative_service_last_start_attempt < 5:
+        return
+    narrative_service_last_start_attempt = now
+    command = [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "agent_engine.narrative_service:app",
+        "--app-dir",
+        str(Path(__file__).resolve().parents[2]),
+        "--host",
+        NARRATIVE_SERVICE_HOST,
+        "--port",
+        NARRATIVE_SERVICE_PORT,
+    ]
+    env = {
+        **os.environ,
+        "PYTHONUTF8": "1",
+        "AGENT_ENGINE_NARRATIVE_HOST": NARRATIVE_SERVICE_HOST,
+        "AGENT_ENGINE_NARRATIVE_PORT": NARRATIVE_SERVICE_PORT,
+    }
+    try:
+        narrative_service_process = subprocess.Popen(  # noqa: S603
+            command,
+            cwd=str(Path(__file__).resolve().parents[3]),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        narrative_service_process = None
+        return
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        if _narrative_service_healthy():
+            return
+        if narrative_service_process.poll() is not None:
+            return
+        time.sleep(0.1)
+
+
+def _narrative_autostart_enabled() -> bool:
+    if os.getenv("AGENT_ENGINE_DISABLE_NARRATIVE_AUTOSTART") == "1":
+        return False
+    if getattr(sys, "frozen", False):
+        return False
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return False
+    if os.getenv("AGENT_ENGINE_NARRATIVE_URL", "").strip():
+        return _is_local_narrative_url(_narrative_service_url())
+    return NARRATIVE_SERVICE_HOST in {"127.0.0.1", "localhost", "::1"}
+
+
+def _is_local_narrative_url(url: str) -> bool:
+    return url.startswith("http://127.0.0.1:") or url.startswith("http://localhost:") or url.startswith("http://[::1]:")
+
+
+def _narrative_service_healthy() -> bool:
+    try:
+        request = urlrequest.Request(f"{_narrative_service_url()}/healthz", method="GET")
+        with urlrequest.urlopen(request, timeout=0.5) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, ValueError, OSError, json.JSONDecodeError):
+        return False
+    return bool(data.get("ok"))
+
+
+def _stop_narrative_service_process() -> None:
+    global narrative_service_process
+    if narrative_service_process and narrative_service_process.poll() is None:
+        narrative_service_process.terminate()
+    narrative_service_process = None
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _latest_narrative_caption() -> dict[str, Any] | None:
+    events = runtime.world.events
+    cutoff = -1
+    for index, event in enumerate(events):
+        if event.type == "narrative_config_updated":
+            cutoff = index
+    events = list(reversed(events[cutoff + 1 :]))
+    for event in events:
+        if event.type in {"narration", "hint", "weather", "environment"}:
+            return event.to_dict()
+    for event in events:
+        if event.type == "system" and event.payload.get("source") == "scene_director":
+            return event.to_dict()
+    return None
+
+
+def _scene_director_model_conflicts_with_agent(model_provider: str) -> bool:
+    if not model_provider or model_provider == "mock":
+        return False
+    return any(
+        not profile.hidden and str(profile.model_provider or "") == model_provider
+        for profile in runtime.world.agent_profiles.values()
+    )
+
+
+def _recommended_scene_director_model_provider(current_provider: str) -> str:
+    agent_model_ids = {
+        str(profile.model_provider or "")
+        for profile in runtime.world.agent_profiles.values()
+        if not profile.hidden and profile.model_provider
+    }
+    for config in store.load_model_configs():
+        if not config.get("enabled", True) or "llm" not in set(config.get("capabilities", [])):
+            continue
+        provider_id = str(config.get("id") or config.get("provider") or "").strip()
+        if provider_id and provider_id != current_provider and provider_id not in agent_model_ids:
+            return provider_id
+    return ""
 
 
 @app.put("/api/map")
@@ -1201,6 +1493,7 @@ async def start_simulation() -> dict[str, Any]:
 
 @app.post("/api/simulation/pause")
 async def pause_simulation() -> dict[str, Any]:
+    runtime.world.running = False
     await runtime.stop_background()
     store.save_world(runtime.world)
     return runtime.snapshot()
@@ -1309,6 +1602,16 @@ def _public_model_config(config: dict[str, Any]) -> dict[str, Any]:
 
 def _sync_runtime_model_providers() -> None:
     providers = {"mock": MockProvider()}
+    remote_director = RemoteNarrativeDirector(
+        _narrative_service_url(),
+        default_model=os.getenv("AGENT_ENGINE_NARRATIVE_LLM_MODEL") or LLM_SMALL_MODEL,
+        timeout_seconds=_float_env("AGENT_ENGINE_NARRATIVE_TIMEOUT_SECONDS", 75.0),
+    )
+    scene_directors = {
+        "mock": MockSceneDirector(),
+        NARRATIVE_SERVICE_ID: remote_director,
+        "dedicated": remote_director,
+    }
     default_provider_id = "mock"
     first_llm_provider = None
     for config in store.load_model_configs():
@@ -1321,12 +1624,15 @@ def _sync_runtime_model_providers() -> None:
             first_llm_provider = provider
         provider_id = str(config.get("id") or config.get("provider") or "mock")
         providers[provider_id] = provider
+        scene_directors[provider_id] = _scene_director_for_local_chain(provider)
         provider_name = str(config.get("provider") or "mock")
         providers.setdefault(provider_name, provider)
+        scene_directors.setdefault(provider_name, scene_directors[provider_id])
         if provider_name != "mock" and default_provider_id == "mock":
             default_provider_id = provider_id
     runtime.providers = providers
     runtime.default_provider_id = default_provider_id
+    runtime.scene_directors = scene_directors
     runtime.scene_director = _scene_director_for_local_chain(first_llm_provider)
 
 
@@ -1588,6 +1894,8 @@ def _sysctl_int(name: str) -> int | None:
 
 def _scene_director_for_local_chain(provider: Any | None):
     if provider is None:
+        return MockSceneDirector()
+    if getattr(provider, "name", "") == "mock":
         return MockSceneDirector()
     if getattr(provider, "name", "") == "ollama":
         models = set(_detect_ollama_models())
@@ -4330,8 +4638,15 @@ _sync_runtime_action_extensions()
 
 @app.on_event("startup")
 async def _resume_runtime_after_backend_start() -> None:
+    if bool(runtime.world.narrative.get("enabled", False)) and bool(runtime.world.narrative.get("dedicated_service_enabled", False)):
+        _ensure_narrative_service_process()
     _sync_runtime_model_providers()
     _ensure_enabled_extension_actions(_load_action_extensions())
     _sync_runtime_action_extensions()
     if runtime.world.running:
         await runtime.start_background()
+
+
+@app.on_event("shutdown")
+def _shutdown_narrative_service_process() -> None:
+    _stop_narrative_service_process()

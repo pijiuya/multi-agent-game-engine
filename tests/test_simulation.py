@@ -5,7 +5,7 @@ from agent_engine.engine.geometry import distance
 from agent_engine.engine.simulation import SimulationRuntime
 from agent_engine.engine.scene_director import SceneDirectorRequest, SceneDirectorResponse
 from agent_engine.engine.world import AgentAction, GameWorld, MapRegion, Memory, Point, Relationship, WorldItem
-from agent_engine.models.provider import ModelProvider, ModelRequest, ModelResponse
+from agent_engine.models.provider import MockProvider, ModelProvider, ModelRequest, ModelResponse
 
 
 SLOW_CALL_SECONDS = 0.25
@@ -59,6 +59,50 @@ class SlowSceneDirector:
                 ],
             },
         )
+
+
+class NamedSceneDirector:
+    def __init__(self, name: str):
+        self.name = name
+
+    async def generate(self, request: SceneDirectorRequest) -> SceneDirectorResponse:
+        return SceneDirectorResponse(
+            text=f"{self.name} ready",
+            proposal={
+                "events": [
+                    {
+                        "type": "narration",
+                        "message": f"{self.name} narration",
+                        "payload": {"source": "scene_director"},
+                    }
+                ]
+            },
+        )
+
+
+class TextOnlySceneDirector:
+    name = "text-only-scene-director"
+
+    async def generate(self, request: SceneDirectorRequest) -> SceneDirectorResponse:
+        return SceneDirectorResponse(text="The room settles into a watchful quiet.", proposal={})
+
+
+class FailingSceneDirector:
+    name = "failing-scene-director"
+
+    async def generate(self, request: SceneDirectorRequest) -> SceneDirectorResponse:
+        raise RuntimeError("All connection attempts failed")
+
+
+class CountingProvider(ModelProvider):
+    name = "counting"
+
+    def __init__(self):
+        self.calls = 0
+
+    async def generate(self, request: ModelRequest) -> ModelResponse:
+        self.calls += 1
+        return ModelResponse(text="should not be used", actions=[{"type": "wait", "payload": {}}])
 
 
 async def test_slow_model_does_not_block_tick():
@@ -197,6 +241,137 @@ async def test_slow_scene_director_does_not_block_tick_or_touch_agent_model_stat
     assert world.narrative["recent_summary"] == "scene direction ready"
 
 
+async def test_scene_director_uses_narrative_model_provider():
+    world = GameWorld.default()
+    for profile in world.agent_profiles.values():
+        profile.hidden = True
+    world.narrative["enabled"] = True
+    world.narrative["cadence_ticks"] = 1
+    world.narrative["model_provider"] = "scene_b"
+    runtime = SimulationRuntime(world, director_interval_ticks=1)
+    runtime.scene_directors = {
+        "scene_a": NamedSceneDirector("scene_a"),
+        "scene_b": NamedSceneDirector("scene_b"),
+    }
+    runtime.default_provider_id = "scene_a"
+    runtime.start()
+
+    await runtime.tick(0.1)
+    await asyncio.sleep(0.01)
+    await runtime.tick(0.1)
+
+    assert any(event.message == "scene_b narration" for event in world.events)
+    assert not any(event.type == "narration" and event.message == "scene_b ready" for event in world.events)
+    assert world.narrative["recent_summary"] == "scene_b ready"
+
+
+async def test_scene_director_text_only_response_becomes_visible_narration():
+    world = GameWorld.default()
+    for agent_id, profile in world.agent_profiles.items():
+        profile.hidden = agent_id != "agent_mira"
+    world.narrative["enabled"] = True
+    world.narrative["cadence_ticks"] = 1
+    world.narrative["tone"] = "紧张而克制"
+    runtime = SimulationRuntime(world, scene_director=TextOnlySceneDirector(), director_interval_ticks=1)
+    runtime.start()
+
+    await runtime.tick(0.1)
+    await asyncio.sleep(0)
+    await runtime.tick(0.1)
+
+    assert any(
+        event.type == "narration"
+        and event.message == "The room settles into a watchful quiet."
+        and event.payload.get("source") == "scene_director"
+        for event in world.events
+    )
+    assert world.narrative["recent_summary"] == "The room settles into a watchful quiet."
+    assert world.agent_states["agent_mira"].narrative_state["mood"] == "紧张而克制"
+    assert world.agent_states["agent_mira"].narrative_state["urgency"] == "rising"
+
+
+async def test_dedicated_narrative_service_failure_does_not_fallback_to_agent_provider():
+    world = GameWorld.default()
+    for profile in world.agent_profiles.values():
+        profile.hidden = True
+    provider = CountingProvider()
+    world.narrative["enabled"] = True
+    world.narrative["cadence_ticks"] = 1
+    world.narrative["dedicated_service_enabled"] = True
+    world.narrative["model_provider"] = "agent_llm"
+    runtime = SimulationRuntime(world, providers={"mock": MockProvider(), "agent_llm": provider}, director_interval_ticks=1)
+    runtime.scene_directors = {"local_narrative_service": FailingSceneDirector()}
+    runtime.start()
+
+    await runtime.tick(0.1)
+    await asyncio.sleep(0)
+    await runtime.tick(0.1)
+
+    assert provider.calls == 0
+    assert world.narrative["enabled"] is False
+    assert world.narrative["dedicated_service_enabled"] is False
+    assert any(event.type == "scene_director_error" and "场景叙事已临时关闭" in event.message for event in world.events)
+    assert not any(event.type == "narration" and event.payload.get("source") == "scene_director" for event in world.events)
+
+
+async def test_scene_director_can_run_alongside_agent_when_provider_has_capacity():
+    world = GameWorld.default()
+    for agent_id, profile in world.agent_profiles.items():
+        profile.hidden = agent_id != "agent_mira"
+        profile.model_provider = "slow"
+    world.narrative["enabled"] = True
+    world.narrative["cadence_ticks"] = 1
+    world.narrative["model_provider"] = "slow"
+    runtime = SimulationRuntime(
+        world,
+        providers={"mock": MockProvider(), "slow": SlowProvider()},
+        director_interval_ticks=1,
+    )
+    runtime.scene_directors = {"mock": TextOnlySceneDirector(), "slow": SlowSceneDirector()}
+    runtime.action_prefilter_enabled = False
+    runtime.start()
+
+    await runtime.tick(0.1)
+
+    assert world.agent_states["agent_mira"].pending_model is True
+    assert runtime.snapshot()["scene_director"]["pending"] is True
+    assert world.narrative["last_tick"] == 0
+
+    await asyncio.sleep(SLOW_CALL_SECONDS + 0.05)
+    await runtime.tick(0.1)
+
+
+async def test_scene_director_waits_when_same_provider_lane_is_full():
+    world = GameWorld.default()
+    for agent_id, profile in world.agent_profiles.items():
+        profile.model_provider = "slow"
+        profile.hidden = agent_id != "agent_mira"
+    world.narrative["enabled"] = True
+    world.narrative["cadence_ticks"] = 1
+    world.narrative["model_provider"] = "slow"
+    runtime = SimulationRuntime(
+        world,
+        providers={"mock": MockProvider(), "slow": SlowProvider()},
+        director_interval_ticks=1,
+    )
+    runtime.scene_directors = {"mock": TextOnlySceneDirector(), "slow": SlowSceneDirector()}
+    runtime.action_prefilter_enabled = False
+    runtime.model_concurrency = 1
+    runtime.start()
+
+    await runtime.tick(0.1)
+
+    assert any(state.pending_model for state in world.agent_states.values())
+    assert runtime.snapshot()["scene_director"]["pending"] is False
+    assert world.narrative["last_tick"] == -999
+
+    await asyncio.sleep(SLOW_CALL_SECONDS + 0.05)
+    await runtime.tick(0.1)
+
+    assert all(not state.pending_model for state in world.agent_states.values())
+    assert runtime.snapshot()["scene_director"]["pending"] is True
+
+
 async def test_scene_director_watchdog_recovers_stalled_task():
     world = GameWorld.default()
     for profile in world.agent_profiles.values():
@@ -260,7 +435,7 @@ def test_observation_includes_llm_action_context():
     assert observation["narrative_state"] == {"focus": "lamp"}
     assert observation["scene_memories"][0]["text"] == "Mira crossed the threshold."
     assert observation["narrative_cues"][0]["message"] == "Notice the lamp."
-    assert observation["scene_context"]["mode"] == "weak_background"
+    assert observation["scene_context"]["mode"] == "directional_scene_pressure"
     assert observation["scene_context"]["cues"][0]["message"] == "Notice the lamp."
     assert all(event["type"] != "hint" for event in observation["agent_recent_events"])
     assert observation["agent_recent_events"][0]["type"] == "speech"
@@ -297,9 +472,9 @@ def test_social_region_dialogue_range_matches_observation_and_rules():
         )
     )
 
-    assert observation["dialogue_range"]["base"] == 180.0
+    assert observation["dialogue_range"]["base"] == 240.0
     assert observation["dialogue_range"]["social_region_bonus"] == runtime.rule_engine.social_region_dialogue_bonus
-    assert observation["dialogue_range"]["effective"] == 260.0
+    assert observation["dialogue_range"]["effective"] == 320.0
     assert observation["dialogue_candidates"][0]["id"] == "agent_tao"
     assert result["ok"] is True
 
@@ -402,6 +577,7 @@ def test_model_interact_and_use_prefer_available_affordance_items():
 
 def test_prefilter_uses_item_affordance_without_model_call():
     runtime = SimulationRuntime(GameWorld.default())
+    runtime.world.agent_profiles["agent_mira"].dialogue_policy["item_interaction_chance"] = 1
     observation = {
         "nearby_items": [
             {
@@ -420,6 +596,7 @@ def test_prefilter_uses_item_affordance_without_model_call():
 
 def test_prefilter_keeps_social_and_movement_above_item_opportunities():
     runtime = SimulationRuntime(GameWorld.default())
+    runtime.world.agent_profiles["agent_mira"].dialogue_policy["item_interaction_chance"] = 1
     observation = {
         "dialogue_candidates": [{"id": "agent_tao", "name": "Tao"}],
         "movement_intent": True,
@@ -448,6 +625,7 @@ def test_prefilter_keeps_social_and_movement_above_item_opportunities():
 
 def test_prefilter_interacts_with_plain_interactable_item_without_model_call():
     runtime = SimulationRuntime(GameWorld.default())
+    runtime.world.agent_profiles["agent_mira"].dialogue_policy["item_interaction_chance"] = 1
     observation = {
         "nearby_items": [
             {"id": "item_marker", "interactable": True, "available_affordances": []}
@@ -472,6 +650,7 @@ def test_item_interaction_sets_prefilter_cooldown():
         )
     )
     runtime = SimulationRuntime(world)
+    runtime.world.agent_profiles["agent_mira"].dialogue_policy["item_interaction_chance"] = 1
 
     result = runtime.submit_action(AgentAction(agent_id="agent_mira", type="use", payload={"target_id": "item_button"}))
     observation = {
@@ -493,6 +672,7 @@ def test_item_interaction_sets_prefilter_cooldown():
 
 def test_prefilter_item_opportunity_applies_to_mock_provider():
     runtime = SimulationRuntime(GameWorld.default())
+    runtime.world.agent_profiles["agent_mira"].dialogue_policy["item_interaction_chance"] = 1
     observation = {
         "nearby_items": [
             {
@@ -511,6 +691,7 @@ def test_prefilter_item_opportunity_applies_to_mock_provider():
 
 def test_prefilter_skips_unreachable_or_unavailable_item_interactions():
     runtime = SimulationRuntime(GameWorld.default())
+    runtime.world.agent_profiles["agent_mira"].dialogue_policy["item_interaction_chance"] = 1
     observation = {
         "nearby_items": [
             {
@@ -538,6 +719,7 @@ def test_prefilter_skips_unreachable_or_unavailable_item_interactions():
 
 def test_prefilter_moves_toward_visible_item_before_interaction_range():
     runtime = SimulationRuntime(GameWorld.default())
+    runtime.world.agent_profiles["agent_mira"].dialogue_policy["item_interaction_chance"] = 1
     observation = {
         "movement_intent": True,
         "nearby_items": [
@@ -564,6 +746,7 @@ def test_prefilter_picks_up_movable_item_then_arrival_drops_it():
     world = GameWorld.default()
     world.map.items.append(WorldItem(id="item_box", name="Box", position=Point(242, 220), movable=True))
     runtime = SimulationRuntime(world)
+    runtime.world.agent_profiles["agent_mira"].dialogue_policy["item_interaction_chance"] = 1
     observation = runtime._observation_for("agent_mira")
     observation["movement_intent"] = True
     observation["movement_targets"] = []
@@ -739,7 +922,8 @@ def test_model_dict_utterance_is_unwrapped():
 
 def test_say_and_social_can_be_grounded_in_preferred_named_item_at_low_frequency():
     runtime = SimulationRuntime(GameWorld.default())
-    for index in range(9):
+    runtime.world.agent_profiles["agent_ren"].dialogue_policy["item_mention_chance"] = 1
+    for index in range(16):
         runtime.world.add_event("speech", f"普通对话 {index}", agent_id="agent_mira")
     request = ModelRequest(
         agent_id="agent_ren",
@@ -754,8 +938,9 @@ def test_say_and_social_can_be_grounded_in_preferred_named_item_at_low_frequency
             "item_context": {
                 "nearby_named_items": [
                     {"id": "item_generic", "name": "Item"},
-                    {"id": "item_archive", "name": "绝密档案3"},
-                ]
+                    {"id": "item_archive", "name": "绝密档案3", "available_affordances": [{"action": "use"}]},
+                ],
+                "recent_item_events": [{"item_id": "item_archive", "type": "interaction"}],
             },
         },
     )
@@ -806,15 +991,84 @@ def test_say_and_social_do_not_force_item_name_on_every_utterance():
 def test_runtime_defaults_favor_more_frequent_dialogue():
     runtime = SimulationRuntime(GameWorld.default())
 
-    assert runtime.agent_decision_interval_ticks == 30
-    assert runtime.world.agent_profiles["agent_mira"].dialogue_policy["cooldown_ticks"] == 10
+    assert runtime.agent_decision_interval_ticks == 20
+    assert runtime.world.agent_profiles["agent_mira"].dialogue_policy["distance"] == 240.0
+    assert runtime.world.agent_profiles["agent_mira"].dialogue_policy["cooldown_ticks"] == 6
+    assert runtime.world.agent_profiles["agent_mira"].dialogue_policy["item_interaction_chance"] == 0.35
+    assert runtime.world.agent_profiles["agent_mira"].dialogue_policy["item_mention_chance"] == 0.12
 
 
-def test_scene_director_text_is_grounded_in_specific_item_names():
+def test_agent_item_interaction_chance_gates_local_item_actions():
+    world = GameWorld.default()
+    mira_position = world.agent_states["agent_mira"].position
+    world.map.items.append(
+        WorldItem(
+            id="item_lamp",
+            name="Signal Lamp",
+            position=Point(mira_position.x + 10, mira_position.y),
+            tags=["signal"],
+            affordances=[{"action": "interact", "enabled": True}],
+        )
+    )
+    runtime = SimulationRuntime(world)
+    observation = runtime._observation_for("agent_mira")
+
+    world.agent_profiles["agent_mira"].dialogue_policy["item_interaction_chance"] = 0
+    assert runtime._local_item_opportunity_action("agent_mira", observation, {"interact"}) is None
+
+    world.agent_profiles["agent_mira"].dialogue_policy["item_interaction_chance"] = 1
+    action = runtime._local_item_opportunity_action("agent_mira", observation, {"interact"})
+    assert action == {"type": "interact", "payload": {"target_id": "item_lamp"}}
+
+
+def test_agent_item_mention_chance_gates_dialogue_references():
+    world = GameWorld.default()
+    mira_position = world.agent_states["agent_mira"].position
+    world.map.items.append(
+        WorldItem(
+            id="item_lamp",
+            name="Signal Lamp",
+            position=Point(mira_position.x + 10, mira_position.y),
+            description="A coded lamp.",
+            tags=["signal"],
+        )
+    )
+    runtime = SimulationRuntime(world)
+    observation = runtime._observation_for("agent_mira")
+
+    world.agent_profiles["agent_mira"].dialogue_policy["item_mention_chance"] = 0
+    assert runtime._should_reference_item_in_dialogue("agent_mira", observation) is False
+
+    world.agent_profiles["agent_mira"].dialogue_policy["item_mention_chance"] = 1
+    assert runtime._should_reference_item_in_dialogue("agent_mira", observation) is True
+
+
+def test_scene_director_text_is_not_forced_into_item_exposition():
     world = GameWorld.default()
     world.map.items.append(WorldItem(id="item_archive", name="绝密档案3", position=Point(242, 220)))
     runtime = SimulationRuntime(world)
 
-    text = runtime._item_grounded_scene_text("The scene director prepares the next beat.")
+    text = runtime._item_grounded_scene_text("三个杀手组成的故事")
 
-    assert "绝密档案3" in text
+    assert text == "三个杀手组成的故事"
+    assert "可见物体如" not in text
+
+
+def test_default_item_names_are_not_scene_or_dialogue_anchors():
+    world = GameWorld.default()
+    world.map.items.append(WorldItem(id="item_generic", name="Item", position=Point(242, 220)))
+    runtime = SimulationRuntime(world)
+
+    assert runtime._visible_item_names_for_language() == []
+    assert runtime._director_item_summaries() == []
+    assert runtime._observation_item_names(
+        {
+            "item_context": {
+                "nearby_named_items": [
+                    {"id": "item_generic", "name": "Item", "available_affordances": [{"action": "use"}]},
+                    {"id": "item_object", "name": "Object", "state": {"mood": "ominous"}},
+                ],
+                "recent_item_events": [{"item_id": "item_generic", "type": "interaction"}],
+            }
+        }
+    ) == []

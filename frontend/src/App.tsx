@@ -37,6 +37,8 @@ import {
   getRuntimeStatus,
   getWorld,
   getModels,
+  getNarrativeService,
+  getNarrativeSubtitle,
   idleSegmentation,
   installLocalCapability,
   patchAgent,
@@ -45,6 +47,7 @@ import {
   patchMapItem,
   patchMapRegion,
   patchNarrative,
+  patchNarrativeService,
   postAction,
   normalizeWorldSnapshot,
   regenerateMapRegion,
@@ -74,6 +77,8 @@ import type {
   MapRegionFunction,
   MapSegmentationState,
   NarrativeConfig,
+  NarrativeServiceStatus,
+  NarrativeSubtitleStatus,
   RegionDrawOperation,
   ModelCapabilityId,
   ModelCapabilityStatus,
@@ -150,6 +155,8 @@ export default function App() {
   const [modelCapabilityTasks, setModelCapabilityTasks] = useState<Partial<Record<ModelCapabilityId, ModelCapabilityTask>>>({});
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [runtimeStatusStale, setRuntimeStatusStale] = useState(false);
+  const [narrativeSubtitle, setNarrativeSubtitle] = useState<NarrativeSubtitleStatus | null>(null);
+  const [narrativeService, setNarrativeService] = useState<NarrativeServiceStatus | null>(null);
   const [wsReconnectAttempt, setWsReconnectAttempt] = useState(0);
   const [generation, setGeneration] = useState<MapGenerationState | null>(null);
   const [segmentation, setSegmentation] = useState<MapSegmentationState>(() => idleSegmentation());
@@ -159,6 +166,7 @@ export default function App() {
   const pendingAgentPatchesRef = useRef<Record<string, AgentPatch>>({});
   const pendingItemPatchesRef = useRef<Record<string, ItemPatch>>({});
   const pendingLocalItemsRef = useRef<Record<string, WorldItem>>({});
+  const simulationPauseLockUntilRef = useRef(0);
 
   const selectedAgentId = selection.kind === "agent" ? selection.id : null;
   const activeRegionFunction = useMemo(() => {
@@ -182,7 +190,8 @@ export default function App() {
     }
     return Boolean(world.agent_profiles[selectedAgentId]);
   }, [world, selectedAgentId]);
-  const narrativeLine = useMemo(() => (world ? latestNarrativeLine(world.events) : null), [world?.events]);
+  const eventNarrativeLine = useMemo(() => (world ? latestNarrativeLine(world.events) : null), [world?.events]);
+  const narrativeLine = narrativeSubtitle ? narrativeSubtitle.line : eventNarrativeLine;
   const imageGenerationProvider = useMemo(() => enabledModelForCapability(models, "image_generation"), [models]);
   const hasRealImageGenerationProvider = Boolean(imageGenerationProvider && imageGenerationProvider.provider !== "mock");
   const runtimeMonitorActive = useMemo(
@@ -267,6 +276,29 @@ export default function App() {
     if (!world) {
       return;
     }
+    let cancelled = false;
+    const refresh = async () => {
+      if (document.visibilityState === "hidden") {
+        return;
+      }
+      const [nextSubtitle, nextService] = await Promise.all([getNarrativeSubtitle(), getNarrativeService()]);
+      if (!cancelled) {
+        setNarrativeSubtitle(nextSubtitle);
+        setNarrativeService(nextSubtitle?.service ?? nextService);
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [Boolean(world)]);
+
+  useEffect(() => {
+    if (!world) {
+      return;
+    }
     if (typeof window !== "undefined" && window.localStorage.getItem("agent-workstation.disable-ws") === "1") {
       return;
     }
@@ -281,7 +313,11 @@ export default function App() {
         if (!snapshot || typeof snapshot !== "object" || !snapshot.map || !snapshot.agent_profiles) {
           return;
         }
-        setWorld(mergeSnapshotWithLocalState(normalizeWorldSnapshot(snapshot), {
+        const normalized = normalizeWorldSnapshot(snapshot);
+        if (Date.now() < simulationPauseLockUntilRef.current && normalized.running) {
+          normalized.running = false;
+        }
+        setWorld(mergeSnapshotWithLocalState(normalized, {
           mapPatch: pendingMapPatchRef.current,
           agentPatches: pendingAgentPatchesRef.current,
           itemPatches: pendingItemPatchesRef.current,
@@ -400,6 +436,13 @@ export default function App() {
   async function setSimulationRunning(running: boolean, stopped = false) {
     if (!world) {
       return;
+    }
+    if (running) {
+      simulationPauseLockUntilRef.current = 0;
+    } else {
+      simulationPauseLockUntilRef.current = Date.now() + 2200;
+      setWorld({ ...world, running: false });
+      setStatus(stopped ? "已停止" : "已暂停");
     }
     const snapshot = await setSimulation(running);
     if (snapshot) {
@@ -884,7 +927,11 @@ export default function App() {
     }
   }
 
-  async function updateNarrativeConfig(patch: Partial<Pick<NarrativeConfig, "enabled" | "premise" | "tone" | "cadence_ticks">>) {
+  async function updateNarrativeConfig(
+    patch: Partial<
+      Pick<NarrativeConfig, "enabled" | "premise" | "tone" | "cadence_ticks" | "model_provider" | "dedicated_service_enabled" | "service_model">
+    >
+  ) {
     if (!world) {
       return;
     }
@@ -892,9 +939,32 @@ export default function App() {
     const snapshot = await patchNarrative(patch);
     if (snapshot) {
       setWorld(snapshot);
+      setNarrativeSubtitle(null);
       setStatus("叙事已更新");
     } else {
       setStatus("本地叙事预览");
+    }
+  }
+
+  async function updateNarrativeService(patch: { enabled?: boolean; model?: string }) {
+    if (!world) {
+      return;
+    }
+    const snapshotPatch: Partial<NarrativeConfig> = {};
+    if (typeof patch.enabled === "boolean") {
+      snapshotPatch.dedicated_service_enabled = patch.enabled;
+    }
+    if (typeof patch.model === "string") {
+      snapshotPatch.service_model = patch.model;
+    }
+    setWorld({ ...world, narrative: { ...world.narrative, ...snapshotPatch } });
+    const status = await patchNarrativeService(patch);
+    if (status) {
+      setNarrativeService(status);
+      setNarrativeSubtitle(null);
+      setStatus("字幕服务已更新");
+    } else {
+      setStatus("字幕服务更新失败");
     }
   }
 
@@ -1582,7 +1652,14 @@ export default function App() {
             />
           ) : null}
           {panel.id === "narrative" ? (
-            <NarrativePanel world={world} onUpdate={(patch) => void updateNarrativeConfig(patch)} />
+            <NarrativePanel
+              world={world}
+              models={models}
+              subtitle={narrativeSubtitle}
+              service={narrativeService}
+              onUpdate={(patch) => void updateNarrativeConfig(patch)}
+              onUpdateService={(patch) => void updateNarrativeService(patch)}
+            />
           ) : null}
           {panel.id === "imageGeneration" ? (
             <ImageGenerationPanel
@@ -1630,6 +1707,7 @@ export default function App() {
           {panel.id === "agents" ? (
             <AgentPanel
               world={world}
+              models={models}
               selection={selection}
               onSelect={setSelection}
               onLocateAgent={locateAgent}

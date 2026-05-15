@@ -100,7 +100,7 @@ export const fallbackWorld: WorldSnapshot = {
       action_space: ["move_to", "say", "interact", "use", "observe", "wait", "stop", "social", "pick_up", "drop_item", "move_item"],
       hidden: false,
       animation: null,
-      dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 10, language: "auto" }
+      dialogue_policy: { enabled: true, distance: 240, cooldown_ticks: 6, language: "auto", item_interaction_chance: 0.35, item_mention_chance: 0.12 }
     },
     agent_tao: {
       id: "agent_tao",
@@ -112,7 +112,7 @@ export const fallbackWorld: WorldSnapshot = {
       action_space: ["move_to", "say", "interact", "use", "observe", "wait", "stop", "social", "pick_up", "drop_item", "move_item"],
       hidden: false,
       animation: null,
-      dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 10, language: "auto" }
+      dialogue_policy: { enabled: true, distance: 240, cooldown_ticks: 6, language: "auto", item_interaction_chance: 0.35, item_mention_chance: 0.12 }
     },
     agent_ren: {
       id: "agent_ren",
@@ -124,7 +124,7 @@ export const fallbackWorld: WorldSnapshot = {
       action_space: ["move_to", "say", "interact", "use", "observe", "wait", "stop", "social", "pick_up", "drop_item", "move_item"],
       hidden: false,
       animation: null,
-      dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 10, language: "auto" }
+      dialogue_policy: { enabled: true, distance: 240, cooldown_ticks: 6, language: "auto", item_interaction_chance: 0.35, item_mention_chance: 0.12 }
     }
   },
   agent_states: {
@@ -177,7 +177,10 @@ export const fallbackWorld: WorldSnapshot = {
     tone: "grounded",
     cadence_ticks: 50,
     last_tick: -999,
-    recent_summary: ""
+    recent_summary: "",
+    model_provider: "mock",
+    dedicated_service_enabled: false,
+    service_model: ""
   },
   events: [
     {

@@ -13,6 +13,8 @@ import type {
   ModelCapabilityStatus,
   ModelCapabilityTask,
   ModelConfig,
+  NarrativeSubtitleStatus,
+  NarrativeServiceStatus,
   RemoteModelOption,
   RemoteModelTestResult,
   RuntimeStatus,
@@ -132,7 +134,11 @@ export async function testModel(modelId: string): Promise<{ ok: boolean; message
   }
 }
 
-export async function patchNarrative(patch: Partial<Pick<NarrativeConfig, "enabled" | "premise" | "tone" | "cadence_ticks">>): Promise<WorldSnapshot | null> {
+export async function patchNarrative(
+  patch: Partial<
+    Pick<NarrativeConfig, "enabled" | "premise" | "tone" | "cadence_ticks" | "model_provider" | "dedicated_service_enabled" | "service_model">
+  >
+): Promise<WorldSnapshot | null> {
   try {
     const response = await fetch(`${apiBase}/api/narrative`, {
       method: "PATCH",
@@ -140,6 +146,54 @@ export async function patchNarrative(patch: Partial<Pick<NarrativeConfig, "enabl
       body: JSON.stringify(patch)
     });
     return response.ok ? normalizeWorldSnapshot(await response.json()) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function getNarrativeSubtitle(): Promise<NarrativeSubtitleStatus | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/narrative/subtitle`);
+    if (!response.ok) {
+      return null;
+    }
+    const raw = (await response.json()) as Partial<NarrativeSubtitleStatus>;
+    return {
+      status: raw.status ?? "waiting_for_cadence",
+      line: raw.line ?? null,
+      error: raw.error ?? null,
+      pending: Boolean(raw.pending),
+      recent_summary: String(raw.recent_summary ?? ""),
+      model_provider: String(raw.model_provider ?? ""),
+      model_conflict: Boolean(raw.model_conflict),
+      recommended_model_provider: typeof raw.recommended_model_provider === "string" ? raw.recommended_model_provider : "",
+      service: normalizeNarrativeService(raw.service)
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function getNarrativeService(): Promise<NarrativeServiceStatus | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/narrative/service`);
+    if (!response.ok) {
+      return null;
+    }
+    return normalizeNarrativeService(await response.json());
+  } catch {
+    return null;
+  }
+}
+
+export async function patchNarrativeService(patch: { enabled?: boolean; model?: string }): Promise<NarrativeServiceStatus | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/narrative/service`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch)
+    });
+    return response.ok ? normalizeNarrativeService(await response.json()) : null;
   } catch {
     return null;
   }
@@ -745,7 +799,8 @@ export function normalizeWorldSnapshot(snapshot: WorldSnapshot): WorldSnapshot {
     scene_director: snapshot.scene_director
       ? {
           pending: Boolean(snapshot.scene_director.pending),
-          last_tick: Number(snapshot.scene_director.last_tick ?? -999)
+          last_tick: Number(snapshot.scene_director.last_tick ?? -999),
+          model_provider: typeof snapshot.scene_director.model_provider === "string" ? snapshot.scene_director.model_provider : undefined
         }
       : undefined
   };
@@ -803,7 +858,25 @@ function normalizeNarrative(value: unknown): NarrativeConfig {
     tone: typeof raw.tone === "string" && raw.tone.trim() ? raw.tone : "grounded",
     cadence_ticks: Math.max(1, Math.round(Number(raw.cadence_ticks ?? 50))),
     last_tick: Math.round(Number(raw.last_tick ?? -999)),
-    recent_summary: typeof raw.recent_summary === "string" ? raw.recent_summary : ""
+    recent_summary: typeof raw.recent_summary === "string" ? raw.recent_summary : "",
+    model_provider: typeof raw.model_provider === "string" ? raw.model_provider : "",
+    dedicated_service_enabled: raw.dedicated_service_enabled === true,
+    service_model: typeof raw.service_model === "string" ? raw.service_model : ""
+  };
+}
+
+function normalizeNarrativeService(value: unknown): NarrativeServiceStatus {
+  const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  return {
+    enabled: raw.enabled !== false,
+    url: typeof raw.url === "string" ? raw.url : "",
+    healthy: Boolean(raw.healthy),
+    model: typeof raw.model === "string" ? raw.model : "",
+    available_models: Array.isArray(raw.available_models)
+      ? raw.available_models.map((item) => String(item)).filter(Boolean)
+      : [],
+    pending: Math.max(0, Math.round(Number(raw.pending ?? 0))),
+    last_error: typeof raw.last_error === "string" ? raw.last_error : ""
   };
 }
 
@@ -883,9 +956,11 @@ function normalizeDialoguePolicy(value: unknown) {
   const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
   return {
     enabled: raw.enabled !== false,
-    distance: Math.max(1, Number(raw.distance ?? 180)),
-    cooldown_ticks: Math.max(1, Math.round(Number(raw.cooldown_ticks ?? 10))),
-    language: typeof raw.language === "string" && raw.language.trim() ? raw.language : "auto"
+    distance: Math.max(1, Number(raw.distance ?? 240)),
+    cooldown_ticks: Math.max(1, Math.round(Number(raw.cooldown_ticks ?? 6))),
+    language: typeof raw.language === "string" && raw.language.trim() ? raw.language : "auto",
+    item_interaction_chance: clampNumber(Number(raw.item_interaction_chance ?? 0.35), 0, 1),
+    item_mention_chance: clampNumber(Number(raw.item_mention_chance ?? 0.12), 0, 1)
   };
 }
 
