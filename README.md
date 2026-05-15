@@ -125,6 +125,17 @@ cd frontend
 npx playwright test tests/sandbox.spec.ts -g "agent panel controls|scene objects can be hidden|drawing tools create|renders the transparent"
 ```
 
+## 开发和测试窗口约定
+
+开发、调试和手工验收 Electron UI 时，桌面上尽量只保留一个 Multi-Agent Engine 项目窗口。不要同时打开已安装应用、dev Electron、Vite 浏览器页等多个可见项目窗口，否则很容易出现“开发者检查的是一个窗口，测试者看到的是另一个窗口”的错位。
+
+推荐流程：
+
+1. 手工验收前，先关闭其他 Multi-Agent Engine / Electron 项目窗口。
+2. 如果要验证最新前端改动，优先使用 dev Electron 或明确的 Vite 地址，并确认当前窗口加载的是同一套前端资源。
+3. 如果必须同时保留已安装版和开发版，测试描述里需要写清楚正在看的窗口来源，例如“已安装 app”或“dev Electron 127.0.0.1:5173”。
+4. 发现 UI 和预期不一致时，先确认当前窗口来源，再判断代码是否未生效。
+
 ## 本地模型配置
 
 模型管理面板按能力划分：
