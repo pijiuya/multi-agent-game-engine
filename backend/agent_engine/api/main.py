@@ -1938,10 +1938,11 @@ def _openai_json_request(
 
 def _openai_compatible_urls(base_url: str, path: str) -> list[str]:
     clean_path = path.lstrip("/")
-    urls = [f"{base_url}/{clean_path}"]
     lowered = base_url.lower().rstrip("/")
-    if not lowered.endswith("/v1") and "/v1/" not in lowered:
-        urls.append(f"{base_url}/v1/{clean_path}")
+    if lowered.endswith("/v1") or "/v1/" in lowered:
+        urls = [f"{base_url}/{clean_path}"]
+    else:
+        urls = [f"{base_url}/v1/{clean_path}", f"{base_url}/{clean_path}"]
     seen: set[str] = set()
     return [url for url in urls if not (url in seen or seen.add(url))]
 

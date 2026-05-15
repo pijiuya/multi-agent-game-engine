@@ -867,7 +867,7 @@ def test_openai_image_provider_accepts_url_candidates(monkeypatch):
     assert candidates[0]["url"].startswith("/api/assets/")
 
 
-def test_openai_compatible_request_falls_back_to_v1_for_relay_root(monkeypatch):
+def test_openai_compatible_request_prefers_v1_for_relay_root(monkeypatch):
     calls = []
 
     class FakeResponse:
@@ -885,9 +885,9 @@ def test_openai_compatible_request_falls_back_to_v1_for_relay_root(monkeypatch):
 
     def fake_urlopen(request, timeout=30):
         calls.append(request.full_url)
-        if request.full_url == "https://relay.example.test/models":
-            return FakeResponse("<html>relay home</html>")
-        return FakeResponse('{"data":[{"id":"gpt-image-2"}]}')
+        if request.full_url == "https://relay.example.test/v1/models":
+            return FakeResponse('{"data":[{"id":"gpt-image-2"}]}')
+        return FakeResponse("<html>relay home</html>")
 
     monkeypatch.setattr(api_main.urlrequest, "urlopen", fake_urlopen)
 
@@ -901,7 +901,7 @@ def test_openai_compatible_request_falls_back_to_v1_for_relay_root(monkeypatch):
         "models",
     )
 
-    assert calls == ["https://relay.example.test/models", "https://relay.example.test/v1/models"]
+    assert calls == ["https://relay.example.test/v1/models"]
     assert data["data"][0]["id"] == "gpt-image-2"
 
 
