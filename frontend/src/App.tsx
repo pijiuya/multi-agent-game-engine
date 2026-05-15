@@ -204,7 +204,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!runtimeMonitorActive) {
+    if (!runtimeMonitorActive && !imageGenerationBusy) {
       return;
     }
     let cancelled = false;
@@ -229,7 +229,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [runtimeMonitorActive]);
+  }, [runtimeMonitorActive, imageGenerationBusy]);
 
   useEffect(() => {
     savePanelLayout(panels);
@@ -580,6 +580,7 @@ export default function App() {
     setImageGenerationBusy(true);
     setImageGenerationError(null);
     setStatus(imageModeRunningText(imageGenerationMode));
+    void refreshRuntimeStatus();
     try {
       const result = await generateMapImageLayer({
         prompt,
@@ -595,10 +596,12 @@ export default function App() {
       setImageDraftPoints([]);
       setEditTool("select");
       setStatus(imageModeDoneText(imageGenerationMode));
+      void refreshRuntimeStatus();
     } catch (error) {
       const message = error instanceof Error ? error.message : "接口不可用";
       setImageGenerationError(message);
       setStatus(`图像生成失败：${message}`);
+      void refreshRuntimeStatus();
     } finally {
       setImageGenerationBusy(false);
     }
@@ -863,11 +866,14 @@ export default function App() {
       return;
     }
     try {
+      void refreshRuntimeStatus();
       const task = await createMapGeneration({ prompt: fullPrompt, width, height, ratio, count: 3, provider_id: provider?.id ?? null });
       setGeneration(task);
       setStatus("背景候选已生成");
+      void refreshRuntimeStatus();
     } catch (error) {
       setStatus(`图片生成失败：${error instanceof Error ? error.message : "远程服务不可用"}`);
+      void refreshRuntimeStatus();
     }
   }
 

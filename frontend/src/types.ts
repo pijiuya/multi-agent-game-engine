@@ -342,11 +342,25 @@ export type RemoteModelTestResult = {
 };
 
 export type RuntimePendingModelTask = {
+  id?: string;
   agentId: string;
+  taskKind?: string;
+  status?: string;
   provider: string;
+  providerId?: string;
   model: string;
   startedTick: number;
   ageTicks: number;
+  ageSeconds?: number | null;
+  elapsedMs?: number | null;
+  operation?: string;
+  prompt?: string;
+  width?: number;
+  height?: number;
+  referenceBackground?: boolean;
+  error?: string;
+  layerId?: string;
+  asset?: string;
 };
 
 export type RuntimeModelStatus = {
@@ -388,6 +402,8 @@ export type RuntimeStatus = {
     sceneDirectorPending: boolean;
     pendingModelTaskCount: number;
     pendingModelTasks: RuntimePendingModelTask[];
+    pendingImageGenerationTasks?: RuntimePendingModelTask[];
+    recentImageGenerationTasks?: RuntimePendingModelTask[];
   };
   models: RuntimeModelStatus[];
   hardware: RuntimeHardwareStatus;

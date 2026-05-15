@@ -281,6 +281,8 @@ REGION_FUNCTIONS = set(REGION_FUNCTION_LABELS)
 
 
 generation_tasks: dict[str, dict[str, Any]] = {}
+image_generation_tasks: dict[str, dict[str, Any]] = {}
+image_generation_tasks_lock = threading.Lock()
 capability_tasks: dict[str, dict[str, Any]] = {}
 capability_tasks_lock = threading.Lock()
 embedded_sam_cache: dict[str, Any] = {}
@@ -485,17 +487,25 @@ def model_capabilities_status() -> dict[str, Any]:
 def runtime_status() -> dict[str, Any]:
     snapshot = runtime.snapshot()
     model_tasks = snapshot.get("model_tasks", {})
-    pending_tasks = [
+    pending_agent_tasks = [
         {
             "agent_id": str(agent_id),
+            "task_kind": "agent_decision",
+            "status": "running",
             "provider": str(task.get("provider") or ""),
             "model": str(task.get("model") or ""),
             "started_tick": int(task.get("started_tick") or 0),
             "age_ticks": int(task.get("age_ticks") or 0),
+            "age_seconds": None,
+            "operation": "agent_decision",
+            "prompt": "",
         }
         for agent_id, task in model_tasks.items()
         if isinstance(task, dict) and not bool(task.get("done"))
     ]
+    image_tasks = _runtime_image_generation_tasks()
+    pending_image_tasks = [task for task in image_tasks if task.get("status") == "running"]
+    pending_tasks = [*pending_agent_tasks, *pending_image_tasks]
     return {
         "timestamp": time.time(),
         "simulation": {
@@ -504,6 +514,8 @@ def runtime_status() -> dict[str, Any]:
             "scene_director_pending": bool(snapshot.get("scene_director", {}).get("pending")),
             "pending_model_task_count": len(pending_tasks),
             "pending_model_tasks": pending_tasks,
+            "pending_image_generation_tasks": pending_image_tasks,
+            "recent_image_generation_tasks": image_tasks[:12],
         },
         "models": _runtime_model_statuses(pending_tasks),
         "hardware": _hardware_pressure_summary(),
@@ -628,15 +640,28 @@ def create_map_generation(payload: MapGenerationRequest) -> dict[str, Any]:
     config = _image_generation_config(payload.provider_id)
     if config is None:
         raise HTTPException(status_code=400, detail="未配置真实图片生成模型，请先在模型管理中配置图片生成 API")
-    if config.get("provider") == "mock":
-        candidates = [
-            _mock_generated_candidate(generation_id, index, payload.prompt, width, height)
-            for index in range(max(1, min(payload.count, 4)))
-        ]
-    elif config.get("provider") in OPENAI_IMAGE_PROVIDERS:
-        candidates = _call_openai_image_provider(config, generation_id, payload.prompt, width, height, payload.count)
-    else:
-        raise HTTPException(status_code=400, detail=f"图片生成服务类型暂不支持：{config.get('provider') or 'unknown'}")
+    _start_image_generation_task(
+        generation_id,
+        config,
+        operation="background",
+        prompt=payload.prompt,
+        width=width,
+        height=height,
+        reference_background=False,
+    )
+    try:
+        if config.get("provider") == "mock":
+            candidates = [
+                _mock_generated_candidate(generation_id, index, payload.prompt, width, height)
+                for index in range(max(1, min(payload.count, 4)))
+            ]
+        elif config.get("provider") in OPENAI_IMAGE_PROVIDERS:
+            candidates = _call_openai_image_provider(config, generation_id, payload.prompt, width, height, payload.count)
+        else:
+            raise HTTPException(status_code=400, detail=f"图片生成服务类型暂不支持：{config.get('provider') or 'unknown'}")
+    except HTTPException as exc:
+        _finish_image_generation_task(generation_id, status="error", error=str(exc.detail))
+        raise
     task = {
         "id": generation_id,
         "status": "done",
@@ -649,6 +674,7 @@ def create_map_generation(payload: MapGenerationRequest) -> dict[str, Any]:
         "selected_candidate_id": None,
     }
     generation_tasks[generation_id] = task
+    _finish_image_generation_task(generation_id, status="done", asset=candidates[0]["url"] if candidates else None)
     return task
 
 
@@ -1238,6 +1264,102 @@ def _sync_runtime_model_providers() -> None:
     runtime.providers = providers
     runtime.default_provider_id = default_provider_id
     runtime.scene_director = _scene_director_for_local_chain(first_llm_provider)
+
+
+def _start_image_generation_task(
+    task_id: str,
+    config: dict[str, Any],
+    *,
+    operation: str,
+    prompt: str,
+    width: int,
+    height: int,
+    reference_background: bool,
+) -> None:
+    now = time.time()
+    with image_generation_tasks_lock:
+        image_generation_tasks[task_id] = {
+            "id": task_id,
+            "task_kind": "image_generation",
+            "status": "running",
+            "provider_id": str(config.get("id") or ""),
+            "provider": str(config.get("provider") or ""),
+            "model": str(config.get("model") or ""),
+            "operation": operation,
+            "prompt": prompt[:180],
+            "width": width,
+            "height": height,
+            "reference_background": reference_background,
+            "started_at": now,
+            "finished_at": None,
+            "elapsed_ms": None,
+            "error": None,
+            "layer_id": None,
+            "asset": None,
+        }
+        _trim_image_generation_tasks_locked()
+
+
+def _finish_image_generation_task(task_id: str, *, status: str, error: str | None = None, layer_id: str | None = None, asset: str | None = None) -> None:
+    now = time.time()
+    with image_generation_tasks_lock:
+        task = image_generation_tasks.get(task_id)
+        if not task:
+            return
+        task["status"] = status
+        task["finished_at"] = now
+        task["elapsed_ms"] = int(max(0.0, now - float(task.get("started_at") or now)) * 1000)
+        task["error"] = error
+        if layer_id:
+            task["layer_id"] = layer_id
+        if asset:
+            task["asset"] = asset
+        _trim_image_generation_tasks_locked()
+
+
+def _runtime_image_generation_tasks() -> list[dict[str, Any]]:
+    now = time.time()
+    with image_generation_tasks_lock:
+        tasks = sorted(image_generation_tasks.values(), key=lambda item: float(item.get("started_at") or 0), reverse=True)
+        return [
+            {
+                "id": str(task.get("id") or ""),
+                "agent_id": "image_generation",
+                "task_kind": "image_generation",
+                "status": str(task.get("status") or ""),
+                "provider_id": str(task.get("provider_id") or ""),
+                "provider": str(task.get("provider") or ""),
+                "model": str(task.get("model") or ""),
+                "started_tick": int(runtime.world.tick),
+                "age_ticks": 0,
+                "age_seconds": round(max(0.0, (float(task.get("finished_at") or now) - float(task.get("started_at") or now))), 1),
+                "elapsed_ms": task.get("elapsed_ms"),
+                "operation": str(task.get("operation") or "image_generation"),
+                "prompt": str(task.get("prompt") or ""),
+                "width": int(task.get("width") or 0),
+                "height": int(task.get("height") or 0),
+                "reference_background": bool(task.get("reference_background")),
+                "error": str(task.get("error") or ""),
+                "layer_id": str(task.get("layer_id") or ""),
+                "asset": str(task.get("asset") or ""),
+            }
+            for task in tasks
+        ]
+
+
+def _trim_image_generation_tasks_locked() -> None:
+    if len(image_generation_tasks) <= 30:
+        return
+    removable = sorted(
+        (
+            task
+            for task in image_generation_tasks.values()
+            if task.get("status") != "running"
+        ),
+        key=lambda item: float(item.get("started_at") or 0),
+    )
+    for task in removable[: max(0, len(image_generation_tasks) - 30)]:
+        image_generation_tasks.pop(str(task.get("id") or ""), None)
 
 
 def _runtime_model_statuses(pending_tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2757,20 +2879,40 @@ def _generate_image_layer(
     left, top, width, height = _points_bounds(selection_points)
     if width < 1 or height < 1:
         raise HTTPException(status_code=400, detail="图像生成区域无效")
-    if mode == "extension":
-        runtime.world.map.width = max(runtime.world.map.width, math.ceil(left + width))
-        runtime.world.map.height = max(runtime.world.map.height, math.ceil(top + height))
+    original_map_width = int(runtime.world.map.width)
+    original_map_height = int(runtime.world.map.height)
+    target_map_width = max(original_map_width, math.ceil(left + width)) if mode == "extension" else original_map_width
+    target_map_height = max(original_map_height, math.ceil(top + height)) if mode == "extension" else original_map_height
     generation_id = new_id("layer")
     config = _image_generation_config(provider_id)
     if config is None:
         raise HTTPException(status_code=400, detail="未配置真实图片生成模型，请先在模型管理中配置图片生成 API")
     use_reference = reference_background and bool(runtime.world.map.background_image) and config is not None and config.get("provider") in OPENAI_IMAGE_PROVIDERS
+    _start_image_generation_task(
+        generation_id,
+        config,
+        operation=mode,
+        prompt=prompt,
+        width=int(math.ceil(width)),
+        height=int(math.ceil(height)),
+        reference_background=use_reference,
+    )
     try:
         if config.get("provider") == "mock":
             asset_name = _mock_image_layer_asset(generation_id, prompt, selection_points, left, top, int(math.ceil(width)), int(math.ceil(height)), mode)
         elif use_reference:
             try:
-                asset_name = _call_openai_image_edit_provider(config, generation_id, prompt, selection_points, int(math.ceil(width)), int(math.ceil(height)))
+                asset_name = _call_openai_image_edit_provider(
+                    config,
+                    generation_id,
+                    _reference_edit_prompt(prompt, mode, selection_points, original_map_width, original_map_height),
+                    selection_points,
+                    int(math.ceil(width)),
+                    int(math.ceil(height)),
+                    mode,
+                    original_map_width,
+                    original_map_height,
+                )
             except HTTPException as exc:
                 missing_reference = exc.status_code == 400 and "缺少可参考" in str(exc.detail)
                 if exc.status_code != 502 and not missing_reference:
@@ -2778,7 +2920,7 @@ def _generate_image_layer(
                 asset_name = _call_openai_image_layer_generation_provider(
                     config,
                     generation_id,
-                    _reference_fallback_prompt(prompt, mode),
+                    _reference_fallback_prompt(prompt, mode, selection_points, original_map_width, original_map_height),
                     selection_points,
                     left,
                     top,
@@ -2798,7 +2940,8 @@ def _generate_image_layer(
             )
         else:
             raise HTTPException(status_code=400, detail=f"图片生成服务类型暂不支持：{config.get('provider') or 'unknown'}")
-    except HTTPException:
+    except HTTPException as exc:
+        _finish_image_generation_task(generation_id, status="error", error=str(exc.detail))
         raise
     layer_kind = "extension" if mode == "extension" else "region"
     next_layer = MapImageLayer(
@@ -2814,6 +2957,9 @@ def _generate_image_layer(
         region_id=region_id,
         opacity=1.0,
     )
+    if mode == "extension":
+        runtime.world.map.width = target_map_width
+        runtime.world.map.height = target_map_height
     if target_layer_id:
         existing = _image_layer_by_id(target_layer_id)
         existing.image = next_layer.image
@@ -2824,8 +2970,10 @@ def _generate_image_layer(
         existing.prompt = prompt
         existing.region_id = region_id or existing.region_id
         existing.hidden = False
+        _finish_image_generation_task(generation_id, status="done", layer_id=existing.id, asset=existing.image)
         return existing
     runtime.world.map.image_layers.append(next_layer)
+    _finish_image_generation_task(generation_id, status="done", layer_id=next_layer.id, asset=next_layer.image)
     return next_layer
 
 
@@ -2844,15 +2992,26 @@ def _call_openai_image_edit_provider(
     points: list[Point],
     width: int,
     height: int,
+    mode: str,
+    original_map_width: int,
+    original_map_height: int,
 ) -> str:
     background_path = _asset_path_for_url(runtime.world.map.background_image)
     if not background_path:
         raise HTTPException(status_code=400, detail="当前地图缺少可参考的背景图")
-    image_b64, mask_b64 = _region_edit_inputs_base64(background_path, points, width, height)
+    image_b64, mask_b64, edit_left, edit_top, edit_width, edit_height = _region_edit_inputs_base64(
+        background_path,
+        points,
+        width,
+        height,
+        mode,
+        original_map_width,
+        original_map_height,
+    )
     body = {
         "model": str(config.get("model") or ""),
         "prompt": prompt,
-        "size": _openai_image_size(width, height),
+        "size": _openai_image_size(edit_width, edit_height),
         "image": image_b64,
         "mask": mask_b64,
         "n": 1,
@@ -2872,6 +3031,8 @@ def _call_openai_image_edit_provider(
         raise HTTPException(status_code=502, detail="Image edit response had no images")
     asset_name = _save_generated_image_asset(config, raw_images[0], generation_id, 0)
     left, top, _, _ = _points_bounds(points)
+    if edit_left != left or edit_top != top or edit_width != width or edit_height != height:
+        return _crop_edit_asset_to_selection(asset_name, points, left, top, width, height, edit_left, edit_top, edit_width, edit_height)
     return _clip_layer_asset_to_selection(asset_name, points, left, top, width, height)
 
 
@@ -2890,28 +3051,71 @@ def _call_openai_image_layer_generation_provider(
     return _clip_layer_asset_to_selection(asset_name, points, left, top, width, height)
 
 
-def _reference_fallback_prompt(prompt: str, mode: str) -> str:
-    action = "outpaint an edge extension tile" if mode == "extension" else "create a transparent top-down map layer asset"
+def _reference_edit_prompt(prompt: str, mode: str, points: list[Point], original_map_width: int, original_map_height: int) -> str:
+    reference = _background_reference_summary(points, original_map_width, original_map_height)
+    if mode == "extension":
+        return (
+            f"{prompt}\n\n"
+            "Extend only the transparent masked area using the visible neighboring background as the style source. "
+            "Continue the same camera angle, scale, material, lighting, color palette, brush/detail level, and scene type from the adjacent edge. "
+            "Do not switch genre or scene type; do not introduce a separate map, UI, text, flat colored placeholder, stripe pattern, or unrelated interior/exterior. "
+            f"{reference}"
+        )
     return (
         f"{prompt}\n\n"
-        f"The configured image provider does not support image edit/inpaint requests, so {action} from text only. "
-        "Match the current map's clean top-down 2D game-map style where possible. "
-        "Do not create a flat colored placeholder, stripe pattern, UI panel, or text label."
+        "Generate only inside the masked area while matching the visible background style, camera angle, scale, lighting, and color palette. "
+        "Do not create a flat colored placeholder, stripe pattern, UI panel, or text label. "
+        f"{reference}"
     )
 
 
-def _region_edit_inputs_base64(background_path: str, points: list[Point], width: int, height: int) -> tuple[str, str]:
+def _reference_fallback_prompt(prompt: str, mode: str, points: list[Point], original_map_width: int, original_map_height: int) -> str:
+    action = "extend the selected edge of the existing scene" if mode == "extension" else "create a transparent layer for the selected area"
+    reference = _background_reference_summary(points, original_map_width, original_map_height)
+    return (
+        f"{prompt}\n\n"
+        f"The configured image provider does not support image edit/inpaint requests, so {action} from text plus extracted background cues. "
+        "The new image must look like a continuation of the existing background, not a new unrelated illustration. "
+        "Preserve the original scene type, camera angle, scale, lighting, color temperature, texture density, and palette. "
+        "Do not switch to a top-down fantasy map unless the source background is already that style. "
+        "Do not create an indoor room unless the source background is already an indoor room. "
+        "Do not create a flat colored placeholder, stripe pattern, UI panel, or text label. "
+        f"{reference}"
+    )
+
+
+def _region_edit_inputs_base64(
+    background_path: str,
+    points: list[Point],
+    width: int,
+    height: int,
+    mode: str,
+    original_map_width: int,
+    original_map_height: int,
+) -> tuple[str, str, float, float, int, int]:
     from io import BytesIO
     from PIL import Image, ImageDraw
 
     left, top, _, _ = _points_bounds(points)
     image = Image.open(background_path).convert("RGBA")
-    crop = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    crop.alpha_composite(image.crop((int(left), int(top), int(left + width), int(top + height))), (0, 0))
-    mask = Image.new("RGBA", (width, height), (0, 0, 0, 255))
+    edit_left, edit_top, edit_width, edit_height = _edit_context_bounds(
+        left,
+        top,
+        width,
+        height,
+        mode,
+        min(original_map_width, image.width),
+        min(original_map_height, image.height),
+    )
+    crop = Image.new("RGBA", (edit_width, edit_height), (0, 0, 0, 0))
+    crop.alpha_composite(
+        image.crop((int(edit_left), int(edit_top), int(edit_left + edit_width), int(edit_top + edit_height))),
+        (0, 0),
+    )
+    mask = Image.new("RGBA", (edit_width, edit_height), (0, 0, 0, 255))
     draw = ImageDraw.Draw(mask)
-    draw.polygon([(point.x - left, point.y - top) for point in points], fill=(255, 255, 255, 0))
-    return _png_base64(crop), _png_base64(mask)
+    draw.polygon([(point.x - edit_left, point.y - edit_top) for point in points], fill=(255, 255, 255, 0))
+    return _png_base64(crop), _png_base64(mask), edit_left, edit_top, edit_width, edit_height
 
 
 def _mock_image_layer_asset(
@@ -2943,6 +3147,43 @@ def _mock_image_layer_asset(
     return asset_name
 
 
+def _edit_context_bounds(
+    left: float,
+    top: float,
+    width: int,
+    height: int,
+    mode: str,
+    background_width: int,
+    background_height: int,
+) -> tuple[float, float, int, int]:
+    if mode != "extension" or background_width <= 0 or background_height <= 0:
+        return left, top, width, height
+    right = left + width
+    bottom = top + height
+    margin = max(96, min(384, int(max(width, height) * 0.55)))
+    edit_left = left
+    edit_top = top
+    edit_right = right
+    edit_bottom = bottom
+    if left >= background_width:
+        edit_left = max(0, background_width - margin)
+    elif right <= 0:
+        edit_right = min(background_width, margin)
+    else:
+        edit_left = max(0, min(left, background_width) - margin)
+        edit_right = max(right, min(background_width, right + margin))
+    if top >= background_height:
+        edit_top = max(0, background_height - margin)
+    elif bottom <= 0:
+        edit_bottom = min(background_height, margin)
+    else:
+        edit_top = max(0, min(top, background_height) - margin)
+        edit_bottom = max(bottom, min(background_height, bottom + margin))
+    edit_width = max(width, int(math.ceil(edit_right - edit_left)))
+    edit_height = max(height, int(math.ceil(edit_bottom - edit_top)))
+    return float(edit_left), float(edit_top), edit_width, edit_height
+
+
 def _clip_layer_asset_to_selection(asset_name: str, points: list[Point], left: float, top: float, width: int, height: int) -> str:
     from PIL import Image, ImageDraw
 
@@ -2955,6 +3196,138 @@ def _clip_layer_asset_to_selection(asset_name: str, points: list[Point], left: f
     clipped_name = f"{Path(asset_name).stem}_alpha.png"
     image.save(store.assets_dir / clipped_name, format="PNG")
     return clipped_name
+
+
+def _crop_edit_asset_to_selection(
+    asset_name: str,
+    points: list[Point],
+    left: float,
+    top: float,
+    width: int,
+    height: int,
+    edit_left: float,
+    edit_top: float,
+    edit_width: int,
+    edit_height: int,
+) -> str:
+    from PIL import Image, ImageDraw
+
+    path = store.assets_dir / asset_name
+    image = Image.open(path).convert("RGBA").resize((edit_width, edit_height))
+    crop_left = int(round(left - edit_left))
+    crop_top = int(round(top - edit_top))
+    cropped = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    cropped.alpha_composite(image.crop((crop_left, crop_top, crop_left + width, crop_top + height)), (0, 0))
+    mask = Image.new("L", (width, height), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.polygon([(point.x - left, point.y - top) for point in points], fill=255)
+    cropped.putalpha(mask)
+    cropped_name = f"{Path(asset_name).stem}_selection_alpha.png"
+    cropped.save(store.assets_dir / cropped_name, format="PNG")
+    return cropped_name
+
+
+def _background_reference_summary(points: list[Point], original_map_width: int, original_map_height: int) -> str:
+    background_path = _asset_path_for_url(runtime.world.map.background_image)
+    if not background_path:
+        return "No background image was available for style cues."
+    try:
+        from PIL import Image
+
+        image = Image.open(background_path).convert("RGB")
+        left, top, width, height = _points_bounds(points)
+        boxes = _background_reference_boxes(left, top, width, height, min(original_map_width, image.width), min(original_map_height, image.height))
+        samples: list[tuple[int, int, int]] = []
+        for box in boxes:
+            crop = image.crop(box).resize((max(1, min(64, box[2] - box[0])), max(1, min(64, box[3] - box[1]))))
+            pixels = list(crop.getdata())
+            samples.extend(pixels[:: max(1, len(pixels) // 600)])
+        if not samples:
+            return "The selected area has little overlapping background context; keep the current scene style and palette continuous."
+        palette = _palette_summary(samples)
+        terrain = _visual_cue_summary(samples)
+        edge = _selection_edge_label(left, top, width, height, original_map_width, original_map_height)
+        return (
+            f"Background cues: selected area is near the {edge}. "
+            f"Adjacent palette: {palette}. "
+            f"Likely visual cues: {terrain}. "
+            "Use these cues as strict style constraints."
+        )
+    except Exception:
+        return "Background style extraction failed; still preserve the existing scene style as closely as possible."
+
+
+def _background_reference_boxes(left: float, top: float, width: float, height: float, background_width: int, background_height: int) -> list[tuple[int, int, int, int]]:
+    right = left + width
+    bottom = top + height
+    margin = 180
+    boxes: list[tuple[int, int, int, int]] = []
+    overlap = (
+        max(0, int(math.floor(left))),
+        max(0, int(math.floor(top))),
+        min(background_width, int(math.ceil(right))),
+        min(background_height, int(math.ceil(bottom))),
+    )
+    if overlap[2] > overlap[0] and overlap[3] > overlap[1]:
+        boxes.append(overlap)
+    if left >= background_width:
+        boxes.append((max(0, background_width - margin), max(0, int(top)), background_width, min(background_height, int(bottom))))
+    if right <= 0:
+        boxes.append((0, max(0, int(top)), min(background_width, margin), min(background_height, int(bottom))))
+    if top >= background_height:
+        boxes.append((max(0, int(left)), max(0, background_height - margin), min(background_width, int(right)), background_height))
+    if bottom <= 0:
+        boxes.append((max(0, int(left)), 0, min(background_width, int(right)), min(background_height, margin)))
+    if not boxes:
+        boxes.append((0, 0, background_width, background_height))
+    return [box for box in boxes if box[2] > box[0] and box[3] > box[1]]
+
+
+def _palette_summary(samples: list[tuple[int, int, int]]) -> str:
+    buckets: dict[tuple[int, int, int], int] = {}
+    for red, green, blue in samples:
+        key = (round(red / 32) * 32, round(green / 32) * 32, round(blue / 32) * 32)
+        buckets[key] = buckets.get(key, 0) + 1
+    top = sorted(buckets.items(), key=lambda item: item[1], reverse=True)[:5]
+    return ", ".join(f"#{max(0, min(255, r)):02x}{max(0, min(255, g)):02x}{max(0, min(255, b)):02x}" for (r, g, b), _ in top)
+
+
+def _visual_cue_summary(samples: list[tuple[int, int, int]]) -> str:
+    total = max(1, len(samples))
+    green = sum(1 for r, g, b in samples if g > r * 1.15 and g > b * 1.1 and g > 70) / total
+    blue = sum(1 for r, g, b in samples if b > r * 1.15 and b > g * 1.05 and b > 70) / total
+    gray = sum(1 for r, g, b in samples if max(r, g, b) - min(r, g, b) < 28) / total
+    tan = sum(1 for r, g, b in samples if r > 95 and g > 75 and b < 95 and abs(r - g) < 65) / total
+    dark = sum(1 for r, g, b in samples if (r + g + b) / 3 < 70) / total
+    cues: list[str] = []
+    if gray > 0.45:
+        cues.append("mostly gray/neutral surfaces, likely walls/floor/stone/concrete")
+    if dark > 0.35:
+        cues.append("low-key shadowed lighting")
+    if green > 0.18:
+        cues.append("green vegetation or grass")
+    if blue > 0.12:
+        cues.append("blue water/sky/cool light")
+    if tan > 0.15:
+        cues.append("tan dirt/wood/sand paths")
+    return "; ".join(cues) if cues else "mixed colors; preserve the source image's materials and lighting"
+
+
+def _selection_edge_label(left: float, top: float, width: float, height: float, original_map_width: int, original_map_height: int) -> str:
+    right = left + width
+    bottom = top + height
+    labels: list[str] = []
+    if right <= 0:
+        labels.append("left outside edge")
+    elif left >= original_map_width:
+        labels.append("right outside edge")
+    if bottom <= 0:
+        labels.append("top outside edge")
+    elif top >= original_map_height:
+        labels.append("bottom outside edge")
+    if not labels:
+        labels.append("inside/overlapping edge")
+    return " and ".join(labels)
 
 
 def _png_base64(image: Any) -> str:

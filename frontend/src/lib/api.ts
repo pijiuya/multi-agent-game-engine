@@ -1155,6 +1155,15 @@ function runtimeStatusFromApi(data: Record<string, unknown>): RuntimeStatus {
   const hardware = objectValue(data.hardware);
   const platform = objectValue(hardware.platform);
   const loadAverageRaw = hardware.load_average ?? hardware.loadAverage;
+  const pendingModelTasks = Array.isArray(simulation.pending_model_tasks)
+    ? simulation.pending_model_tasks.map(runtimePendingTaskFromApi)
+    : [];
+  const pendingImageGenerationTasks = Array.isArray(simulation.pending_image_generation_tasks)
+    ? simulation.pending_image_generation_tasks.map(runtimePendingTaskFromApi)
+    : [];
+  const recentImageGenerationTasks = Array.isArray(simulation.recent_image_generation_tasks)
+    ? simulation.recent_image_generation_tasks.map(runtimePendingTaskFromApi)
+    : [];
   return {
     timestamp: Number(data.timestamp ?? Date.now() / 1000),
     simulation: {
@@ -1162,18 +1171,9 @@ function runtimeStatusFromApi(data: Record<string, unknown>): RuntimeStatus {
       tick: Number(simulation.tick ?? 0),
       sceneDirectorPending: Boolean(simulation.scene_director_pending ?? simulation.sceneDirectorPending),
       pendingModelTaskCount: Number(simulation.pending_model_task_count ?? simulation.pendingModelTaskCount ?? 0),
-      pendingModelTasks: Array.isArray(simulation.pending_model_tasks)
-        ? simulation.pending_model_tasks.map((item) => {
-            const task = objectValue(item);
-            return {
-              agentId: String(task.agent_id ?? task.agentId ?? ""),
-              provider: String(task.provider ?? ""),
-              model: String(task.model ?? ""),
-              startedTick: Number(task.started_tick ?? task.startedTick ?? 0),
-              ageTicks: Number(task.age_ticks ?? task.ageTicks ?? 0)
-            };
-          })
-        : []
+      pendingModelTasks,
+      pendingImageGenerationTasks,
+      recentImageGenerationTasks
     },
     models: Array.isArray(data.models)
       ? data.models.map((item) => {
@@ -1212,6 +1212,31 @@ function runtimeStatusFromApi(data: Record<string, unknown>): RuntimeStatus {
   };
 }
 
+function runtimePendingTaskFromApi(item: unknown) {
+  const task = objectValue(item);
+  return {
+    id: String(task.id ?? ""),
+    agentId: String(task.agent_id ?? task.agentId ?? ""),
+    taskKind: String(task.task_kind ?? task.taskKind ?? ""),
+    status: String(task.status ?? ""),
+    provider: String(task.provider ?? ""),
+    providerId: String(task.provider_id ?? task.providerId ?? ""),
+    model: String(task.model ?? ""),
+    startedTick: Number(task.started_tick ?? task.startedTick ?? 0),
+    ageTicks: Number(task.age_ticks ?? task.ageTicks ?? 0),
+    ageSeconds: nullableNumber(task.age_seconds ?? task.ageSeconds),
+    elapsedMs: nullableNumber(task.elapsed_ms ?? task.elapsedMs),
+    operation: String(task.operation ?? ""),
+    prompt: String(task.prompt ?? ""),
+    width: nullableNumber(task.width) ?? undefined,
+    height: nullableNumber(task.height) ?? undefined,
+    referenceBackground: Boolean(task.reference_background ?? task.referenceBackground),
+    error: String(task.error ?? ""),
+    layerId: String(task.layer_id ?? task.layerId ?? ""),
+    asset: String(task.asset ?? "")
+  };
+}
+
 function runtimeStatusFromWorld(world: WorldSnapshot, models: ModelConfig[]): RuntimeStatus {
   const modelTasks = Object.entries(world.model_tasks ?? {})
     .filter(([, task]) => !task.done)
@@ -1230,7 +1255,9 @@ function runtimeStatusFromWorld(world: WorldSnapshot, models: ModelConfig[]): Ru
       tick: Number(world.tick ?? 0),
       sceneDirectorPending: Boolean(world.scene_director?.pending),
       pendingModelTaskCount: modelTasks.length,
-      pendingModelTasks: modelTasks
+      pendingModelTasks: modelTasks,
+      pendingImageGenerationTasks: [],
+      recentImageGenerationTasks: []
     },
     models: models.map((model) => {
       const matchingEvents = recentEvents.filter(

@@ -1083,6 +1083,74 @@ def test_api_image_layer_generation_edit_failure_falls_back_to_real_generation(m
     assert len(api_main.runtime.world.map.image_layers) == 1
 
 
+def test_api_extension_fallback_prompt_uses_background_cues_not_hardcoded_map_style(monkeypatch):
+    client = TestClient(app)
+    api_main.runtime.world = api_main.GameWorld.default()
+    api_main.runtime.world.map.width = 256
+    api_main.runtime.world.map.height = 256
+    api_main.runtime.world.map.image_layers = []
+    background = api_main.store.assets_dir / "test-grey-room-bg.png"
+    background.parent.mkdir(parents=True, exist_ok=True)
+    from PIL import Image
+
+    Image.new("RGBA", (256, 256), (92, 92, 92, 255)).save(background)
+    api_main.runtime.world.map.background_image = "/api/assets/test-grey-room-bg.png"
+    client.patch(
+        "/api/models",
+        json={
+            "models": [
+                {
+                    "id": "model_remote_image",
+                    "name": "Remote image",
+                    "kind": "remote",
+                    "provider": "image-http",
+                    "base_url": "https://api.example.test/v1",
+                    "api_key": "image-secret",
+                    "model": "gpt-image-2",
+                    "enabled": True,
+                    "capabilities": ["image_generation"],
+                }
+            ]
+        },
+    )
+    generation_prompt = ""
+
+    def fake_openai_json_request(config, method, path, body=None, timeout=30):
+        nonlocal generation_prompt
+        if path == "images/edits":
+            raise api_main.RemoteProviderError("edit endpoint unsupported")
+        assert path == "images/generations"
+        generation_prompt = body["prompt"]
+        import io
+
+        output = io.BytesIO()
+        Image.new("RGBA", (96, 180), (90, 90, 90, 255)).save(output, format="PNG")
+        return {"data": [{"b64_json": api_main.base64.b64encode(output.getvalue()).decode("ascii")}]}
+
+    monkeypatch.setattr(api_main, "_openai_json_request", fake_openai_json_request)
+
+    response = client.post(
+        "/api/map/image-layers/generate",
+        json={
+            "prompt": "向左扩展这张室内背景",
+            "selection": {"type": "rect", "x": -96, "y": 20, "width": 96, "height": 180},
+            "mode": "extension",
+            "reference_background": True,
+            "provider_id": "model_remote_image",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "left outside edge" in generation_prompt
+    assert "mostly gray/neutral surfaces" in generation_prompt
+    assert "Do not switch to a top-down fantasy map unless the source background is already that style" in generation_prompt
+    monitor = client.get("/api/runtime/status").json()
+    image_tasks = monitor["simulation"]["recent_image_generation_tasks"]
+    assert image_tasks[0]["operation"] == "extension"
+    assert image_tasks[0]["status"] == "done"
+    assert response.json()["world"]["map"]["width"] == 256
+
+
 def test_api_image_layer_generation_real_provider_failure_does_not_create_mock(monkeypatch):
     client = TestClient(app)
     api_main.runtime.world = api_main.GameWorld.default()

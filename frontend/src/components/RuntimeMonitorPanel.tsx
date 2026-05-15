@@ -1,6 +1,6 @@
-import { Activity, AlertTriangle, Cloud, Cpu, HardDrive, RefreshCw, Server } from "lucide-react";
+import { Activity, AlertTriangle, Cloud, Cpu, HardDrive, Image as ImageIcon, RefreshCw, Server } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { RuntimeModelStatus, RuntimeStatus } from "../types";
+import type { RuntimeModelStatus, RuntimePendingModelTask, RuntimeStatus } from "../types";
 
 type Props = {
   status: RuntimeStatus | null;
@@ -12,6 +12,8 @@ export function RuntimeMonitorPanel({ status, stale, onRefresh }: Props) {
   const [samples, setSamples] = useState<RuntimeSample[]>([]);
   const localModels = status?.models.filter((model) => model.kind !== "remote") ?? [];
   const remoteModels = status?.models.filter((model) => model.kind === "remote") ?? [];
+  const imageTasks = status?.simulation.recentImageGenerationTasks ?? [];
+  const runningImageTasks = imageTasks.filter((task) => task.status === "running");
 
   useEffect(() => {
     if (!status) {
@@ -51,7 +53,7 @@ export function RuntimeMonitorPanel({ status, stale, onRefresh }: Props) {
           icon={<Server size={16} />}
           label="模型调用"
           value={`${status?.simulation.pendingModelTaskCount ?? 0}`}
-          detail={status?.simulation.sceneDirectorPending ? "叙事导演处理中" : "无叙事导演任务"}
+          detail={runningImageTasks.length ? `图片生成 ${runningImageTasks.length} 个` : status?.simulation.sceneDirectorPending ? "叙事导演处理中" : "无叙事导演任务"}
         />
         <MetricCard
           icon={<Cpu size={16} />}
@@ -78,6 +80,14 @@ export function RuntimeMonitorPanel({ status, stale, onRefresh }: Props) {
           <span className="memory">内存</span>
           <span className="model">模型队列</span>
         </div>
+      </section>
+
+      <section className="runtime-section">
+        <div className="runtime-section-title">
+          <ImageIcon size={15} />
+          <span>图片生成</span>
+        </div>
+        <ImageTaskList tasks={imageTasks} />
       </section>
 
       <section className="runtime-section">
@@ -221,6 +231,54 @@ function ModelList({ models, empty }: { models: RuntimeModelStatus[]; empty: str
       ))}
     </div>
   );
+}
+
+function ImageTaskList({ tasks }: { tasks: RuntimePendingModelTask[] }) {
+  if (!tasks.length) {
+    return <div className="runtime-empty">暂无图片生成任务</div>;
+  }
+  return (
+    <div className="runtime-model-list" data-testid="runtime-image-task-list">
+      {tasks.slice(0, 8).map((task) => (
+        <article className={task.status === "error" ? "runtime-model-row disabled" : "runtime-model-row"} key={task.id ?? `${task.operation}-${task.startedTick}`}>
+          <div>
+            <strong>{imageOperationLabel(task.operation)}</strong>
+            <small>{task.prompt || `${task.width ?? "?"} x ${task.height ?? "?"}`}</small>
+          </div>
+          <div className="runtime-model-badges">
+            <span>{task.provider || "image"}</span>
+            <span>{task.model || "模型"}</span>
+            {task.referenceBackground ? <span>参考背景</span> : null}
+          </div>
+          <div className="runtime-model-stats">
+            <span>{imageTaskStatusLabel(task)}</span>
+            {task.elapsedMs != null ? <span>{Math.round(task.elapsedMs / 1000)}s</span> : task.ageSeconds != null ? <span>{task.ageSeconds}s</span> : null}
+            {task.error ? <span>错误</span> : task.layerId ? <span>已写入图层</span> : null}
+          </div>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function imageOperationLabel(operation?: string) {
+  const labels: Record<string, string> = {
+    background: "背景候选",
+    region: "区域生成",
+    extension: "边缘扩展",
+    repaint: "重绘"
+  };
+  return labels[operation ?? ""] ?? "图片生成";
+}
+
+function imageTaskStatusLabel(task: RuntimePendingModelTask) {
+  if (task.status === "running") {
+    return "生成中";
+  }
+  if (task.status === "error") {
+    return task.error ? `失败：${task.error.slice(0, 18)}` : "失败";
+  }
+  return "完成";
 }
 
 function capabilityLabel(capability: string) {
