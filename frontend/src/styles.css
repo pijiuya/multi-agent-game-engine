@@ -2063,7 +2063,7 @@ textarea:focus {
 
 .local-model-option {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto minmax(54px, auto);
+  grid-template-columns: auto auto minmax(0, 1fr) auto minmax(54px, auto);
   gap: 7px;
   min-height: 38px;
   align-items: center;

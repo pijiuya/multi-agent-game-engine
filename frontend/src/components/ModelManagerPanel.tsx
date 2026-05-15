@@ -96,6 +96,7 @@ export function ModelManagerPanel({
   const [remoteModelOptions, setRemoteModelOptions] = useState<Partial<Record<ModelCapabilityId, RemoteModelOption[]>>>({});
   const [remoteStatus, setRemoteStatus] = useState<Partial<Record<ModelCapabilityId, { loading: boolean; message: string; ok: boolean | null }>>>({});
   const [selectedLocalModels, setSelectedLocalModels] = useState<Partial<Record<ModelCapabilityId, string[]>>>({});
+  const [primaryLocalModels, setPrimaryLocalModels] = useState<Partial<Record<ModelCapabilityId, string>>>({});
   const [connectionModes, setConnectionModes] = useState<Partial<Record<ModelCapabilityId, ModelConnectionMode>>>({});
   const statusMap = new Map(statuses.map((status) => [status.id, status]));
 
@@ -138,9 +139,31 @@ export function ModelManagerPanel({
         }
         const defaults = status.local_options
           .filter((option) => option.selectedByDefault || option.recommended)
+          .filter((option) => !option.installed)
           .map((option) => option.model);
         if (defaults.length) {
           next[status.id] = defaults;
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [statuses]);
+
+  useEffect(() => {
+    setPrimaryLocalModels((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const status of statuses) {
+        if (current[status.id] || !status.local_options.length) {
+          continue;
+        }
+        const primary = status.local_options.find((option) => option.selectedByDefault)
+          ?? status.local_options.find((option) => option.recommended)
+          ?? status.local_options.find((option) => option.installed)
+          ?? status.local_options[0];
+        if (primary?.model) {
+          next[status.id] = primary.model;
           changed = true;
         }
       }
@@ -250,11 +273,22 @@ export function ModelManagerPanel({
             [activeCapability]: toggleLocalModel(current[activeCapability] ?? [], model, selected)
           }));
         }}
+        onSelectPrimaryLocalModel={(model) => {
+          const option = statusMap.get(activeCapability)?.local_options.find((item) => item.model === model);
+          setPrimaryLocalModels((current) => ({ ...current, [activeCapability]: model }));
+          if (option && !option.installed) {
+            setSelectedLocalModels((current) => ({
+              ...current,
+              [activeCapability]: toggleLocalModel(current[activeCapability] ?? [], model, true)
+            }));
+          }
+        }}
         onRefresh={onRefresh}
         onTestRemote={() => void testRemote(activeCapability)}
         onChangeConnectionMode={(mode) => setConnectionModes((current) => ({ ...current, [activeCapability]: mode }))}
         task={tasks[activeCapability] ?? null}
         selectedLocalModels={selectedLocalModels[activeCapability] ?? []}
+        primaryLocalModel={primaryLocalModels[activeCapability] ?? ""}
         onToggleAdvanced={() => setAdvancedOpen((current) => ({ ...current, [activeCapability]: !current[activeCapability] }))}
         onUpdateDraft={(patch) => updateRemoteDraft(activeCapability, patch)}
         status={statusMap.get(activeCapability) ?? fallbackStatus(activeCapability)}
@@ -273,12 +307,14 @@ function CapabilityDetail({
   advancedOpen,
   task,
   selectedLocalModels,
+  primaryLocalModel,
   onRefresh,
   onConfigureLocal,
   onInstallLocal,
   onConfigureRemote,
   onLoadRemoteModels,
   onSelectLocalModel,
+  onSelectPrimaryLocalModel,
   onTestRemote,
   onChangeConnectionMode,
   onToggleAdvanced,
@@ -293,26 +329,27 @@ function CapabilityDetail({
   advancedOpen: boolean;
   task: ModelCapabilityTask | null;
   selectedLocalModels: string[];
+  primaryLocalModel: string;
   onRefresh: () => void;
   onConfigureLocal: (capability: ModelCapabilityId, selection?: { model?: string; models?: string[] }) => void;
   onInstallLocal: (capability: ModelCapabilityId, selection?: { model?: string; models?: string[] }) => void;
   onConfigureRemote: () => void;
   onLoadRemoteModels: () => void;
   onSelectLocalModel: (model: string, selected: boolean) => void;
+  onSelectPrimaryLocalModel: (model: string) => void;
   onTestRemote: () => void;
   onChangeConnectionMode: (mode: ModelConnectionMode) => void;
   onToggleAdvanced: () => void;
   onUpdateDraft: (patch: Partial<RemoteDraft>) => void;
 }) {
   const meta = CAPABILITY_META[capability];
-  const localSelection = localSelectionPayload(status, selectedLocalModels);
-  const selectedInstalledLocal = status.local_options.some((option) => selectedLocalModels.includes(option.model) && option.installed);
-  const selectedMissingLocal = status.local_options.some((option) => selectedLocalModels.includes(option.model) && !option.installed);
-  const selectedMissingLocalCount = status.local_options.filter((option) => selectedLocalModels.includes(option.model) && !option.installed).length;
-  const hasSelectedInstallModels = capability !== "llm" || selectedLocalModels.length > 0 || !status.local_options.length;
-  const canUseLocal = Boolean(status.recommended_local) || selectedInstalledLocal;
+  const localSelection = localSelectionPayload(status, selectedLocalModels, primaryLocalModel);
+  const primaryOption = status.local_options.find((option) => option.model === localSelection?.model);
+  const selectedMissingLocalCount = status.local_options.filter((option) => localSelection?.models.includes(option.model) && !option.installed).length;
+  const hasSelectedInstallModels = capability !== "llm" || Boolean(localSelection?.models.length) || !status.local_options.length;
+  const canUseLocal = Boolean(status.recommended_local) || Boolean(primaryOption?.installed);
   const canInstallLocal = capability === "llm"
-    ? selectedMissingLocal && hasSelectedInstallModels
+    ? selectedMissingLocalCount > 0 && hasSelectedInstallModels
     : capability === "segmentation" && status.installable && hasSelectedInstallModels;
   const isInstalling = task?.status === "running";
   const isReady = status.status === "ready";
@@ -320,6 +357,8 @@ function CapabilityDetail({
     ? `安装中 ${task.progress}%`
     : canInstallLocal
       ? installActionLabel(capability, selectedMissingLocalCount, localSelection?.model ?? "")
+      : capability === "llm" && canUseLocal && localSelection?.model
+        ? `启用 ${localSelection.model}`
       : isReady
         ? readyActionLabel(capability)
         : meta.localLabel;
@@ -367,7 +406,9 @@ function CapabilityDetail({
       {connectionMode === "local" && capability === "llm" && status.local_options.length ? (
         <LocalModelList
           options={status.local_options}
+          primaryModel={localSelection?.model ?? primaryLocalModel}
           selectedModels={selectedLocalModels}
+          onSelectPrimary={onSelectPrimaryLocalModel}
           onSelect={onSelectLocalModel}
         />
       ) : null}
@@ -452,10 +493,10 @@ function readyActionLabel(capability: ModelCapabilityId) {
 
 function installActionLabel(capability: ModelCapabilityId, selectedCount = 0, primaryModel = "") {
   if (capability === "llm") {
-    if (selectedCount > 1) {
-      return `下载并启用 ${selectedCount} 个本地模型`;
+    if (selectedCount > 0) {
+      return primaryModel ? `下载 ${selectedCount} 个并启用 ${primaryModel}` : `下载 ${selectedCount} 个本地模型`;
     }
-    return primaryModel ? `下载并启用 ${primaryModel}` : "下载并启用本地 LLM";
+    return primaryModel ? `启用 ${primaryModel}` : "启用本地 LLM";
   }
   if (capability === "segmentation") {
     return "安装并启用内置 SAM";
@@ -570,18 +611,22 @@ function RemoteModelPanel({
 
 function LocalModelList({
   options,
+  primaryModel,
   selectedModels,
+  onSelectPrimary,
   onSelect
 }: {
   options: LocalModelOption[];
+  primaryModel: string;
   selectedModels: string[];
+  onSelectPrimary: (model: string) => void;
   onSelect: (model: string, selected: boolean) => void;
 }) {
   return (
     <div className="local-model-list" data-testid="local-model-list-llm">
       <div className="local-model-list-heading">
         <span>本地模型尺寸</span>
-        <small>可多选下载；推荐项会作为主模型启用</small>
+        <small>复选框选择下载；单选按钮选择当前使用</small>
       </div>
       <div className="local-model-list-summary">
         <span>已下载</span>
@@ -592,9 +637,18 @@ function LocalModelList({
       {options.map((option) => {
         const selected = selectedModels.includes(option.model);
         return (
-          <label className={selected ? "local-model-option selected" : "local-model-option"} key={option.id}>
+          <div className={primaryModel === option.model ? "local-model-option selected" : "local-model-option"} key={option.id}>
             <input
-              checked={selected}
+              aria-label={`使用 ${option.model}`}
+              checked={primaryModel === option.model}
+              name="primary-local-llm"
+              onChange={() => onSelectPrimary(option.model)}
+              type="radio"
+            />
+            <input
+              aria-label={`下载 ${option.model}`}
+              checked={option.installed || selected}
+              disabled={option.installed}
               onChange={(event) => onSelect(option.model, event.currentTarget.checked)}
               type="checkbox"
             />
@@ -604,7 +658,7 @@ function LocalModelList({
             </span>
             <em>{option.sizeLabel}</em>
             <small className={option.installed ? "downloaded" : "missing"}>{option.installed ? "已下载" : "需要下载"}</small>
-          </label>
+          </div>
         );
       })}
     </div>
@@ -618,14 +672,18 @@ function toggleLocalModel(current: string[], model: string, selected: boolean) {
   return current.filter((item) => item !== model);
 }
 
-function localSelectionPayload(status: ModelCapabilityStatus, selectedModels: string[]) {
+function localSelectionPayload(status: ModelCapabilityStatus, selectedModels: string[], primaryModel: string) {
   if (status.id !== "llm") {
     return undefined;
   }
-  const recommended = status.local_options.find((option) => option.recommended && selectedModels.includes(option.model));
-  const installed = status.local_options.find((option) => option.installed && selectedModels.includes(option.model));
-  const primary = recommended?.model ?? installed?.model ?? selectedModels[0] ?? status.device_recommendation?.model ?? status.recommended_local?.model ?? "";
-  const models = selectedModels.length ? selectedModels : primary ? [primary] : [];
+  const fallbackPrimary = status.local_options.find((option) => option.selectedByDefault)?.model
+    ?? status.local_options.find((option) => option.recommended)?.model
+    ?? status.local_options.find((option) => option.installed)?.model
+    ?? status.device_recommendation?.model
+    ?? status.recommended_local?.model
+    ?? "";
+  const primary = primaryModel || fallbackPrimary;
+  const models = Array.from(new Set([primary, ...selectedModels].filter(Boolean)));
   return { model: primary, models };
 }
 

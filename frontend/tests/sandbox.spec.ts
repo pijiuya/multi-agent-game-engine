@@ -1258,7 +1258,7 @@ test("llm capability starts local Ollama model install when no model is availabl
   await page.route("**/api/model-capabilities/llm/install-local", async (route) => {
     const payload = route.request().postDataJSON() as { model?: string; models?: string[] };
     expect(payload.model).toBe("qwen2.5:7b");
-    expect(payload.models).toEqual(expect.arrayContaining(["qwen2.5:1.5b", "qwen2.5:7b"]));
+    expect(payload.models).toEqual(["qwen2.5:7b"]);
     installed = true;
     await new Promise((resolve) => setTimeout(resolve, 100));
     return route.fulfill({
@@ -1304,11 +1304,17 @@ test("llm capability starts local Ollama model install when no model is availabl
   await expect(modelsPanel.getByTestId("local-model-list-llm")).toContainText("已下载");
   await expect(modelsPanel.getByTestId("local-model-list-llm")).toContainText("需要下载");
   await expect(modelsPanel).toContainText("不要求用户电脑预装 Python");
+  await expect(modelsPanel.getByLabel("使用 qwen2.5:7b")).toBeChecked();
+  await expect(modelsPanel.getByLabel("下载 qwen2.5:1.5b")).toBeChecked();
+  await expect(modelsPanel.getByLabel("下载 qwen2.5:1.5b")).toBeDisabled();
+  await expect(modelsPanel.getByLabel("下载 qwen2.5:7b")).toBeChecked();
   await modelsPanel.getByRole("button", { name: "远程 LLM" }).click();
   await expect(modelsPanel.getByTestId("model-advanced-llm").getByText("服务地址", { exact: true })).toBeVisible();
   await expect(modelsPanel.getByRole("button", { name: "保存并使用远程 LLM" })).toBeDisabled();
   await modelsPanel.getByRole("button", { name: "本地模型" }).click();
-  await modelsPanel.getByTestId("local-model-list-llm").locator("label").filter({ hasText: "实时 1.5B" }).locator("input").check();
+  await modelsPanel.getByLabel("使用 qwen2.5:1.5b").check();
+  await expect(modelsPanel.getByRole("button", { name: /下载 1 个并启用 qwen2\.5:1\.5b/ })).toBeEnabled();
+  await modelsPanel.getByLabel("使用 qwen2.5:7b").check();
   const installButton = modelsPanel.getByRole("button", { name: /qwen2\.5:7b/ });
   await expect(installButton).toBeEnabled();
   await installButton.click();
