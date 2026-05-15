@@ -423,17 +423,24 @@ async function ensureBackend() {
     return healthy;
   }
 
-  if (!requestedNarrativePort) {
-    const availableNarrativePort = await findAvailableBackendPort(narrativePort);
-    if (availableNarrativePort && availableNarrativePort !== narrativePort) {
-      log("selected alternate narrative port", `${narrativePort} -> ${availableNarrativePort}`);
-      narrativePort = availableNarrativePort;
-    }
-  }
   process.env.AGENT_ENGINE_NARRATIVE_HOST = backendHost;
   process.env.AGENT_ENGINE_NARRATIVE_PORT = String(narrativePort);
   process.env.AGENT_ENGINE_NARRATIVE_URL = narrativeUrl("");
-  await ensureNarrativeService(root, projectDir);
+  if (narrativeAutostartEnabled()) {
+    if (!requestedNarrativePort) {
+      const availableNarrativePort = await findAvailableBackendPort(narrativePort);
+      if (availableNarrativePort && availableNarrativePort !== narrativePort) {
+        log("selected alternate narrative port", `${narrativePort} -> ${availableNarrativePort}`);
+        narrativePort = availableNarrativePort;
+      }
+    }
+    process.env.AGENT_ENGINE_NARRATIVE_PORT = String(narrativePort);
+    process.env.AGENT_ENGINE_NARRATIVE_URL = narrativeUrl("");
+    await ensureNarrativeService(root, projectDir);
+  } else {
+    process.env.AGENT_ENGINE_DISABLE_NARRATIVE_AUTOSTART = "1";
+    log("narrative service autostart disabled by default", "set AGENT_ENGINE_ENABLE_NARRATIVE_AUTOSTART=1 to enable");
+  }
 
   const healthy = await backendHealthy();
   if (healthy) {
@@ -609,6 +616,10 @@ async function ensureNarrativeService(root, projectDir) {
   }
   log("no narrative service candidate started successfully");
   return false;
+}
+
+function narrativeAutostartEnabled() {
+  return process.env.AGENT_ENGINE_ENABLE_NARRATIVE_AUTOSTART === "1";
 }
 
 async function startNarrativeProcess(command, args, cwd, projectDir) {

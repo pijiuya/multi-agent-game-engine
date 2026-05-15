@@ -15,6 +15,7 @@
     "dist:win": "npm run build && npm run build:backend:win && electron-builder --win",
     "pack:mac": "npm run build && npm run build:backend:mac && electron-builder --mac --dir",
     "dist:mac": "npm run build && npm run build:backend:mac && electron-builder --mac",
+    "dist:mac:kit": "npm run dist:mac && node ../packaging/mac/make-release-kit.cjs",
     "preview": "vite preview --host 127.0.0.1",
     "test:e2e": "playwright test"
   },
@@ -56,6 +57,7 @@
       "electron/**/*",
       "package.json"
     ],
+    "afterPack": "../packaging/mac/after-pack.cjs",
     "extraResources": [
       {
         "from": "../docs/user-manual.zh-CN.md",
@@ -95,6 +97,14 @@
         {
           "from": "../docs/user-manual.zh-CN.md",
           "to": "docs/user-manual.zh-CN.md"
+        },
+        {
+          "from": "../docs/mac-installation.zh-CN.md",
+          "to": "docs/mac-installation.zh-CN.md"
+        },
+        {
+          "from": "../packaging/mac/install-multi-agent-engine.command",
+          "to": "install-multi-agent-engine.command"
         },
         {
           "from": "../packaging/backend-dist/agent-engine-backend",
