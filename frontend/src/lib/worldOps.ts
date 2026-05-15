@@ -86,7 +86,7 @@ export function addAgentLocal(world: WorldSnapshot, name: string, role: string, 
     action_space: ["move_to", "say", "interact", "use", "observe", "wait", "stop", "social", "pick_up", "drop_item", "move_item"],
     hidden: false,
     animation: null,
-    dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 20 }
+    dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 20, language: "auto" }
   };
   const state: AgentState = {
     id,
@@ -98,7 +98,8 @@ export function addAgentLocal(world: WorldSnapshot, name: string, role: string, 
     pending_model: false,
     last_model_tick: -999,
     cooldowns: {},
-    held_item_id: null
+    held_item_id: null,
+    narrative_state: {}
   };
   return {
     ...world,

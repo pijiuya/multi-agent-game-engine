@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { AgentPanel } from "./components/AgentPanel";
 import { FloatingPanel } from "./components/FloatingPanel";
 import { MapStudioPanel, type MapStudioStep } from "./components/MapStudioPanel";
 import { ModelManagerPanel } from "./components/ModelManagerPanel";
+import { latestNarrativeLine, NarrativePanel } from "./components/NarrativePanel";
 import { PropertiesPanel } from "./components/PropertiesPanel";
 import { RegionDrawPanel } from "./components/RegionDrawPanel";
 import { RegionPanel } from "./components/RegionPanel";
@@ -26,6 +27,7 @@ import {
   createMapGeneration,
   configureLocalCapability,
   configureRemoteCapability,
+  fetchRemoteCapabilityModels,
   getModelCapabilityTask,
   getModelCapabilityStatus,
   getWorld,
@@ -36,6 +38,7 @@ import {
   patchMap,
   patchMapItem,
   patchMapRegion,
+  patchNarrative,
   postAction,
   normalizeWorldSnapshot,
   regenerateMapRegion,
@@ -43,6 +46,7 @@ import {
   segmentMap,
   selectGeneratedMap,
   setSimulation,
+  testRemoteCapability,
   tickSimulation,
   uploadAsset,
   uploadMapImage,
@@ -59,6 +63,7 @@ import type {
   MapRegion,
   MapRegionFunction,
   MapSegmentationState,
+  NarrativeConfig,
   RegionDrawOperation,
   ModelCapabilityId,
   ModelCapabilityStatus,
@@ -67,6 +72,8 @@ import type {
   PanelState,
   Point,
   PolygonArea,
+  RemoteModelOption,
+  RemoteModelTestResult,
   SelectionState,
   WorldItem,
   WorldMap,
@@ -85,7 +92,13 @@ type ObjectMenuState = ObjectMenuTarget & { x: number; y: number };
 type ItemPatch = Partial<Omit<WorldItem, "id">>;
 type MapPatch = Partial<Pick<WorldMap, "name" | "width" | "height" | "background_image">>;
 type AgentPatch = Partial<Omit<AgentProfile, "id">>;
-const PANEL_LAYOUT_STORAGE_KEY = "agent-workstation.panel-layout.v2";
+const PANEL_LAYOUT_STORAGE_KEY = "agent-workstation.panel-layout.v3";
+const PANEL_MARGIN = 16;
+const PANEL_GAP = 8;
+const PANEL_SNAP_DISTANCE = 20;
+const PANEL_MIN_WIDTH = 92;
+const PANEL_MIN_HEIGHT = 120;
+const PANEL_MINIMIZED_HEIGHT = 40;
 
 export default function App() {
   const [world, setWorld] = useState<WorldSnapshot | null>(null);
@@ -98,6 +111,7 @@ export default function App() {
   const [draftPoints, setDraftPoints] = useState<Point[]>([]);
   const [status, setStatus] = useState("载入中");
   const [appearanceMode, setAppearanceMode] = useState<"light" | "dark">("light");
+  const [appBackgroundOpacity, setAppBackgroundOpacity] = useState(0);
   const [canvasView, setCanvasView] = useState<CanvasViewState>({
     zoom: 1,
     pan: { x: 0, y: 0 },
@@ -141,6 +155,7 @@ export default function App() {
     }
     return Boolean(world.agent_profiles[selectedAgentId]);
   }, [world, selectedAgentId]);
+  const narrativeLine = useMemo(() => (world ? latestNarrativeLine(world.events) : null), [world?.events]);
 
   useEffect(() => {
     void refreshWorld();
@@ -665,6 +680,20 @@ export default function App() {
     }
   }
 
+  async function updateNarrativeConfig(patch: Partial<Pick<NarrativeConfig, "enabled" | "premise" | "tone" | "cadence_ticks">>) {
+    if (!world) {
+      return;
+    }
+    setWorld({ ...world, narrative: { ...world.narrative, ...patch } });
+    const snapshot = await patchNarrative(patch);
+    if (snapshot) {
+      setWorld(snapshot);
+      setStatus("叙事已更新");
+    } else {
+      setStatus("本地叙事预览");
+    }
+  }
+
   async function generateMap(prompt: string, width = 1920, height = 1080, ratio: MapRatioPreset = "16:9") {
     if (!world) {
       return;
@@ -672,11 +701,16 @@ export default function App() {
     const fullPrompt = mapPrompt(prompt, width, height, ratio);
     setSegmentation(idleSegmentation());
     await updateMapPatch({ width, height });
-    const task = await createMapGeneration({ prompt: fullPrompt, width, height, ratio, count: 3 });
-    if (task) {
+    const provider = enabledModelForCapability(models, "image_generation");
+    try {
+      const task = await createMapGeneration({ prompt: fullPrompt, width, height, ratio, count: 3, provider_id: provider?.id ?? null });
       setGeneration(task);
       setStatus("背景候选已生成");
-    } else {
+    } catch (error) {
+      if (provider && provider.provider !== "mock") {
+        setStatus(`图片生成失败：${error instanceof Error ? error.message : "远程服务不可用"}`);
+        return;
+      }
       setGeneration(createLocalGeneration(fullPrompt, width, height, ratio));
       setStatus("本地背景候选已生成");
     }
@@ -884,19 +918,37 @@ export default function App() {
     }
   }
 
+  async function loadRemoteModelsForCapability(
+    capability: ModelCapabilityId,
+    draft: { baseUrl: string; apiKey: string; model: string }
+  ): Promise<RemoteModelOption[]> {
+    const options = await fetchRemoteCapabilityModels(capability, draft);
+    setStatus(options.length ? "远程模型列表已读取" : "远程模型列表为空");
+    return options;
+  }
+
+  async function testRemoteModelCapability(
+    capability: ModelCapabilityId,
+    draft: { baseUrl: string; apiKey: string; model: string }
+  ): Promise<RemoteModelTestResult> {
+    const result = await testRemoteCapability(capability, draft);
+    setStatus(result.ok ? "远程 API 测试成功" : "远程 API 测试失败");
+    return result;
+  }
+
   async function installLocalModelCapability(capability: ModelCapabilityId) {
     const optimisticTask: ModelCapabilityTask = {
       id: makeId("local_model_task"),
       capability,
-      title: capability === "segmentation" ? "安装并启用内置 MobileSAM" : "安装本地模型",
+      title: capability === "llm" ? "下载并启用本地 LLM" : capability === "segmentation" ? "安装并启用内置 MobileSAM" : "安装本地模型",
       status: "running",
       stage: "connecting",
       progress: 4,
-      message: "正在连接本机引擎并启动安装",
+      message: capability === "llm" ? "正在连接 Ollama 并准备本地 LLM" : "正在连接本机引擎并启动安装",
       error: null
     };
     setModelCapabilityTasks((current) => ({ ...current, [capability]: optimisticTask }));
-    setStatus("正在启动内置模型安装");
+    setStatus(capability === "llm" ? "正在准备本地 LLM" : "正在启动内置模型安装");
     const result = await installLocalCapability(capability);
     if (!result) {
       setModelCapabilityTasks((current) => ({
@@ -917,7 +969,7 @@ export default function App() {
       setModels(result.models);
     }
     setModelCapabilityTasks((current) => ({ ...current, [capability]: result.task }));
-    setStatus(result.task.message || "内置模型安装中");
+    setStatus(result.task.message || (capability === "llm" ? "本地 LLM 准备中" : "内置模型安装中"));
     void pollModelCapabilityTask(capability, result.task.id);
   }
 
@@ -930,20 +982,20 @@ export default function App() {
         return;
       }
       setModelCapabilityTasks((current) => ({ ...current, [capability]: task }));
-      setStatus(task.message || "内置模型安装中");
+      setStatus(task.message || (capability === "llm" ? "本地 LLM 准备中" : "内置模型安装中"));
       if (task.status === "done") {
         await refreshModels();
         await refreshModelCapabilities();
-        setStatus("内置 MobileSAM 已启用");
+        setStatus(capability === "llm" ? "本地 LLM 已启用" : "内置 MobileSAM 已启用");
         return;
       }
       if (task.status === "error") {
         await refreshModelCapabilities();
-        setStatus(task.error || "内置模型安装失败");
+        setStatus(task.error || (capability === "llm" ? "本地 LLM 准备失败" : "内置模型安装失败"));
         return;
       }
     }
-    setStatus("内置模型安装仍在进行，请稍后重新检测");
+    setStatus(capability === "llm" ? "本地 LLM 仍在准备，请稍后重新检测" : "内置模型安装仍在进行，请稍后重新检测");
   }
 
   async function updateAgentProfile(agentId: string, patch: AgentPatch) {
@@ -1010,39 +1062,17 @@ export default function App() {
 
   function movePanel(id: PanelState["id"], x: number, y: number) {
     setPanels((current) =>
-      current.map((panel) =>
-        panel.id === id
-          ? {
-              ...panel,
-              x: clamp(x, 16, Math.max(16, window.innerWidth - panel.width - 16)),
-              y: clamp(y, 16, Math.max(16, window.innerHeight - 44)),
-              dockedTo: null
-            }
-          : panel
-      )
+      current.map((panel) => (panel.id === id ? clampPanelToViewport({ ...panel, x, y, dockedTo: null }) : panel))
     );
   }
 
   function resizePanel(id: PanelState["id"], x: number, y: number, width: number, height: number) {
-    const minWidth = 92;
-    const minHeight = 120;
     setPanels((current) =>
       current.map((panel) => {
         if (panel.id !== id) {
           return panel;
         }
-        const nextX = clamp(x, 16, Math.max(16, window.innerWidth - minWidth - 16));
-        const nextY = clamp(y, 16, Math.max(16, window.innerHeight - 44));
-        const nextWidth = clamp(width, minWidth, Math.max(minWidth, window.innerWidth - nextX - 16));
-        const nextHeight = clamp(height, minHeight, Math.max(minHeight, window.innerHeight - nextY - 16));
-        return {
-          ...panel,
-          x: nextX,
-          y: nextY,
-          width: nextWidth,
-          height: nextHeight,
-          dockedTo: null
-        };
+        return clampPanelToViewport({ ...panel, x, y, width, height, dockedTo: null });
       })
     );
   }
@@ -1079,6 +1109,12 @@ export default function App() {
     });
   }
 
+  function resetPanelLayout() {
+    const nextPanels = createInitialPanels();
+    setPanels(nextPanels);
+    setZCursor(maxPanelZ(nextPanels));
+  }
+
   function setZoom(direction: 1 | -1) {
     setCanvasView((view) => ({
       ...view,
@@ -1089,14 +1125,14 @@ export default function App() {
 
   if (!world) {
     return (
-      <main className={`desktop-workspace tone-${appearanceMode} loading`}>
+      <main className={`desktop-workspace tone-${appearanceMode} loading`} style={appBackgroundStyle(appBackgroundOpacity)}>
         <div className="loader" />
       </main>
     );
   }
 
   return (
-    <main className={`desktop-workspace tone-${appearanceMode}`}>
+    <main className={`desktop-workspace tone-${appearanceMode}`} style={appBackgroundStyle(appBackgroundOpacity)}>
       <SceneViewport
         world={world}
         editTool={editTool}
@@ -1113,8 +1149,8 @@ export default function App() {
         }
         showAllRegionLayers={selection.kind === "regions"}
         activeRegionFunction={activeRegionFunction}
-        activeRegionId={activeRegionId}
         status={status}
+        appearanceMode={appearanceMode}
         onViewChange={setCanvasView}
         onWorldPoint={(point) => void handleWorldClick(point)}
         onSelect={(next) => selectFromWorld(next)}
@@ -1126,14 +1162,23 @@ export default function App() {
         onCommitItem={(itemId, patch) => void updateItemPatch(itemId, patch)}
       />
 
+      {narrativeLine ? (
+        <div className="scene-subtitle" data-testid="scene-subtitle">
+          <span>{narrativeLine.message}</span>
+        </div>
+      ) : null}
+
       <TransportControls
+        appBackgroundOpacity={appBackgroundOpacity}
         running={world.running}
         onRun={() => void setSimulationRunning(true)}
         onPause={() => void setSimulationRunning(false)}
         onStop={() => void setSimulationRunning(false, true)}
+        onAppBackgroundOpacity={setAppBackgroundOpacity}
         onCenterOrigin={() => centerOnWorldPoint(ORIGIN_POINT)}
         appearanceMode={appearanceMode}
         onToggleAppearance={() => setAppearanceMode((mode) => (mode === "light" ? "dark" : "light"))}
+        onResetPanelLayout={resetPanelLayout}
       />
 
       {anchorMenu ? (
@@ -1225,6 +1270,9 @@ export default function App() {
               onClear={() => setDraftPoints([])}
             />
           ) : null}
+          {panel.id === "narrative" ? (
+            <NarrativePanel world={world} onUpdate={(patch) => void updateNarrativeConfig(patch)} />
+          ) : null}
           {panel.id === "agents" ? (
             <AgentPanel
               world={world}
@@ -1246,6 +1294,8 @@ export default function App() {
               onConfigureLocal={(capability) => void configureLocalModelCapability(capability)}
               onInstallLocal={(capability) => void installLocalModelCapability(capability)}
               onConfigureRemote={(capability, draft) => void configureRemoteModelCapability(capability, draft)}
+              onFetchRemoteModels={loadRemoteModelsForCapability}
+              onTestRemote={testRemoteModelCapability}
             />
           ) : null}
           {panel.id === "mapStudio" ? (
@@ -1348,28 +1398,61 @@ function objectKindLabel(kind: ObjectMenuTarget["kind"]) {
 function createInitialPanels(): PanelState[] {
   const width = typeof window === "undefined" ? 1280 : window.innerWidth;
   const height = typeof window === "undefined" ? 820 : window.innerHeight;
-  if (width < 760) {
+  if (width < 560) {
+    const panelWidth = Math.max(PANEL_MIN_WIDTH, width - PANEL_MARGIN * 2);
+    const toolHeight = clamp(height - 420, 150, 280);
+    let y = 84;
+    const nextY = (panelHeight: number) => {
+      const current = y;
+      y += panelHeight + PANEL_GAP;
+      return current;
+    };
     return [
-      makePanel("tools", "工具", 16, 84, 96, 552, 44),
-      makePanel("scene", "场景列表", 16, 282, Math.min(340, width - 32), 220, 43),
-      makePanel("regions", "区域", 16, 522, Math.min(340, width - 32), 260, 46),
-      makePanel("regionDraw", "区域绘制", 16, 562, Math.min(340, width - 32), 260, 47),
-      makePanel("agents", "Agent 面板", 16, 522, Math.min(340, width - 32), 220, 42),
-      makePanel("mapStudio", "地图工作台", 16, Math.max(684, height - 152), Math.min(340, width - 32), 280, 45),
-      makePanel("models", "模型管理", 16, Math.max(704, height - 152), Math.min(340, width - 32), 280, 41),
-      makePanel("properties", "属性", 16, Math.max(724, height - 152), Math.min(340, width - 32), 240, 40)
-    ];
+      makePanel("tools", "工具", PANEL_MARGIN, nextY(toolHeight), panelWidth, toolHeight, 44),
+      makePanel("scene", "场景列表", PANEL_MARGIN, nextY(PANEL_MINIMIZED_HEIGHT), panelWidth, 220, 43, true),
+      makePanel("agents", "Agent 面板", PANEL_MARGIN, nextY(PANEL_MINIMIZED_HEIGHT), panelWidth, 220, 42, true),
+      makePanel("properties", "属性", PANEL_MARGIN, nextY(PANEL_MINIMIZED_HEIGHT), panelWidth, 240, 40, true),
+      makePanel("regions", "区域", PANEL_MARGIN, nextY(PANEL_MINIMIZED_HEIGHT), panelWidth, 220, 46, true),
+      makePanel("regionDraw", "区域绘制", PANEL_MARGIN, nextY(PANEL_MINIMIZED_HEIGHT), panelWidth, 220, 47, true),
+      makePanel("narrative", "场景叙事", PANEL_MARGIN, nextY(PANEL_MINIMIZED_HEIGHT), panelWidth, 260, 48, true),
+      makePanel("mapStudio", "地图工作台", PANEL_MARGIN, nextY(PANEL_MINIMIZED_HEIGHT), panelWidth, 240, 45, true),
+      makePanel("models", "模型管理", PANEL_MARGIN, nextY(PANEL_MINIMIZED_HEIGHT), panelWidth, 240, 41, true)
+    ].map(clampPanelToViewport);
   }
+  if (width < 1120) {
+    const left = PANEL_MARGIN;
+    const rightWidth = Math.min(340, Math.max(250, Math.floor((width - PANEL_MARGIN * 3 - 104) / 2)));
+    const midX = left + 104 + PANEL_GAP;
+    const rightX = Math.min(width - rightWidth - PANEL_MARGIN, midX + rightWidth + PANEL_GAP);
+    return [
+      makePanel("tools", "工具", left, 96, 96, Math.min(480, height - 128), 44),
+      makePanel("scene", "场景列表", midX, 96, rightWidth, 220, 43),
+      makePanel("regions", "区域", midX, 324, rightWidth, 210, 46),
+      makePanel("mapStudio", "地图工作台", midX, 542, rightWidth, 220, 45),
+      makePanel("agents", "Agent 面板", rightX, 96, rightWidth, 220, 42),
+      makePanel("properties", "属性", rightX, 324, rightWidth, 210, 40),
+      makePanel("regionDraw", "区域绘制", rightX, 542, rightWidth, 220, 47),
+      makePanel("narrative", "场景叙事", rightX, 770, rightWidth, 220, 48),
+      makePanel("models", "模型管理", rightX, 998, rightWidth, 220, 41)
+    ].map(clampPanelToViewport);
+  }
+  const top = 96;
+  const left = 28;
+  const leftPanelX = left + 108;
+  const centerX = Math.max(452, Math.round((width - 360) / 2));
+  const rightWidth = Math.min(344, Math.max(320, width - 936));
+  const rightX = Math.max(centerX + 372, width - rightWidth - 28);
   return [
-    makePanel("tools", "工具", 42, 126, 96, 552, 44),
-    makePanel("scene", "场景列表", 42, 348, 304, 340, 43),
-    makePanel("regions", "区域", 520, 92, 340, 236, 46),
-    makePanel("regionDraw", "区域绘制", 520, 350, 340, 250, 47),
-    makePanel("agents", "Agent 面板", Math.max(380, width - 388), 92, 340, 316, 42),
-    makePanel("mapStudio", "地图工作台", 154, Math.max(500, height - 312), 340, 296, 45),
-    makePanel("models", "模型管理", 520, Math.max(500, height - 312), 360, 296, 41),
-    makePanel("properties", "属性", Math.max(380, width - 408), Math.max(440, height - 330), 360, 276, 40)
-  ];
+    makePanel("tools", "工具", left, top, 96, 520, 44),
+    makePanel("scene", "场景列表", leftPanelX, top, 304, 260, 43),
+    makePanel("regions", "区域", leftPanelX, top + 268, 304, 248, 46),
+    makePanel("regionDraw", "区域绘制", centerX, top, 340, 248, 47),
+    makePanel("mapStudio", "地图工作台", centerX, top + 260, 340, 260, 45),
+    makePanel("models", "模型管理", centerX, top + 528, 360, Math.max(160, height - top - 544), 41),
+    makePanel("agents", "Agent 面板", rightX, top, rightWidth, 260, 42),
+    makePanel("properties", "属性", rightX, top + 268, rightWidth, 248, 40),
+    makePanel("narrative", "场景叙事", rightX, top + 524, rightWidth, Math.max(180, height - top - 540), 48)
+  ].map(clampPanelToViewport);
 }
 
 function makePanel(
@@ -1449,12 +1532,11 @@ function clampPanelToViewport(panel: PanelState): PanelState {
   if (typeof window === "undefined") {
     return panel;
   }
-  const minWidth = 92;
-  const minHeight = 120;
-  const nextX = clamp(panel.x, 16, Math.max(16, window.innerWidth - minWidth - 16));
-  const nextY = clamp(panel.y, 16, Math.max(16, window.innerHeight - 44));
-  const nextWidth = clamp(panel.width, minWidth, Math.max(minWidth, window.innerWidth - nextX - 16));
-  const nextHeight = clamp(panel.height, minHeight, Math.max(minHeight, window.innerHeight - nextY - 16));
+  const nextWidth = clamp(panel.width, PANEL_MIN_WIDTH, Math.max(PANEL_MIN_WIDTH, window.innerWidth - PANEL_MARGIN * 2));
+  const nextHeight = clamp(panel.height, PANEL_MIN_HEIGHT, Math.max(PANEL_MIN_HEIGHT, window.innerHeight - PANEL_MARGIN * 2));
+  const visibleHeight = panel.minimized ? PANEL_MINIMIZED_HEIGHT : nextHeight;
+  const nextX = clamp(panel.x, PANEL_MARGIN, Math.max(PANEL_MARGIN, window.innerWidth - nextWidth - PANEL_MARGIN));
+  const nextY = clamp(panel.y, PANEL_MARGIN, Math.max(PANEL_MARGIN, window.innerHeight - visibleHeight - PANEL_MARGIN));
   return {
     ...panel,
     x: nextX,
@@ -1473,58 +1555,80 @@ function maxPanelZ(panels: PanelState[]) {
 }
 
 function snapToTargets(active: PanelState, panels: PanelState[]): PanelState {
-  const snap = 20;
   let x = active.x;
   let y = active.y;
+  const sourceX = active.x;
+  const sourceY = active.y;
   let dockedTo: string | null = null;
-  const scene = {
-    left: 28,
-    top: 28,
-    right: window.innerWidth - 28,
-    bottom: window.innerHeight - 28
+  const activeHeight = panelVisibleHeight(active);
+  let bestX = PANEL_SNAP_DISTANCE;
+  let bestY = PANEL_SNAP_DISTANCE;
+
+  const snapX = (targetX: number, label: string) => {
+    const distance = Math.abs(sourceX - targetX);
+    if (distance < bestX) {
+      x = targetX;
+      bestX = distance;
+      dockedTo = label;
+    }
+  };
+  const snapY = (targetY: number, label: string) => {
+    const distance = Math.abs(sourceY - targetY);
+    if (distance < bestY) {
+      y = targetY;
+      bestY = distance;
+      dockedTo = label;
+    }
   };
 
-  if (Math.abs(x - scene.left) < snap) {
-    x = scene.left;
-    dockedTo = "scene-left";
-  }
-  if (Math.abs(y - scene.top) < snap) {
-    y = scene.top;
-    dockedTo = "scene-top";
-  }
-  if (Math.abs(x + active.width - scene.right) < snap) {
-    x = scene.right - active.width;
-    dockedTo = "scene-right";
-  }
-  if (Math.abs(y + 40 - scene.bottom) < snap) {
-    y = scene.bottom - 40;
-    dockedTo = "scene-bottom";
-  }
+  const viewport = {
+    left: PANEL_MARGIN,
+    top: PANEL_MARGIN,
+    right: window.innerWidth - PANEL_MARGIN,
+    bottom: window.innerHeight - PANEL_MARGIN
+  };
+
+  snapX(viewport.left, "screen:left");
+  snapX(viewport.right - active.width, "screen:right");
+  snapY(viewport.top, "screen:top");
+  snapY(viewport.bottom - activeHeight, "screen:bottom");
 
   for (const panel of panels) {
     if (panel.id === active.id) {
       continue;
     }
-    if (Math.abs(x - (panel.x + panel.width + 8)) < snap) {
-      x = panel.x + panel.width + 8;
-      dockedTo = panel.id;
+    const panelHeight = panelVisibleHeight(panel);
+    const verticalOverlap = rangesOverlap(y, y + activeHeight, panel.y, panel.y + panelHeight, PANEL_SNAP_DISTANCE);
+    const horizontalOverlap = rangesOverlap(x, x + active.width, panel.x, panel.x + panel.width, PANEL_SNAP_DISTANCE);
+
+    if (verticalOverlap) {
+      snapX(panel.x + panel.width + PANEL_GAP, `panel:${panel.id}:right`);
+      snapX(panel.x - active.width - PANEL_GAP, `panel:${panel.id}:left`);
+      snapX(panel.x, `panel:${panel.id}:left-align`);
+      snapX(panel.x + panel.width - active.width, `panel:${panel.id}:right-align`);
     }
-    if (Math.abs(x + active.width + 8 - panel.x) < snap) {
-      x = panel.x - active.width - 8;
-      dockedTo = panel.id;
-    }
-    if (Math.abs(y - (panel.y + 40)) < snap) {
-      y = panel.y + 40;
-      dockedTo = panel.id;
+    if (horizontalOverlap) {
+      snapY(panel.y + panelHeight + PANEL_GAP, `panel:${panel.id}:bottom`);
+      snapY(panel.y - activeHeight - PANEL_GAP, `panel:${panel.id}:top`);
+      snapY(panel.y, `panel:${panel.id}:top-align`);
+      snapY(panel.y + panelHeight - activeHeight, `panel:${panel.id}:bottom-align`);
     }
   }
 
-  return {
+  return clampPanelToViewport({
     ...active,
-    x: clamp(x, 16, Math.max(16, window.innerWidth - active.width - 16)),
-    y: clamp(y, 16, Math.max(16, window.innerHeight - 44)),
+    x,
+    y,
     dockedTo
-  };
+  });
+}
+
+function panelVisibleHeight(panel: PanelState) {
+  return panel.minimized ? PANEL_MINIMIZED_HEIGHT : panel.height;
+}
+
+function rangesOverlap(startA: number, endA: number, startB: number, endB: number, tolerance = 0) {
+  return startA <= endB + tolerance && startB <= endA + tolerance;
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -1941,4 +2045,8 @@ function clearPendingLocalItem(ref: { current: Record<string, WorldItem> }, item
   const next = { ...ref.current };
   delete next[itemId];
   ref.current = next;
+}
+
+function appBackgroundStyle(opacity: number) {
+  return { "--app-background-opacity": opacity } as CSSProperties;
 }

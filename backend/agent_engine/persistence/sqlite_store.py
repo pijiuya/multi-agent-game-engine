@@ -176,6 +176,33 @@ class ProjectStore:
             )
             conn.commit()
 
+    def load_kv_json(self, key: str, default: Any) -> Any:
+        self.initialize()
+        with self.connect() as conn:
+            row = conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+        if row is None:
+            return default
+        try:
+            return json.loads(row["value"])
+        except json.JSONDecodeError:
+            return default
+
+    def save_kv_json(self, key: str, value: Any) -> None:
+        self.initialize()
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)",
+                (key, json.dumps(value)),
+            )
+            conn.commit()
+
+    def load_action_extensions(self) -> list[dict[str, Any]]:
+        data = self.load_kv_json("action_extensions", [])
+        return data if isinstance(data, list) else []
+
+    def save_action_extensions(self, extensions: list[dict[str, Any]]) -> None:
+        self.save_kv_json("action_extensions", extensions)
+
 
 def default_model_configs() -> list[dict[str, Any]]:
     return [

@@ -1,9 +1,20 @@
 import { Maximize2, Minus, Square, X } from "lucide-react";
 import type { CSSProperties, MouseEvent, PointerEvent, WheelEvent } from "react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { screenToWorld, snapWorldPointToGrid, worldToScreen } from "../lib/canvasCoords";
 import { assetUrl } from "../lib/api";
-import type { AgentProfile, CanvasPoint, CanvasViewState, EditTool, MapRegionFunction, Point, SelectionState, WorldItem, WorldSnapshot } from "../types";
+import type {
+  AgentAnimationClip,
+  AgentProfile,
+  CanvasPoint,
+  CanvasViewState,
+  EditTool,
+  MapRegionFunction,
+  Point,
+  SelectionState,
+  WorldItem,
+  WorldSnapshot
+} from "../types";
 
 type Props = {
   world: WorldSnapshot;
@@ -15,9 +26,9 @@ type Props = {
   showRegions: boolean;
   showAllRegionLayers: boolean;
   activeRegionFunction: MapRegionFunction | null;
-  activeRegionId: string | null;
   draftPoints: Point[];
   status: string;
+  appearanceMode: "light" | "dark";
   onViewChange: (view: CanvasViewState) => void;
   onWorldPoint: (point: Point) => void;
   onSelect: (selection: SelectionState) => void;
@@ -56,9 +67,9 @@ export function SceneViewport({
   showRegions,
   showAllRegionLayers,
   activeRegionFunction,
-  activeRegionId,
   draftPoints,
   status,
+  appearanceMode,
   onViewChange,
   onWorldPoint,
   onSelect,
@@ -71,6 +82,7 @@ export function SceneViewport({
   const panDragRef = useRef<PanDrag | null>(null);
   const transformRef = useRef<ItemTransform | null>(null);
   const shellRef = useRef<HTMLDivElement | null>(null);
+  const gridCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [isPanning, setIsPanning] = useState(false);
   const [itemImageAspects, setItemImageAspects] = useState<Record<string, number>>({});
   const gridStyle = getGridStyle(canvasView);
@@ -82,6 +94,7 @@ export function SceneViewport({
   const visibleAgents = Object.values(world.agent_profiles).filter((agent) => !agent.hidden);
   const selectedItem = selection.kind === "item" ? world.map.items.find((item) => item.id === selection.id && !item.hidden) : null;
   const selectedRegion = selection.kind === "region" ? world.map.regions.find((region) => region.id === selection.id && !region.hidden) : null;
+  const backgroundUrl = assetUrl(world.map.background_image) ?? world.map.background_image;
   const visibleRegionLayers = showRegions
     ? world.map.region_layers.filter((layer) => {
         if (!layer.polygons.length) {
@@ -93,6 +106,30 @@ export function SceneViewport({
   const dialogueEvents = world.events
     .filter((event) => (event.type === "speech" || event.type === "dialogue") && event.agent_id && world.agent_states[event.agent_id])
     .slice(-4);
+
+  useEffect(() => {
+    const canvas = gridCanvasRef.current;
+    if (!canvas) {
+      return;
+    }
+    let frame = 0;
+    const draw = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => drawStableGrid(canvas, canvasView, density));
+    };
+    const observer = new ResizeObserver(draw);
+    observer.observe(canvas);
+    if (canvas.parentElement) {
+      observer.observe(canvas.parentElement);
+    }
+    window.addEventListener("resize", draw);
+    draw();
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener("resize", draw);
+    };
+  }, [appearanceMode, canvasView, density]);
 
   function handleWheel(event: WheelEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -276,8 +313,15 @@ export function SceneViewport({
       data-grid-density={density}
       style={gridStyle}
     >
-      <div className="scene-window-material" />
-      <div className="scene-window-grid" />
+      <div className="scene-window-surface">
+        <div className="scene-window-material" />
+        <canvas
+          ref={gridCanvasRef}
+          aria-hidden="true"
+          className="scene-window-grid-canvas"
+          data-testid="scene-grid-canvas"
+        />
+      </div>
       <header className="scene-header">
         <div>
           <h1>{displayName(world.name)}</h1>
@@ -319,7 +363,7 @@ export function SceneViewport({
       >
         <div className="workspace-surface" data-testid="workspace-surface" aria-label="透明工作站底图" />
         <div className="world-coordinate-layer" data-testid="world-coordinate-layer" style={worldLayerStyle}>
-          {world.map.background_image ? (
+          {backgroundUrl ? (
             <img
               alt="地图背景"
               className="world-map-background"
@@ -334,7 +378,7 @@ export function SceneViewport({
                   event.stopPropagation();
                 }
               }}
-              src={assetUrl(world.map.background_image) ?? world.map.background_image}
+              src={backgroundUrl}
               style={{ left: 0, top: 0, width: world.map.width, height: world.map.height }}
             />
           ) : (
@@ -477,11 +521,11 @@ export function SceneViewport({
             if (!state) {
               return null;
             }
-            const animationSource = agentAnimationSource(agent, world.tick);
+            const animationFrame = agentAnimationFrame(agent, state.status, world.tick);
             return (
               <button
                 className={
-                  selection.kind === "agent" && selection.id === agent.id ? "world-agent-marker active" : "world-agent-marker"
+                  `${selection.kind === "agent" && selection.id === agent.id ? "world-agent-marker active" : "world-agent-marker"}${animationFrame ? " has-sprite" : ""}`
                 }
                 data-testid={`world-agent-${agent.id}`}
                 data-world-x={state.position.x}
@@ -501,13 +545,13 @@ export function SceneViewport({
                 style={{ ...screenPointStyle(state.position, canvasView), "--agent-color": agent.color } as CSSProperties}
                 title={agent.name}
               >
-                {animationSource ? (
+                {animationFrame ? (
                   <img
                     alt=""
                     className="world-agent-sprite"
                     draggable={false}
-                    src={animationSource}
-                    style={agentSpriteStyle(agent)}
+                    src={animationFrame.src}
+                    style={agentSpriteStyle(animationFrame.clip, canvasView.zoom)}
                   />
                 ) : (
                   <span />
@@ -601,10 +645,6 @@ export function SceneViewport({
             </div>
           ) : null}
         </div>
-        <div className="scene-corner-mark top-left" />
-        <div className="scene-corner-mark top-right" />
-        <div className="scene-corner-mark bottom-left" />
-        <div className="scene-corner-mark bottom-right" />
       </div>
       <footer className="scene-footer">
         <span>{displayName(world.map.name)}</span>
@@ -644,36 +684,33 @@ function itemStyle(item: WorldItem, aspect: number | null | undefined) {
   } as CSSProperties;
 }
 
-function agentAnimationSource(agent: AgentProfile, tick: number) {
+function agentAnimationFrame(agent: AgentProfile, status: string, tick: number): { src: string; clip: AgentAnimationClip } | null {
   const animation = agent.animation;
   if (!animation) {
     return null;
   }
-  if (animation.kind === "gif") {
-    return assetUrl(animation.url) ?? animation.url;
+  const clip = animation.clips[status] ?? animation.clips.idle ?? animation;
+  if (clip.kind === "gif") {
+    const src = assetUrl(clip.url) ?? clip.url;
+    return src ? { src, clip } : null;
   }
-  if (!animation.frames.length) {
+  if (!clip.frames.length) {
     return null;
   }
-  const frameIndex = Math.floor((tick / 10) * Math.max(1, animation.fps)) % animation.frames.length;
-  const frame = animation.frames[frameIndex];
-  return assetUrl(frame) ?? frame;
+  const frameIndex = Math.floor((tick / 10) * Math.max(1, clip.fps)) % clip.frames.length;
+  const frame = clip.frames[frameIndex];
+  const src = assetUrl(frame) ?? frame;
+  return src ? { src, clip } : null;
 }
 
-function agentSpriteStyle(agent: AgentProfile) {
-  const animation = agent.animation;
-  if (!animation) {
-    return undefined;
-  }
-  const scale = clamp(animation.scale || 1.6, 0.1, 6);
-  const sourceWidth = animation.width > 0 ? animation.width : 52;
-  const sourceHeight = animation.height > 0 ? animation.height : 52;
-  const sourceMax = Math.max(sourceWidth, sourceHeight, 32);
-  const maxSide = clamp(sourceMax * scale, 18, 320);
-  const dimensions = itemDimensions(maxSide, sourceWidth / sourceHeight);
+function agentSpriteStyle(clip: AgentAnimationClip, zoom: number) {
+  const sourceWidth = clip.width > 0 ? clip.width : 52;
+  const sourceHeight = clip.height > 0 ? clip.height : 52;
+  const screenHeight = clamp((clip.world_height || sourceHeight || 72) * zoom * clamp(clip.scale || 1, 0.1, 6), 8, 800);
+  const aspect = sourceWidth > 0 && sourceHeight > 0 ? sourceWidth / sourceHeight : 1;
   return {
-    width: `${dimensions.width}px`,
-    height: `${dimensions.height}px`
+    width: `${screenHeight * aspect}px`,
+    height: `${screenHeight}px`
   } as CSSProperties;
 }
 
@@ -751,6 +788,102 @@ function getGridStyle(view: CanvasViewState) {
   } as CSSProperties;
 }
 
+function drawStableGrid(canvas: HTMLCanvasElement, view: CanvasViewState, density: string) {
+  const rect = canvas.getBoundingClientRect();
+  const width = Math.max(1, rect.width);
+  const height = Math.max(1, rect.height);
+  const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 3));
+  const pixelWidth = Math.ceil(width * dpr);
+  const pixelHeight = Math.ceil(height * dpr);
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth;
+    canvas.height = pixelHeight;
+  }
+  const context = canvas.getContext("2d");
+  if (!context) {
+    return;
+  }
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  context.clearRect(0, 0, width, height);
+
+  const style = getComputedStyle(canvas);
+  const rgb = style.getPropertyValue("--grid-rgb").trim() || "0, 0, 0";
+  const materialRgb = style.getPropertyValue("--material-rgb").trim() || "248, 248, 248";
+  const minorStep = parseFloat(style.getPropertyValue("--grid-size-minor")) || 18;
+  const majorStep = parseFloat(style.getPropertyValue("--grid-size-major")) || 90;
+  const minorAlpha = parseFloat(style.getPropertyValue("--grid-alpha-minor-x")) || 0.28;
+  const majorAlpha = parseFloat(style.getPropertyValue("--grid-alpha-major-x")) || 0.42;
+  context.save();
+  drawCanvasMaterial(context, width, height, materialRgb);
+  if (density !== "simple") {
+    drawGridLines(context, width, height, minorStep, view.pan, `rgba(${rgb}, ${minorAlpha})`, dpr);
+  }
+  drawGridLines(context, width, height, majorStep, view.pan, `rgba(${rgb}, ${majorAlpha})`, dpr);
+  applyCanvasFade(context, width, height);
+  context.restore();
+}
+
+function drawCanvasMaterial(context: CanvasRenderingContext2D, width: number, height: number, rgb: string) {
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const radius = Math.hypot(width, height) / 2;
+  const gradient = context.createRadialGradient(centerX, centerY, 0, centerX, centerY, radius);
+  gradient.addColorStop(0, `rgba(${rgb}, 0.62)`);
+  gradient.addColorStop(0.42, `rgba(${rgb}, 0.5)`);
+  gradient.addColorStop(0.68, `rgba(${rgb}, 0.26)`);
+  gradient.addColorStop(0.84, `rgba(${rgb}, 0.08)`);
+  gradient.addColorStop(1, `rgba(${rgb}, 0)`);
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, width, height);
+}
+
+function applyCanvasFade(context: CanvasRenderingContext2D, width: number, height: number) {
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const radius = Math.hypot(width, height) / 2;
+  const gradient = context.createRadialGradient(centerX, centerY, 0, centerX, centerY, radius);
+  gradient.addColorStop(0, "rgba(255, 255, 255, 1)");
+  gradient.addColorStop(0.5, "rgba(255, 255, 255, 0.9)");
+  gradient.addColorStop(0.74, "rgba(255, 255, 255, 0.45)");
+  gradient.addColorStop(0.9, "rgba(255, 255, 255, 0.1)");
+  gradient.addColorStop(1, "rgba(255, 255, 255, 0)");
+  context.globalCompositeOperation = "destination-in";
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, width, height);
+  context.globalCompositeOperation = "source-over";
+}
+
+function drawGridLines(
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  step: number,
+  pan: Point,
+  strokeStyle: string,
+  dpr: number
+) {
+  if (!Number.isFinite(step) || step < 4) {
+    return;
+  }
+  context.beginPath();
+  context.lineWidth = 1 / dpr;
+  context.strokeStyle = strokeStyle;
+  const xStart = modulo(pan.x, step);
+  const yStart = modulo(pan.y, step);
+  const align = 0.5 / dpr;
+  for (let x = xStart; x <= width; x += step) {
+    const alignedX = Math.round(x * dpr) / dpr + align;
+    context.moveTo(alignedX, 0);
+    context.lineTo(alignedX, height);
+  }
+  for (let y = yStart; y <= height; y += step) {
+    const alignedY = Math.round(y * dpr) / dpr + align;
+    context.moveTo(0, alignedY);
+    context.lineTo(width, alignedY);
+  }
+  context.stroke();
+}
+
 function getGridDensity(zoom: number) {
   if (zoom < 0.35) {
     return "simple";
@@ -759,6 +892,10 @@ function getGridDensity(zoom: number) {
     return "fine";
   }
   return "normal";
+}
+
+function modulo(value: number, divisor: number) {
+  return ((value % divisor) + divisor) % divisor;
 }
 
 function toolLabel(tool: EditTool) {

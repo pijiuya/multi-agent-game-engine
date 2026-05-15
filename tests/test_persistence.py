@@ -7,15 +7,52 @@ from agent_engine.persistence.sqlite_store import ProjectStore
 def test_project_store_round_trips_world(tmp_path):
     store = ProjectStore(tmp_path / "project")
     world = GameWorld.default()
+    world.narrative.update(
+        {
+            "enabled": True,
+            "premise": "A quiet market prepares for rain.",
+            "tone": "tense",
+            "cadence_ticks": 12,
+            "last_tick": 48,
+            "recent_summary": "Mira noticed the clouds.",
+        }
+    )
+    world.agent_states["agent_mira"].narrative_state = {"arc": "hesitating", "beats": 2}
     world.add_event("narration", "A saved moment.")
 
     store.save_world(world)
     loaded = store.load_world()
 
     assert loaded.name == world.name
+    assert loaded.narrative == world.narrative
+    assert loaded.agent_states["agent_mira"].narrative_state == {"arc": "hesitating", "beats": 2}
     assert loaded.events[-1].message == "A saved moment."
     assert (tmp_path / "project" / "project.json").exists()
     assert (tmp_path / "project" / "world.sqlite").exists()
+
+
+def test_project_store_loads_legacy_snapshots_without_narrative_state(tmp_path):
+    store = ProjectStore(tmp_path / "project")
+    world = GameWorld.default()
+    snapshot = world.to_dict()
+    del snapshot["narrative"]
+    for state in snapshot["agent_states"].values():
+        del state["narrative_state"]
+    store.initialize()
+    with store.connect() as conn:
+        conn.execute("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)", ("world", json.dumps(snapshot)))
+        conn.commit()
+
+    loaded = store.load_world()
+    assert loaded.narrative == {
+        "enabled": False,
+        "premise": "",
+        "tone": "grounded",
+        "cadence_ticks": 50,
+        "last_tick": -999,
+        "recent_summary": "",
+    }
+    assert all(state.narrative_state == {} for state in loaded.agent_states.values())
 
 
 def test_project_store_loads_legacy_items(tmp_path):

@@ -97,7 +97,7 @@ export const fallbackWorld: WorldSnapshot = {
       action_space: ["move_to", "say", "interact", "use", "observe", "wait", "stop", "social", "pick_up", "drop_item", "move_item"],
       hidden: false,
       animation: null,
-      dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 20 }
+      dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 20, language: "auto" }
     },
     agent_tao: {
       id: "agent_tao",
@@ -109,7 +109,7 @@ export const fallbackWorld: WorldSnapshot = {
       action_space: ["move_to", "say", "interact", "use", "observe", "wait", "stop", "social", "pick_up", "drop_item", "move_item"],
       hidden: false,
       animation: null,
-      dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 20 }
+      dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 20, language: "auto" }
     },
     agent_ren: {
       id: "agent_ren",
@@ -121,7 +121,7 @@ export const fallbackWorld: WorldSnapshot = {
       action_space: ["move_to", "say", "interact", "use", "observe", "wait", "stop", "social", "pick_up", "drop_item", "move_item"],
       hidden: false,
       animation: null,
-      dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 20 }
+      dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 20, language: "auto" }
     }
   },
   agent_states: {
@@ -135,7 +135,8 @@ export const fallbackWorld: WorldSnapshot = {
       pending_model: false,
       last_model_tick: -999,
       cooldowns: {},
-      held_item_id: null
+      held_item_id: null,
+      narrative_state: {}
     },
     agent_tao: {
       id: "agent_tao",
@@ -147,7 +148,8 @@ export const fallbackWorld: WorldSnapshot = {
       pending_model: false,
       last_model_tick: -999,
       cooldowns: {},
-      held_item_id: null
+      held_item_id: null,
+      narrative_state: {}
     },
     agent_ren: {
       id: "agent_ren",
@@ -159,12 +161,21 @@ export const fallbackWorld: WorldSnapshot = {
       pending_model: false,
       last_model_tick: -999,
       cooldowns: {},
-      held_item_id: null
+      held_item_id: null,
+      narrative_state: {}
     }
   },
   relationships: [],
   memories: [],
   decision_events: [],
+  narrative: {
+    enabled: false,
+    premise: "",
+    tone: "grounded",
+    cadence_ticks: 50,
+    last_tick: -999,
+    recent_summary: ""
+  },
   events: [
     {
       id: "evt_boot",

@@ -6,3 +6,6 @@ contextBridge.exposeInMainWorld("engineWindow", {
   close: () => ipcRenderer.invoke("window:close")
 });
 
+contextBridge.exposeInMainWorld("engineRuntime", {
+  apiBase: `http://${process.env.AGENT_ENGINE_HOST || "127.0.0.1"}:${process.env.AGENT_ENGINE_PORT || "8000"}`
+});

@@ -3,6 +3,7 @@ export type Point = {
   y: number;
 };
 
+
 export type PolygonArea = {
   id: string;
   name: string;
@@ -71,7 +72,7 @@ export type WorldMap = {
   region_layers: RegionLayer[];
 };
 
-export type AgentAnimation = {
+export type AgentAnimationClip = {
   kind: "gif" | "png_sequence";
   url: string;
   frames: string[];
@@ -79,13 +80,44 @@ export type AgentAnimation = {
   max_pixels: number;
   width: number;
   height: number;
+  world_height: number;
   scale: number;
+};
+
+export type AgentAnimation = AgentAnimationClip & {
+  clips: Record<string, AgentAnimationClip>;
 };
 
 export type DialoguePolicy = {
   enabled: boolean;
   distance: number;
   cooldown_ticks: number;
+  language: string;
+};
+
+export type ActionExtensionCheckIssue = {
+  severity: "blocker" | "warning" | "info";
+  message: string;
+  line?: number | null;
+};
+
+export type ActionExtensionCheckResult = {
+  ok: boolean;
+  action_type: string;
+  description: string;
+  permissions: string[];
+  issues: ActionExtensionCheckIssue[];
+};
+
+export type ActionExtension = {
+  id: string;
+  action_type: string;
+  description: string;
+  code: string;
+  enabled: boolean;
+  permissions: string[];
+  check?: ActionExtensionCheckResult | null;
+  updated_at?: number | null;
 };
 
 export type AgentProfile = {
@@ -112,6 +144,7 @@ export type AgentState = {
   last_model_tick: number;
   cooldowns: Record<string, number>;
   held_item_id: string | null;
+  narrative_state: Record<string, unknown>;
 };
 
 export type WorldEvent = {
@@ -137,6 +170,15 @@ export type DecisionEvent = {
   timestamp: number;
 };
 
+export type NarrativeConfig = {
+  enabled: boolean;
+  premise: string;
+  tone: string;
+  cadence_ticks: number;
+  last_tick: number;
+  recent_summary: string;
+};
+
 export type WorldSnapshot = {
   id: string;
   name: string;
@@ -158,9 +200,14 @@ export type WorldSnapshot = {
   }[];
   events: WorldEvent[];
   decision_events: DecisionEvent[];
+  narrative: NarrativeConfig;
   tick: number;
   running: boolean;
   model_tasks?: Record<string, { done: boolean }>;
+  scene_director?: {
+    pending: boolean;
+    last_tick: number;
+  };
 };
 
 export type ViewMode = "2d" | "3d";
@@ -170,7 +217,7 @@ export type EditTool = "select" | "region" | "item" | "spawn" | "move" | "anchor
 export type RegionDrawOperation = "add" | "subtract";
 
 export type PanelState = {
-  id: "tools" | "scene" | "agents" | "properties" | "models" | "mapStudio" | "regions" | "regionDraw";
+  id: "tools" | "scene" | "agents" | "properties" | "models" | "mapStudio" | "regions" | "regionDraw" | "narrative";
   title: string;
   x: number;
   y: number;
@@ -214,6 +261,7 @@ export type ModelConfig = {
   provider: string;
   baseUrl: string;
   apiKey: string;
+  apiKeySet: boolean;
   model: string;
   enabled: boolean;
   capabilities: ModelCapability[];
@@ -242,6 +290,19 @@ export type ModelCapabilityTask = {
   progress: number;
   message: string;
   error: string | null;
+};
+
+export type RemoteModelOption = {
+  id: string;
+  name: string | null;
+};
+
+export type RemoteModelTestResult = {
+  ok: boolean;
+  provider: string;
+  model: string;
+  message: string;
+  sample: string;
 };
 
 export type GeneratedImageCandidate = {

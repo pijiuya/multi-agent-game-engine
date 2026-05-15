@@ -3,10 +3,17 @@ __pycache__/
 .pytest_cache/
 *.pyc
 runtime_project/
+*.out.log
+*.err.log
 *-dev.out.log
 *-dev.err.log
+packaging/backend-build/
+packaging/backend-dist/
+packaging/*-runtime/
+packaging/__pycache__/
 
 frontend/node_modules/
 frontend/dist/
+frontend/release/
 frontend/test-results/
 frontend/playwright-report/

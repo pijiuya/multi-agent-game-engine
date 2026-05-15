@@ -1,6 +1,9 @@
 import { fallbackWorld } from "./fallbackWorld";
 import type {
+  ActionExtension,
+  ActionExtensionCheckResult,
   AgentAnimation,
+  AgentAnimationClip,
   AgentProfile,
   MapGenerationState,
   MapRegion,
@@ -9,14 +12,38 @@ import type {
   ModelCapabilityStatus,
   ModelCapabilityTask,
   ModelConfig,
+  RemoteModelOption,
+  RemoteModelTestResult,
   Point,
   PolygonArea,
+  NarrativeConfig,
   WorldItem,
   WorldMap,
   WorldSnapshot
 } from "../types";
 
-export const apiBase = import.meta.env.VITE_API_BASE ?? "";
+declare global {
+  interface Window {
+    engineRuntime?: {
+      apiBase?: string;
+    };
+  }
+}
+
+export const apiBase = resolveApiBase();
+
+function resolveApiBase() {
+  if (import.meta.env.VITE_API_BASE) {
+    return import.meta.env.VITE_API_BASE;
+  }
+  if (typeof window !== "undefined" && window.engineRuntime?.apiBase) {
+    return window.engineRuntime.apiBase;
+  }
+  if (typeof window !== "undefined" && window.location.protocol === "file:") {
+    return "http://127.0.0.1:8000";
+  }
+  return "";
+}
 
 export async function getWorld(): Promise<WorldSnapshot> {
   try {
@@ -103,6 +130,19 @@ export async function testModel(modelId: string): Promise<{ ok: boolean; message
   }
 }
 
+export async function patchNarrative(patch: Partial<Pick<NarrativeConfig, "enabled" | "premise" | "tone" | "cadence_ticks">>): Promise<WorldSnapshot | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/narrative`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch)
+    });
+    return response.ok ? normalizeWorldSnapshot(await response.json()) : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function getModelCapabilityStatus(): Promise<ModelCapabilityStatus[]> {
   try {
     const response = await fetch(`${apiBase}/api/model-capabilities/status`);
@@ -155,6 +195,47 @@ export async function configureRemoteCapability(
   }
 }
 
+export async function fetchRemoteCapabilityModels(
+  capability: ModelCapabilityId,
+  payload: { baseUrl: string; apiKey: string; model: string }
+): Promise<RemoteModelOption[]> {
+  const response = await fetch(`${apiBase}/api/model-capabilities/${capability}/remote-models`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ base_url: payload.baseUrl, api_key: payload.apiKey, model: payload.model })
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(String(data.detail ?? "remote model list failed"));
+  }
+  return (data.models ?? []).map((item: Record<string, unknown>) => ({
+    id: String(item.id ?? ""),
+    name: item.name == null ? null : String(item.name)
+  })).filter((item: RemoteModelOption) => item.id);
+}
+
+export async function testRemoteCapability(
+  capability: ModelCapabilityId,
+  payload: { baseUrl: string; apiKey: string; model: string }
+): Promise<RemoteModelTestResult> {
+  const response = await fetch(`${apiBase}/api/model-capabilities/${capability}/test-remote`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ base_url: payload.baseUrl, api_key: payload.apiKey, model: payload.model })
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(String(data.detail ?? "remote test failed"));
+  }
+  return {
+    ok: Boolean(data.ok),
+    provider: String(data.provider ?? ""),
+    model: String(data.model ?? payload.model),
+    message: String(data.message ?? ""),
+    sample: String(data.sample ?? "")
+  };
+}
+
 export async function installLocalCapability(capability: ModelCapabilityId): Promise<{ task: ModelCapabilityTask; models: ModelConfig[] } | null> {
   try {
     const response = await fetch(`${apiBase}/api/model-capabilities/${capability}/install-local`, { method: "POST" });
@@ -191,17 +272,17 @@ export async function createMapGeneration(payload: {
   ratio: string;
   count?: number;
   provider_id?: string | null;
-}): Promise<MapGenerationState | null> {
-  try {
-    const response = await fetch(`${apiBase}/api/map/generation`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-    return response.ok ? await response.json() : null;
-  } catch {
-    return null;
+}): Promise<MapGenerationState> {
+  const response = await fetch(`${apiBase}/api/map/generation`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(String(data.detail ?? "map generation failed"));
   }
+  return data;
 }
 
 export async function selectGeneratedMap(generationId: string, candidateId: string): Promise<{ generation: MapGenerationState; world: WorldSnapshot } | null> {
@@ -344,6 +425,73 @@ export async function patchAgent(agentId: string, patch: Partial<Omit<AgentProfi
     return response.ok ? normalizeWorldSnapshot(await response.json()) : null;
   } catch {
     return null;
+  }
+}
+
+export async function getActionExtensions(): Promise<ActionExtension[]> {
+  try {
+    const response = await fetch(`${apiBase}/api/action-extensions`);
+    if (!response.ok) {
+      throw new Error(`action extensions request failed: ${response.status}`);
+    }
+    const data = await response.json();
+    return normalizeActionExtensions(data.extensions ?? data.action_extensions ?? data);
+  } catch {
+    return [];
+  }
+}
+
+export async function checkActionExtension(code: string): Promise<ActionExtensionCheckResult | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/action-extensions/check`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code })
+    });
+    const data = await response.json();
+    return normalizeActionExtensionCheck(data.check ?? data.result ?? data, response.ok);
+  } catch {
+    return null;
+  }
+}
+
+export async function createActionExtension(payload: { code: string; enabled?: boolean }): Promise<ActionExtension | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/action-extensions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const data = await response.json();
+    return response.ok ? normalizeActionExtension(data.extension ?? data) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function patchActionExtension(
+  extensionId: string,
+  patch: Partial<Pick<ActionExtension, "code" | "enabled" | "description" | "permissions">>
+): Promise<ActionExtension | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/action-extensions/${extensionId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch)
+    });
+    const data = await response.json();
+    return response.ok ? normalizeActionExtension(data.extension ?? data) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteActionExtension(extensionId: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${apiBase}/api/action-extensions/${extensionId}`, { method: "DELETE" });
+    return response.ok;
+  } catch {
+    return false;
   }
 }
 
@@ -508,20 +656,75 @@ export function normalizeWorldSnapshot(snapshot: WorldSnapshot): WorldSnapshot {
     agent_states: Object.fromEntries(
       Object.entries(snapshot.agent_states ?? {}).map(([agentId, state]) => [
         agentId,
-        { ...state, held_item_id: state.held_item_id ?? null }
+        { ...state, held_item_id: state.held_item_id ?? null, narrative_state: state.narrative_state ?? {} }
       ])
     ),
-    decision_events: snapshot.decision_events ?? []
+    decision_events: snapshot.decision_events ?? [],
+    narrative: normalizeNarrative(snapshot.narrative),
+    scene_director: snapshot.scene_director
+      ? {
+          pending: Boolean(snapshot.scene_director.pending),
+          last_tick: Number(snapshot.scene_director.last_tick ?? -999)
+        }
+      : undefined
+  };
+}
+
+function normalizeNarrative(value: unknown): NarrativeConfig {
+  const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  return {
+    enabled: Boolean(raw.enabled),
+    premise: typeof raw.premise === "string" ? raw.premise : "",
+    tone: typeof raw.tone === "string" && raw.tone.trim() ? raw.tone : "grounded",
+    cadence_ticks: Math.max(1, Math.round(Number(raw.cadence_ticks ?? 50))),
+    last_tick: Math.round(Number(raw.last_tick ?? -999)),
+    recent_summary: typeof raw.recent_summary === "string" ? raw.recent_summary : ""
   };
 }
 
 function normalizeActionSpace(actions: unknown) {
   const defaults = ["move_to", "say", "interact", "use", "observe", "wait", "stop", "social", "pick_up", "drop_item", "move_item"];
   const current = Array.isArray(actions) ? actions.filter((action): action is string => typeof action === "string") : [];
-  return Array.from(new Set([...current, ...defaults]));
+  return current.length ? Array.from(new Set(current)) : defaults;
 }
 
 function normalizeAgentAnimation(value: unknown): AgentAnimation | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const animation = value as Record<string, unknown>;
+  const clips = normalizeAnimationClips(animation.clips);
+  const legacyClip = normalizeAnimationClip(animation);
+  const idleClip = clips.idle ?? legacyClip ?? Object.values(clips)[0];
+  if (!idleClip) {
+    return null;
+  }
+  return {
+    ...idleClip,
+    clips: {
+      ...(legacyClip ? { idle: legacyClip } : {}),
+      ...clips,
+      idle: idleClip
+    }
+  };
+}
+
+function normalizeAnimationClips(value: unknown): Record<string, AgentAnimationClip> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const clips: Record<string, AgentAnimationClip> = {};
+  for (const [key, rawClip] of Object.entries(value as Record<string, unknown>)) {
+    const name = key.trim();
+    const clip = normalizeAnimationClip(rawClip);
+    if (name && clip) {
+      clips[name] = clip;
+    }
+  }
+  return clips;
+}
+
+function normalizeAnimationClip(value: unknown): AgentAnimationClip | null {
   if (!value || typeof value !== "object") {
     return null;
   }
@@ -530,6 +733,7 @@ function normalizeAgentAnimation(value: unknown): AgentAnimation | null {
   if (!kind) {
     return null;
   }
+  const height = Math.max(0, Number(animation.height ?? 0));
   return {
     kind,
     url: typeof animation.url === "string" ? animation.url : "",
@@ -537,8 +741,9 @@ function normalizeAgentAnimation(value: unknown): AgentAnimation | null {
     fps: Math.max(1, Number(animation.fps ?? 8)),
     max_pixels: Math.max(0, Number(animation.max_pixels ?? 0)),
     width: Math.max(0, Number(animation.width ?? 0)),
-    height: Math.max(0, Number(animation.height ?? 0)),
-    scale: clampNumber(Number(animation.scale ?? 1.6), 0.1, 6)
+    height,
+    world_height: clampNumber(Number(animation.world_height ?? animation.worldHeight ?? (height || 72)), 8, 800),
+    scale: clampNumber(Number(animation.scale ?? 1), 0.1, 6)
   };
 }
 
@@ -554,7 +759,55 @@ function normalizeDialoguePolicy(value: unknown) {
   return {
     enabled: raw.enabled !== false,
     distance: Math.max(1, Number(raw.distance ?? 180)),
-    cooldown_ticks: Math.max(1, Math.round(Number(raw.cooldown_ticks ?? 20)))
+    cooldown_ticks: Math.max(1, Math.round(Number(raw.cooldown_ticks ?? 20))),
+    language: typeof raw.language === "string" && raw.language.trim() ? raw.language : "auto"
+  };
+}
+
+function normalizeActionExtensions(value: unknown): ActionExtension[] {
+  return Array.isArray(value) ? value.map(normalizeActionExtension).filter((extension): extension is ActionExtension => Boolean(extension)) : [];
+}
+
+function normalizeActionExtension(value: unknown): ActionExtension | null {
+  const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+  if (!raw) {
+    return null;
+  }
+  const actionType = String(raw.action_type ?? raw.type ?? raw.name ?? "").trim();
+  const id = String(raw.id ?? actionType).trim();
+  if (!id && !actionType) {
+    return null;
+  }
+  return {
+    id: id || actionType,
+    action_type: actionType || id,
+    description: String(raw.description ?? ""),
+    code: String(raw.code ?? ""),
+    enabled: Boolean(raw.enabled),
+    permissions: Array.isArray(raw.permissions) ? raw.permissions.map(String) : [],
+    check: raw.check ? normalizeActionExtensionCheck(raw.check, true) : null,
+    updated_at: typeof raw.updated_at === "number" ? raw.updated_at : null
+  };
+}
+
+function normalizeActionExtensionCheck(value: unknown, responseOk: boolean): ActionExtensionCheckResult {
+  const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  return {
+    ok: Boolean(raw.ok ?? responseOk),
+    action_type: String(raw.action_type ?? raw.type ?? ""),
+    description: String(raw.description ?? ""),
+    permissions: Array.isArray(raw.permissions) ? raw.permissions.map(String) : [],
+    issues: Array.isArray(raw.issues)
+      ? raw.issues.map((issue) => {
+          const item: Record<string, unknown> = issue && typeof issue === "object" ? (issue as Record<string, unknown>) : { message: issue };
+          const severity = String(item.severity ?? "info");
+          return {
+            severity: severity === "blocker" || severity === "warning" ? severity : "info",
+            message: String(item.message ?? item.detail ?? issue ?? ""),
+            line: typeof item.line === "number" ? item.line : null
+          };
+        })
+      : []
   };
 }
 
@@ -801,6 +1054,7 @@ function modelFromApi(data: Record<string, unknown>): ModelConfig {
     provider: String(data.provider ?? "mock"),
     baseUrl: String(data.base_url ?? data.baseUrl ?? ""),
     apiKey: String(data.api_key ?? data.apiKey ?? ""),
+    apiKeySet: Boolean(data.api_key_set ?? data.apiKeySet ?? data.api_key ?? data.apiKey),
     model: String(data.model ?? ""),
     enabled: Boolean(data.enabled ?? true),
     capabilities: Array.isArray(data.capabilities) ? (data.capabilities as ModelConfig["capabilities"]) : []
@@ -874,6 +1128,7 @@ function defaultModels(): ModelConfig[] {
       provider: "mock",
       baseUrl: "",
       apiKey: "",
+      apiKeySet: false,
       model: "mock-agent",
       enabled: true,
       capabilities: ["llm"]
@@ -885,6 +1140,7 @@ function defaultModels(): ModelConfig[] {
       provider: "mock",
       baseUrl: "",
       apiKey: "",
+      apiKeySet: false,
       model: "mock-map-generator",
       enabled: true,
       capabilities: ["image_generation"]
@@ -896,6 +1152,7 @@ function defaultModels(): ModelConfig[] {
       provider: "mock",
       baseUrl: "",
       apiKey: "",
+      apiKeySet: false,
       model: "mock-sam",
       enabled: false,
       capabilities: ["segmentation", "vision_labeling"]

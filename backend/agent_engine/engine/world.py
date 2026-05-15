@@ -211,10 +211,12 @@ class WorldMap:
         return 0 <= point.x <= self.width and 0 <= point.y <= self.height
 
     def is_walkable(self, point: Point) -> bool:
-        if not self.is_inside_bounds(point):
-            return False
         has_walkable_areas = bool(self.walkable_areas)
-        inside_walkable = not has_walkable_areas or any(area.contains(point) for area in self.walkable_areas)
+        inside_walkable = (
+            any(area.contains(point) for area in self.walkable_areas)
+            if has_walkable_areas
+            else self.is_inside_bounds(point)
+        )
         inside_obstacle = any(obstacle.contains(point) for obstacle in self.obstacles)
         return inside_walkable and not inside_obstacle
 
@@ -237,11 +239,11 @@ class WorldMap:
         for region in self.regions:
             if region.hidden:
                 continue
-            if region.function in {"walkable", "action"}:
+            if region.function in {"walkable", "action", "social", "residential"}:
                 self.walkable_areas.append(region.to_area())
             elif region.function == "obstacle":
                 self.obstacles.append(region.to_area())
-            elif region.function == "social":
+            if region.function == "social":
                 self.interaction_zones.append(region.to_area())
 
     def import_legacy_areas_as_regions(self) -> None:
@@ -363,27 +365,92 @@ DEFAULT_ACTION_SPACE = [
     "drop_item",
     "move_item",
 ]
-DEFAULT_DIALOGUE_POLICY = {"enabled": True, "distance": 180.0, "cooldown_ticks": 20}
+DEFAULT_DIALOGUE_POLICY = {"enabled": True, "distance": 180.0, "cooldown_ticks": 20, "language": "auto"}
+DEFAULT_NARRATIVE_CONFIG = {
+    "enabled": False,
+    "premise": "",
+    "tone": "grounded",
+    "cadence_ticks": 50,
+    "last_tick": -999,
+    "recent_summary": "",
+}
+SUPPORTED_DIALOGUE_LANGUAGES = {"auto", "zh-CN", "en-US"}
+BUILTIN_ANIMATION_STATES = ["idle", "moving", "social", "speaking", "interact", "use", "waiting", "stopped"]
 
 
 def default_dialogue_policy() -> dict[str, Any]:
     return dict(DEFAULT_DIALOGUE_POLICY)
 
 
+def default_narrative_config() -> dict[str, Any]:
+    return dict(DEFAULT_NARRATIVE_CONFIG)
+
+
+def normalize_narrative_config(data: Any) -> dict[str, Any]:
+    narrative = default_narrative_config()
+    if isinstance(data, dict):
+        narrative.update(
+            {
+                "enabled": bool(data.get("enabled", narrative["enabled"])),
+                "premise": str(data.get("premise", narrative["premise"])),
+                "tone": str(data.get("tone", narrative["tone"])),
+                "cadence_ticks": int(data.get("cadence_ticks", narrative["cadence_ticks"])),
+                "last_tick": int(data.get("last_tick", narrative["last_tick"])),
+                "recent_summary": str(data.get("recent_summary", narrative["recent_summary"])),
+            }
+        )
+    return narrative
+
+
 def normalize_dialogue_policy(data: Any) -> dict[str, Any]:
     policy = default_dialogue_policy()
     if isinstance(data, dict):
+        language = str(data.get("language", policy["language"])).strip()
+        if language not in SUPPORTED_DIALOGUE_LANGUAGES:
+            language = policy["language"]
         policy.update(
             {
                 "enabled": bool(data.get("enabled", policy["enabled"])),
                 "distance": float(data.get("distance", policy["distance"])),
                 "cooldown_ticks": int(data.get("cooldown_ticks", policy["cooldown_ticks"])),
+                "language": language,
             }
         )
     return policy
 
 
 def normalize_agent_animation(data: Any) -> dict[str, Any] | None:
+    if not isinstance(data, dict):
+        return None
+    if isinstance(data.get("clips"), dict):
+        clips: dict[str, Any] = {}
+        for state, clip_data in data["clips"].items():
+            state_name = _normalize_animation_state_name(state)
+            clip = _normalize_animation_clip(clip_data)
+            if state_name and clip is not None:
+                clips[state_name] = clip
+        if not clips:
+            return None
+        default_state = _normalize_animation_state_name(data.get("default_state")) or "idle"
+        if default_state not in clips:
+            default_state = "idle" if "idle" in clips else next(iter(clips))
+        return {
+            "version": 2,
+            "default_state": default_state,
+            "clips": clips,
+        }
+    clip = _normalize_animation_clip(data)
+    if clip is None:
+        return None
+    return {
+        **clip,
+        "version": 2,
+        "default_state": "idle",
+        "clips": {"idle": clip},
+    }
+
+
+def _normalize_animation_clip(data: Any) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         return None
     kind = str(data.get("kind") or "").strip()
@@ -400,13 +467,31 @@ def normalize_agent_animation(data: Any) -> dict[str, Any] | None:
         "width": max(0, int(data.get("width") or 0)),
         "height": max(0, int(data.get("height") or 0)),
         "scale": max(0.1, min(6.0, float(data.get("scale") or 1.6))),
+        "world_height": max(0.0, float(data.get("world_height") or 0)),
+        "anchor": _normalize_animation_anchor(data.get("anchor")),
     }
 
 
+def _normalize_animation_state_name(value: Any) -> str:
+    name = str(value or "").strip()
+    if not name or len(name) > 48:
+        return ""
+    if not all(char.isalnum() or char in {"_", "-"} for char in name):
+        return ""
+    return name
+
+
+def _normalize_animation_anchor(value: Any) -> str:
+    anchor = str(value or "center").strip()
+    return anchor if anchor in {"center", "feet"} else "center"
+
+
 def normalize_action_space(data: Any) -> list[str]:
-    actions = [str(action) for action in data] if isinstance(data, list) else []
+    if not isinstance(data, list):
+        return list(DEFAULT_ACTION_SPACE)
     merged: list[str] = []
-    for action in [*actions, *DEFAULT_ACTION_SPACE]:
+    for action in [str(action) for action in data]:
+        action = action.strip()
         if action and action not in merged:
             merged.append(action)
     return merged
@@ -456,6 +541,7 @@ class AgentState:
     last_model_tick: int = -999
     cooldowns: dict[str, float] = field(default_factory=dict)
     held_item_id: str | None = None
+    narrative_state: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -469,6 +555,7 @@ class AgentState:
             "last_model_tick": self.last_model_tick,
             "cooldowns": self.cooldowns,
             "held_item_id": self.held_item_id,
+            "narrative_state": self.narrative_state,
         }
 
     @classmethod
@@ -484,6 +571,7 @@ class AgentState:
             last_model_tick=int(data.get("last_model_tick", -999)),
             cooldowns=dict(data.get("cooldowns", {})),
             held_item_id=data.get("held_item_id"),
+            narrative_state=dict(data.get("narrative_state", {})),
         )
 
 
@@ -620,6 +708,7 @@ class GameWorld:
     memories: list[Memory] = field(default_factory=list)
     events: list[Event] = field(default_factory=list)
     decision_events: list[DecisionEvent] = field(default_factory=list)
+    narrative: dict[str, Any] = field(default_factory=default_narrative_config)
     tick: int = 0
     running: bool = False
 
@@ -701,6 +790,7 @@ class GameWorld:
             "memories": [memory.to_dict() for memory in self.memories],
             "events": [event.to_dict() for event in self.events],
             "decision_events": [event.to_dict() for event in self.decision_events],
+            "narrative": self.narrative,
             "tick": self.tick,
             "running": self.running,
         }
@@ -749,6 +839,7 @@ class GameWorld:
             decision_events=[
                 DecisionEvent.from_dict(item) for item in data.get("decision_events", [])
             ],
+            narrative=normalize_narrative_config(data.get("narrative")),
             tick=int(data.get("tick", 0)),
             running=bool(data.get("running", False)),
         )

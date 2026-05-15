@@ -32,6 +32,33 @@ def test_api_health_world_action_and_websocket():
         assert "events" in snapshot
 
 
+def test_api_patch_narrative_updates_saved_snapshot():
+    client = TestClient(app)
+    api_main.runtime.world = api_main.GameWorld.default()
+
+    response = client.patch(
+        "/api/narrative",
+        json={
+            "enabled": True,
+            "premise": "A storm is turning every quiet errand into a clue.",
+            "tone": "tense but grounded",
+            "cadence_ticks": 12,
+        },
+    )
+
+    assert response.status_code == 200
+    narrative = response.json()["narrative"]
+    assert narrative == {
+        "enabled": True,
+        "premise": "A storm is turning every quiet errand into a clue.",
+        "tone": "tense but grounded",
+        "cadence_ticks": 12,
+        "last_tick": -999,
+        "recent_summary": "",
+    }
+    assert client.get("/api/world").json()["narrative"] == narrative
+
+
 def test_api_patch_editor_entities():
     client = TestClient(app)
 
@@ -120,7 +147,7 @@ def test_api_patch_editor_entities():
         },
     )
     animated = patched_animation.json()["agent_profiles"][animation_id]
-    assert animated["animation"]["kind"] == "gif"
+    assert animated["animation"]["clips"]["idle"]["kind"] == "gif"
     assert animated["dialogue_policy"]["distance"] == 140
 
     created_region = client.post(
@@ -543,7 +570,7 @@ def test_api_model_capability_status_and_one_click_config(monkeypatch):
     client = TestClient(app)
 
     assert client.patch("/api/models", json={"models": default_model_configs()}).status_code == 200
-    monkeypatch.setattr(api_main, "_detect_ollama_models", lambda: ["qwen2.5:7b", "qwen2.5vl:3b"])
+    monkeypatch.setattr(api_main, "_detect_ollama_models", lambda: ["qwen2.5:1.5b", "qwen2.5:7b", "qwen2.5vl:3b"])
     monkeypatch.setattr(api_main, "_embedded_mobile_sam_ready", lambda: False)
     monkeypatch.setattr(
         api_main,
@@ -569,14 +596,14 @@ def test_api_model_capability_status_and_one_click_config(monkeypatch):
     llm = next(item for item in status.json()["capabilities"] if item["id"] == "llm")
     sam = next(item for item in status.json()["capabilities"] if item["id"] == "segmentation")
     assert llm["status"] == "local_available"
-    assert llm["recommended_local"]["model"] == "qwen2.5:7b"
+    assert llm["recommended_local"]["model"] == "qwen2.5:1.5b"
     assert sam["status"] == "installable"
     assert sam["installable"] is True
 
     configured = client.post("/api/model-capabilities/llm/configure-local")
     assert configured.status_code == 200
     models = configured.json()["models"]
-    assert any(model["id"] == "model_local_llm" and model["model"] == "qwen2.5:7b" for model in models)
+    assert any(model["id"] == "model_local_llm" and model["model"] == "qwen2.5:1.5b" for model in models)
     assert any(model["id"] == "model_local_vision" and "vision_labeling" in model["capabilities"] for model in models)
     assert configured.json()["capability"]["status"] == "ready"
 
@@ -594,8 +621,311 @@ def test_api_model_capability_status_and_one_click_config(monkeypatch):
     )
     assert remote_sam.status_code == 200
     sam_model = next(model for model in remote_sam.json()["models"] if model["id"] == "model_remote_sam")
-    assert sam_model["api_key"] == "local-dev-key"
+    assert sam_model["api_key"] == ""
+    assert sam_model["api_key_set"] is True
     assert sam_model["base_url"] == "http://localhost:8001/segment"
+    stored_sam = next(model for model in api_main.store.load_model_configs() if model["id"] == "model_remote_sam")
+    assert stored_sam["api_key"] == "local-dev-key"
+
+
+def test_api_llm_capability_is_installable_without_pulled_model(monkeypatch):
+    client = TestClient(app)
+
+    assert client.patch("/api/models", json={"models": default_model_configs()}).status_code == 200
+    monkeypatch.setattr(api_main, "_detect_ollama_models", lambda: [])
+    monkeypatch.setattr(api_main, "_detect_local_model_services", lambda: {})
+
+    status = client.get("/api/model-capabilities/status")
+    assert status.status_code == 200
+    llm = next(item for item in status.json()["capabilities"] if item["id"] == "llm")
+    assert llm["status"] == "installable"
+    assert llm["installable"] is True
+    assert llm["recommended_local"] is None
+
+
+def test_api_remote_models_filters_by_capability(monkeypatch):
+    client = TestClient(app)
+
+    def fake_openai_json_request(config, method, path, body=None, timeout=30):
+        assert method == "GET"
+        assert path == "models"
+        return {
+            "data": [
+                {"id": "gpt-5.4-mini"},
+                {"id": "claude-opus-4-7"},
+                {"id": "gpt-image-2"},
+                {"id": "text-embedding-3-small"},
+            ]
+        }
+
+    monkeypatch.setattr(api_main, "_openai_json_request", fake_openai_json_request)
+
+    llm = client.post(
+        "/api/model-capabilities/llm/remote-models",
+        json={"base_url": "https://api.example.test/v1", "api_key": "secret", "model": ""},
+    )
+    image = client.post(
+        "/api/model-capabilities/image_generation/remote-models",
+        json={"base_url": "https://api.example.test/v1", "api_key": "secret", "model": ""},
+    )
+
+    assert llm.status_code == 200
+    assert [model["id"] for model in llm.json()["models"]] == ["claude-opus-4-7", "gpt-5.4-mini"]
+    assert image.status_code == 200
+    assert [model["id"] for model in image.json()["models"]] == ["gpt-image-2"]
+
+
+def test_api_remote_llm_test_reports_success_and_provider_errors(monkeypatch):
+    client = TestClient(app)
+    failure = {"enabled": False}
+
+    def fake_openai_json_request(config, method, path, body=None, timeout=30):
+        assert path == "chat/completions"
+        assert body["response_format"] == {"type": "json_object"}
+        if failure["enabled"]:
+            raise api_main.RemoteProviderError("HTTP 400: bad request")
+        return {
+            "model": "gpt-5.4-mini-test",
+            "choices": [{"message": {"content": "{\"text\":\"ok\",\"actions\":[]}"}}],
+        }
+
+    monkeypatch.setattr(api_main, "_openai_json_request", fake_openai_json_request)
+
+    ok = client.post(
+        "/api/model-capabilities/llm/test-remote",
+        json={"base_url": "https://api.example.test/v1", "api_key": "secret", "model": "gpt-5.4-mini"},
+    )
+    assert ok.status_code == 200
+    assert ok.json()["ok"] is True
+    assert ok.json()["sample"] == "{\"text\":\"ok\",\"actions\":[]}"
+
+    failure["enabled"] = True
+    bad = client.post(
+        "/api/model-capabilities/llm/test-remote",
+        json={"base_url": "https://api.example.test/v1", "api_key": "secret", "model": "claude-opus-4-7"},
+    )
+    assert bad.status_code == 200
+    assert bad.json()["ok"] is False
+    assert "HTTP 400" in bad.json()["message"]
+
+
+def test_api_remote_config_hides_and_preserves_api_key():
+    client = TestClient(app)
+
+    assert client.patch("/api/models", json={"models": default_model_configs()}).status_code == 200
+    first = client.post(
+        "/api/model-capabilities/llm/configure-remote",
+        json={"base_url": "https://api.example.test/v1", "api_key": "first-secret", "model": "gpt-5.4-mini"},
+    )
+    assert first.status_code == 200
+    public = next(model for model in first.json()["models"] if model["id"] == "model_remote_llm")
+    assert public["api_key"] == ""
+    assert public["api_key_set"] is True
+
+    second = client.post(
+        "/api/model-capabilities/llm/configure-remote",
+        json={"base_url": "https://api.example.test/v1", "api_key": "", "model": "gpt-5.4"},
+    )
+    assert second.status_code == 200
+    stored = next(model for model in api_main.store.load_model_configs() if model["id"] == "model_remote_llm")
+    assert stored["api_key"] == "first-secret"
+    assert stored["model"] == "gpt-5.4"
+
+
+def test_api_map_generation_uses_remote_openai_images_b64(monkeypatch):
+    client = TestClient(app)
+
+    assert client.patch(
+        "/api/models",
+        json={
+            "models": [
+                *default_model_configs(),
+                {
+                    "id": "model_remote_image",
+                    "name": "Remote image",
+                    "kind": "remote",
+                    "provider": "image-http",
+                    "base_url": "https://api.example.test/v1",
+                    "api_key": "image-secret",
+                    "model": "gpt-image-2",
+                    "enabled": True,
+                    "capabilities": ["image_generation"],
+                },
+            ]
+        },
+    ).status_code == 200
+
+    def fake_openai_json_request(config, method, path, body=None, timeout=30):
+        assert method == "POST"
+        assert path == "images/generations"
+        assert body["model"] == "gpt-image-2"
+        return {"data": [{"b64_json": api_main.base64.b64encode(b"fake-png").decode("ascii")}]}
+
+    monkeypatch.setattr(api_main, "_openai_json_request", fake_openai_json_request)
+
+    response = client.post(
+        "/api/map/generation",
+        json={"prompt": "city map", "width": 1280, "height": 720, "ratio": "16:9", "count": 1, "provider_id": "model_remote_image"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["provider_id"] == "model_remote_image"
+    assert payload["candidates"][0]["provider_id"] == "model_remote_image"
+    assert payload["candidates"][0]["url"].startswith("/api/assets/")
+    asset_name = payload["candidates"][0]["url"].rsplit("/", 1)[-1]
+    assert (api_main.store.assets_dir / asset_name).read_bytes() == b"fake-png"
+
+
+def test_openai_image_provider_accepts_url_candidates(monkeypatch):
+    downloaded = {"url": ""}
+
+    def fake_openai_json_request(config, method, path, body=None, timeout=30):
+        return {"data": [{"url": "https://cdn.example.test/image.png"}]}
+
+    def fake_download(url, api_key="", base_url=""):
+        downloaded["url"] = url
+        assert api_key == "image-secret"
+        return b"remote-image", ".png"
+
+    monkeypatch.setattr(api_main, "_openai_json_request", fake_openai_json_request)
+    monkeypatch.setattr(api_main, "_download_generated_image", fake_download)
+
+    candidates = api_main._call_openai_image_provider(
+        {
+            "id": "model_remote_image",
+            "provider": "image-http",
+            "base_url": "https://api.example.test/v1",
+            "api_key": "image-secret",
+            "model": "gpt-image-2",
+        },
+        "gen_url_test",
+        "map",
+        1024,
+        1024,
+        1,
+    )
+
+    assert downloaded["url"] == "https://cdn.example.test/image.png"
+    assert candidates[0]["url"].startswith("/api/assets/")
+
+
+def test_api_llm_install_task_pulls_default_qwen_and_configures(monkeypatch):
+    client = TestClient(app)
+    pulled = []
+
+    assert client.patch("/api/models", json={"models": default_model_configs()}).status_code == 200
+    monkeypatch.setattr(api_main, "_ensure_ollama_executable", lambda allow_install=True: "ollama")
+    monkeypatch.setattr(api_main, "_wait_for_ollama_service", lambda timeout_seconds: True)
+    monkeypatch.setattr(api_main, "_start_ollama_service", lambda executable: None)
+    monkeypatch.setattr(api_main, "_detect_local_model_services", lambda: {})
+    monkeypatch.setattr(
+        api_main,
+        "_detect_ollama_models",
+        lambda: list(pulled),
+    )
+
+    def fake_pull(executable, model):
+        assert executable == "ollama"
+        pulled.append(model)
+        return True
+
+    monkeypatch.setattr(api_main, "_ollama_pull_model", fake_pull)
+    monkeypatch.setattr(api_main, "_start_llm_install_task", api_main._run_llm_install_task)
+
+    response = client.post("/api/model-capabilities/llm/install-local")
+    assert response.status_code == 200
+    task_id = response.json()["task"]["id"]
+    task = client.get(f"/api/model-capabilities/tasks/{task_id}").json()["task"]
+    assert task["status"] == "done"
+    assert "qwen2.5:1.5b" in pulled
+
+    models = client.get("/api/models").json()["models"]
+    llm = next(model for model in models if model["id"] == "model_local_llm")
+    assert llm["model"] == "qwen2.5:1.5b"
+    assert api_main.runtime.default_provider_id == "model_local_llm"
+    assert api_main.runtime.providers["model_local_llm"].model == "qwen2.5:1.5b"
+
+
+def test_api_llm_install_task_uses_winget_when_ollama_missing(monkeypatch):
+    client = TestClient(app)
+    installed = {"done": False}
+
+    assert client.patch("/api/models", json={"models": default_model_configs()}).status_code == 200
+
+    def fake_ensure(allow_install=True):
+        if not installed["done"]:
+            assert allow_install is True
+            installed["done"] = True
+        return "ollama"
+
+    monkeypatch.setattr(api_main, "_ensure_ollama_executable", fake_ensure)
+    monkeypatch.setattr(api_main, "_wait_for_ollama_service", lambda timeout_seconds: True)
+    monkeypatch.setattr(api_main, "_detect_ollama_models", lambda: [])
+    monkeypatch.setattr(api_main, "_ollama_pull_model", lambda executable, model: True)
+    monkeypatch.setattr(api_main, "_start_llm_install_task", api_main._run_llm_install_task)
+
+    response = client.post("/api/model-capabilities/llm/install-local")
+    assert response.status_code == 200
+    task = client.get(f"/api/model-capabilities/tasks/{response.json()['task']['id']}").json()["task"]
+    assert task["status"] == "done"
+    assert installed["done"] is True
+
+
+def test_api_llm_install_task_surfaces_pull_failure(monkeypatch):
+    client = TestClient(app)
+
+    assert client.patch("/api/models", json={"models": default_model_configs()}).status_code == 200
+    monkeypatch.setattr(api_main, "_ensure_ollama_executable", lambda allow_install=True: "ollama")
+    monkeypatch.setattr(api_main, "_wait_for_ollama_service", lambda timeout_seconds: True)
+    monkeypatch.setattr(api_main, "_detect_ollama_models", lambda: [])
+    monkeypatch.setattr(api_main, "_install_ollama_for_platform", lambda: False)
+    monkeypatch.setattr(api_main, "_ollama_pull_model", lambda executable, model: False)
+    monkeypatch.setattr(api_main, "_start_llm_install_task", api_main._run_llm_install_task)
+
+    response = client.post("/api/model-capabilities/llm/install-local")
+    assert response.status_code == 200
+    task = client.get(f"/api/model-capabilities/tasks/{response.json()['task']['id']}").json()["task"]
+    assert task["status"] == "error"
+    assert "qwen2.5:1.5b" in task["error"]
+
+
+def test_api_llm_recommends_existing_gemma_when_qwen_missing(monkeypatch):
+    client = TestClient(app)
+
+    assert client.patch("/api/models", json={"models": default_model_configs()}).status_code == 200
+    monkeypatch.setattr(api_main, "_detect_ollama_models", lambda: ["gemma3:1b"])
+    monkeypatch.setattr(api_main, "_detect_local_model_services", lambda: {})
+
+    status = client.get("/api/model-capabilities/status")
+    llm = next(item for item in status.json()["capabilities"] if item["id"] == "llm")
+    assert llm["status"] == "local_available"
+    assert llm["recommended_local"]["model"] == "gemma3:1b"
+
+    configured = client.post("/api/model-capabilities/llm/configure-local")
+    assert configured.status_code == 200
+    assert configured.json()["capability"]["configured_model_name"] == "本地 LLM - gemma3:1b"
+
+
+def test_api_mac_local_llm_diagnostics_reports_recovery_commands(monkeypatch):
+    client = TestClient(app)
+
+    assert client.patch("/api/models", json={"models": default_model_configs()}).status_code == 200
+    monkeypatch.setattr(api_main.shutil, "which", lambda name: "/opt/homebrew/bin/brew" if name == "brew" else None)
+    monkeypatch.setattr(api_main, "_ollama_service_reachable", lambda: False)
+    monkeypatch.setattr(api_main, "_detect_ollama_models", lambda: [])
+    monkeypatch.setattr(api_main, "_mac_hardware_summary", lambda: {"chip": "Apple M4", "memory_gb": 16.0})
+
+    response = client.get("/api/local-llm/mac-diagnostics")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["homebrew"]["available"] is True
+    assert payload["ollama"]["installed"] is False
+    assert "brew install ollama" in payload["recommendation"]["commands"]
+    assert "ollama pull qwen2.5:7b" in payload["recommendation"]["commands"]
+    assert payload["recommendation"]["small_llm"] == "qwen2.5:1.5b"
 
 
 def test_api_embedded_sam_install_task(monkeypatch):

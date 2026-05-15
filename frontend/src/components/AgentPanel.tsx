@@ -1,7 +1,25 @@
-import { ChevronDown, ChevronRight, ImageUp, PauseCircle, Plus, RotateCcw, Send } from "lucide-react";
-import { useState } from "react";
-import { postAction, uploadAsset } from "../lib/api";
-import type { AgentAnimation, AgentProfile, DialoguePolicy, Point, SelectionState, WorldSnapshot } from "../types";
+import { Check, ChevronDown, ChevronRight, ImageUp, PauseCircle, Plus, RotateCcw, Save, Send, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  checkActionExtension,
+  createActionExtension,
+  deleteActionExtension,
+  getActionExtensions,
+  patchActionExtension,
+  postAction,
+  uploadAsset
+} from "../lib/api";
+import type {
+  ActionExtension,
+  ActionExtensionCheckResult,
+  AgentAnimation,
+  AgentAnimationClip,
+  AgentProfile,
+  DialoguePolicy,
+  Point,
+  SelectionState,
+  WorldSnapshot
+} from "../types";
 
 type Props = {
   world: WorldSnapshot;
@@ -20,6 +38,9 @@ type ImageMetric = {
   pixels: number;
 };
 
+const BUILT_IN_ACTIONS = ["move_to", "say", "interact", "use", "observe", "wait", "stop", "social", "pick_up", "drop_item", "move_item"];
+const DEFAULT_STATUSES = ["idle", "moving", "social", "speaking", "interact", "use", "waiting", "stopped"];
+
 export function AgentPanel({
   world,
   selection,
@@ -35,7 +56,23 @@ export function AgentPanel({
   const [speech, setSpeech] = useState("");
   const [expandedAgentId, setExpandedAgentId] = useState<string | null>(selection.kind === "agent" ? selection.id : null);
   const [menu, setMenu] = useState<{ x: number; y: number; agentId: string } | null>(null);
+  const [extensions, setExtensions] = useState<ActionExtension[]>([]);
+  const [extensionCode, setExtensionCode] = useState("");
+  const [selectedExtensionId, setSelectedExtensionId] = useState<string | null>(null);
+  const [extensionCheck, setExtensionCheck] = useState<ActionExtensionCheckResult | null>(null);
+  const [extensionStatus, setExtensionStatus] = useState("扩展未检查");
   const selectedAgent = selection.kind === "agent" ? world.agent_profiles[selection.id] : null;
+
+  useEffect(() => {
+    void refreshExtensions();
+  }, []);
+
+  const extensionActions = useMemo(() => extensions.filter((extension) => extension.action_type), [extensions]);
+
+  async function refreshExtensions() {
+    const next = await getActionExtensions();
+    setExtensions(next);
+  }
 
   async function sendSpeech() {
     if (!selectedAgent || !speech.trim()) {
@@ -51,48 +88,6 @@ export function AgentPanel({
     onRefresh();
   }
 
-  async function uploadGif(agent: AgentProfile, file: File) {
-    const metric = await readImageMetric(file);
-    const uploaded = await uploadAsset(file);
-    onUpdateAgent(agent.id, {
-      animation: {
-        kind: "gif",
-        url: uploaded.url,
-        frames: [],
-        fps: agent.animation?.fps ?? 8,
-        max_pixels: metric.pixels,
-        width: metric.width,
-        height: metric.height,
-        scale: agent.animation?.scale ?? 1.6
-      }
-    });
-  }
-
-  async function uploadPngSequence(agent: AgentProfile, files: FileList) {
-    const ordered = Array.from(files).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-    if (!ordered.length) {
-      return;
-    }
-    const metrics = await Promise.all(ordered.map(readImageMetric));
-    const uploaded = await Promise.all(ordered.map((file) => uploadAsset(file)));
-    const max = metrics.reduce(
-      (current, metric) => (metric.pixels > current.pixels ? metric : current),
-      metrics[0]
-    );
-    onUpdateAgent(agent.id, {
-      animation: {
-        kind: "png_sequence",
-        url: "",
-        frames: uploaded.map((item) => item.url),
-        fps: agent.animation?.fps ?? 8,
-        max_pixels: max.pixels,
-        width: max.width,
-        height: max.height,
-        scale: agent.animation?.scale ?? 1.6
-      }
-    });
-  }
-
   function commitDialoguePolicy(agent: AgentProfile, patch: Partial<DialoguePolicy>) {
     onUpdateAgent(agent.id, {
       dialogue_policy: {
@@ -100,6 +95,67 @@ export function AgentPanel({
         ...patch
       }
     });
+  }
+
+  function commitActionSpace(agent: AgentProfile, action: string, enabled: boolean) {
+    const current = new Set(agent.action_space);
+    if (enabled) {
+      current.add(action);
+    } else {
+      current.delete(action);
+    }
+    onUpdateAgent(agent.id, { action_space: Array.from(current) });
+  }
+
+  function selectExtension(extension: ActionExtension) {
+    setSelectedExtensionId(extension.id);
+    setExtensionCode(extension.code);
+    setExtensionCheck(extension.check ?? null);
+    setExtensionStatus(extension.enabled ? "扩展已启用" : "扩展已停用");
+  }
+
+  async function runExtensionCheck() {
+    const result = await checkActionExtension(extensionCode);
+    setExtensionCheck(result);
+    setExtensionStatus(result ? (result.ok ? "检查通过" : "检查未通过") : "检查接口不可用");
+  }
+
+  async function saveExtension(enabled = true) {
+    const selected = selectedExtensionId ? extensions.find((extension) => extension.id === selectedExtensionId) : null;
+    const saved = selected
+      ? await patchActionExtension(selected.id, { code: extensionCode, enabled })
+      : await createActionExtension({ code: extensionCode, enabled });
+    if (!saved) {
+      setExtensionStatus("保存失败");
+      return;
+    }
+    setSelectedExtensionId(saved.id);
+    setExtensionCode(saved.code);
+    setExtensionStatus(saved.enabled ? "已保存并启用" : "已保存");
+    await refreshExtensions();
+  }
+
+  async function toggleExtension(extension: ActionExtension) {
+    const saved = await patchActionExtension(extension.id, { enabled: !extension.enabled });
+    if (saved) {
+      await refreshExtensions();
+      setExtensionStatus(saved.enabled ? "扩展已启用" : "扩展已停用");
+    }
+  }
+
+  async function removeExtension(extension: ActionExtension) {
+    const ok = await deleteActionExtension(extension.id);
+    if (!ok) {
+      setExtensionStatus("删除失败");
+      return;
+    }
+    setExtensions((current) => current.filter((item) => item.id !== extension.id));
+    if (selectedExtensionId === extension.id) {
+      setSelectedExtensionId(null);
+      setExtensionCode("");
+      setExtensionCheck(null);
+    }
+    setExtensionStatus("已删除");
   }
 
   return (
@@ -112,10 +168,10 @@ export function AgentPanel({
             <div className="agent-entry" key={agent.id}>
               <button
                 className={`${selection.kind === "agent" && selection.id === agent.id ? "agent-card active" : "agent-card"}${agent.hidden ? " hidden-object" : ""}`}
-            onClick={() => {
-              onSelect({ kind: "agent", id: agent.id });
-              setExpandedAgentId(expanded ? null : agent.id);
-            }}
+                onClick={() => {
+                  onSelect({ kind: "agent", id: agent.id });
+                  setExpandedAgentId(expanded ? null : agent.id);
+                }}
                 onDoubleClick={() => onLocateAgent(agent.id)}
                 onContextMenu={(event) => {
                   event.preventDefault();
@@ -136,18 +192,39 @@ export function AgentPanel({
               {expanded ? (
                 <AgentDetail
                   agent={agent}
+                  extensionActions={extensionActions}
                   world={world}
+                  onActionToggle={(action, enabled) => commitActionSpace(agent, action, enabled)}
                   onStop={() => void stopAgent(agent.id)}
                   onUpdatePolicy={(patch) => commitDialoguePolicy(agent, patch)}
                   onUpdateAnimation={(animation) => onUpdateAgent(agent.id, { animation })}
-                  onGif={(file) => void uploadGif(agent, file)}
-                  onPngs={(files) => void uploadPngSequence(agent, files)}
                 />
               ) : null}
             </div>
           );
         })}
       </div>
+
+      <ActionExtensionEditor
+        code={extensionCode}
+        extensions={extensions}
+        selectedExtensionId={selectedExtensionId}
+        status={extensionStatus}
+        check={extensionCheck}
+        onCode={setExtensionCode}
+        onNew={() => {
+          setSelectedExtensionId(null);
+          setExtensionCode("");
+          setExtensionCheck(null);
+          setExtensionStatus("新扩展");
+        }}
+        onSelect={selectExtension}
+        onCheck={() => void runExtensionCheck()}
+        onSave={() => void saveExtension(true)}
+        onSaveDisabled={() => void saveExtension(false)}
+        onToggle={(extension) => void toggleExtension(extension)}
+        onDelete={(extension) => void removeExtension(extension)}
+      />
 
       <div className="agent-create-row">
         <input value={name} onChange={(event) => setName(event.target.value)} aria-label="Agent 名称" />
@@ -223,23 +300,26 @@ export function AgentPanel({
 function AgentDetail({
   agent,
   world,
+  extensionActions,
   onStop,
   onUpdatePolicy,
   onUpdateAnimation,
-  onGif,
-  onPngs
+  onActionToggle
 }: {
   agent: AgentProfile;
   world: WorldSnapshot;
+  extensionActions: ActionExtension[];
   onStop: () => void;
   onUpdatePolicy: (patch: Partial<DialoguePolicy>) => void;
   onUpdateAnimation: (animation: AgentAnimation | null) => void;
-  onGif: (file: File) => void;
-  onPngs: (files: FileList) => void;
+  onActionToggle: (action: string, enabled: boolean) => void;
 }) {
+  const [customStatus, setCustomStatus] = useState("");
   const state = world.agent_states[agent.id];
   const nearby = state ? nearbyAgents(world, agent.id) : [];
   const animation = agent.animation;
+  const statuses = Array.from(new Set([...DEFAULT_STATUSES, ...Object.keys(animation?.clips ?? {})]));
+
   return (
     <div className="agent-detail-panel" data-testid={`agent-detail-${agent.id}`}>
       <div className="agent-detail-grid">
@@ -269,6 +349,14 @@ function AgentDetail({
           />
           自动对话
         </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={agent.dialogue_policy.language === "zh-CN"}
+            onChange={(event) => onUpdatePolicy({ language: event.currentTarget.checked ? "zh-CN" : "auto" })}
+          />
+          中文对话
+        </label>
         <input
           aria-label="对话距离"
           defaultValue={agent.dialogue_policy.distance}
@@ -283,78 +371,291 @@ function AgentDetail({
         />
       </div>
 
-      <div className="agent-animation-tools">
-        <label className="agent-file-action">
-          <ImageUp size={14} />
-          GIF
-          <input
-            accept="image/gif"
-            onChange={(event) => {
-              const file = event.currentTarget.files?.[0];
-              if (file) {
-                onGif(file);
-              }
-              event.currentTarget.value = "";
-            }}
-            type="file"
-          />
-        </label>
-        <label className="agent-file-action">
-          <ImageUp size={14} />
-          PNG序列
-          <input
-            accept="image/png"
-            multiple
-            onChange={(event) => {
-              const files = event.currentTarget.files;
-              if (files?.length) {
-                onPngs(files);
-              }
-              event.currentTarget.value = "";
-            }}
-            type="file"
-          />
-        </label>
-        <button className="agent-inline-action" disabled={!animation} onClick={() => onUpdateAnimation(null)} type="button">
-          <RotateCcw size={14} />
-          清除
-        </button>
+      <div className="agent-action-space">
+        <span>LLM 动作空间</span>
+        <div>
+          {[...BUILT_IN_ACTIONS.map((type) => ({ type, label: type, enabled: true })), ...extensionActions.map((extension) => ({
+            type: extension.action_type,
+            label: extension.action_type,
+            enabled: extension.enabled
+          }))].map((action) => (
+            <label key={action.type} className={action.enabled ? "" : "disabled-action"}>
+              <input
+                type="checkbox"
+                checked={agent.action_space.includes(action.type)}
+                disabled={!action.enabled}
+                onChange={(event) => onActionToggle(action.type, event.currentTarget.checked)}
+              />
+              {action.label}
+            </label>
+          ))}
+        </div>
       </div>
-      <div className="agent-animation-meta" data-testid={`agent-animation-meta-${agent.id}`}>
-        {animation ? (
+
+      <div className="agent-animation-section">
+        <div className="agent-section-heading">
+          <span>状态动画</span>
+          <div className="agent-custom-status">
+            <input value={customStatus} onChange={(event) => setCustomStatus(event.target.value)} placeholder="自定义状态" />
+            <button
+              type="button"
+              onClick={() => {
+                const next = customStatus.trim();
+                if (next) {
+                  onUpdateAnimation(upsertClip(animation, next, null));
+                  setCustomStatus("");
+                }
+              }}
+            >
+              <Plus size={14} />
+            </button>
+          </div>
+        </div>
+        {statuses.map((status) => (
+          <AnimationClipRow
+            key={status}
+            animation={animation}
+            status={status}
+            onChange={(clip) => onUpdateAnimation(upsertClip(animation, status, clip))}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AnimationClipRow({
+  animation,
+  status,
+  onChange
+}: {
+  animation: AgentAnimation | null;
+  status: string;
+  onChange: (clip: AgentAnimationClip | null) => void;
+}) {
+  const clip = animation?.clips[status] ?? null;
+
+  async function uploadGif(file: File) {
+    const metric = await readImageMetric(file);
+    const uploaded = await uploadAsset(file);
+    onChange({
+      kind: "gif",
+      url: uploaded.url,
+      frames: [],
+      fps: clip?.fps ?? 8,
+      max_pixels: metric.pixels,
+      width: metric.width,
+      height: metric.height,
+      world_height: clip?.world_height ?? 72,
+      scale: clip?.scale ?? 1
+    });
+  }
+
+  async function uploadPngSequence(files: FileList) {
+    const ordered = Array.from(files).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    if (!ordered.length) {
+      return;
+    }
+    const metrics = await Promise.all(ordered.map(readImageMetric));
+    const uploaded = await Promise.all(ordered.map((file) => uploadAsset(file)));
+    const max = metrics.reduce((current, metric) => (metric.pixels > current.pixels ? metric : current), metrics[0]);
+    onChange({
+      kind: "png_sequence",
+      url: "",
+      frames: uploaded.map((item) => item.url),
+      fps: clip?.fps ?? 8,
+      max_pixels: max.pixels,
+      width: max.width,
+      height: max.height,
+      world_height: clip?.world_height ?? 72,
+      scale: clip?.scale ?? 1
+    });
+  }
+
+  return (
+    <div className="agent-animation-row">
+      <strong>{status}</strong>
+      <label className="agent-file-action">
+        <ImageUp size={14} />
+        GIF
+        <input
+          accept="image/gif"
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            if (file) {
+              void uploadGif(file);
+            }
+            event.currentTarget.value = "";
+          }}
+          type="file"
+        />
+      </label>
+      <label className="agent-file-action">
+        <ImageUp size={14} />
+        PNG
+        <input
+          accept="image/png"
+          multiple
+          onChange={(event) => {
+            const files = event.currentTarget.files;
+            if (files?.length) {
+              void uploadPngSequence(files);
+            }
+            event.currentTarget.value = "";
+          }}
+          type="file"
+        />
+      </label>
+      <button className="agent-inline-action" disabled={!clip} onClick={() => onChange(null)} type="button">
+        <RotateCcw size={14} />
+        清除
+      </button>
+      <div className="agent-animation-meta">
+        {clip ? (
           <>
-            <span>{animation.kind === "gif" ? "GIF" : `PNG序列 ${animation.frames.length} 帧`}</span>
-            <small>最大像素 {formatPixels(animation.max_pixels)} / {animation.width} x {animation.height}</small>
-            {animation.kind === "png_sequence" ? (
-              <label>
-                FPS
-                <input
-                  aria-label="PNG序列 FPS"
-                  defaultValue={animation.fps}
-                  onBlur={(event) => onUpdateAnimation({ ...animation, fps: Math.max(1, Number(event.currentTarget.value) || 8) })}
-                  type="number"
-                />
-              </label>
-            ) : null}
+            <small>{clip.kind === "gif" ? "GIF" : `PNG ${clip.frames.length} 帧`} · {formatPixels(clip.max_pixels)} · {clip.width} x {clip.height}</small>
+            <label>
+              FPS
+              <input
+                aria-label={`${status} FPS`}
+                defaultValue={clip.fps}
+                onBlur={(event) => onChange({ ...clip, fps: Math.max(1, Number(event.currentTarget.value) || 8) })}
+                type="number"
+              />
+            </label>
+            <label>
+              高度
+              <input
+                aria-label={`${status} world height`}
+                defaultValue={clip.world_height}
+                onBlur={(event) => onChange({ ...clip, world_height: clampWorldHeight(event.currentTarget.value) })}
+                type="number"
+              />
+            </label>
             <label>
               缩放
               <input
-                aria-label="动画缩放"
-                defaultValue={animation.scale}
+                aria-label={`${status} scale`}
+                defaultValue={clip.scale}
                 max={6}
                 min={0.1}
-                onBlur={(event) => onUpdateAnimation({ ...animation, scale: clampAnimationScale(event.currentTarget.value) })}
+                onBlur={(event) => onChange({ ...clip, scale: clampAnimationScale(event.currentTarget.value) })}
                 step={0.1}
                 type="number"
               />
             </label>
           </>
         ) : (
-          <small>未设置动画资产</small>
+          <small>未设置</small>
         )}
       </div>
     </div>
   );
+}
+
+function ActionExtensionEditor({
+  extensions,
+  selectedExtensionId,
+  code,
+  status,
+  check,
+  onCode,
+  onNew,
+  onSelect,
+  onCheck,
+  onSave,
+  onSaveDisabled,
+  onToggle,
+  onDelete
+}: {
+  extensions: ActionExtension[];
+  selectedExtensionId: string | null;
+  code: string;
+  status: string;
+  check: ActionExtensionCheckResult | null;
+  onCode: (code: string) => void;
+  onNew: () => void;
+  onSelect: (extension: ActionExtension) => void;
+  onCheck: () => void;
+  onSave: () => void;
+  onSaveDisabled: () => void;
+  onToggle: (extension: ActionExtension) => void;
+  onDelete: (extension: ActionExtension) => void;
+}) {
+  return (
+    <div className="agent-extension-editor">
+      <div className="agent-section-heading">
+        <span>动作扩展</span>
+        <button type="button" onClick={onNew}>
+          <Plus size={14} />
+        </button>
+      </div>
+      <div className="agent-extension-list">
+        {extensions.length ? (
+          extensions.map((extension) => (
+            <button
+              className={selectedExtensionId === extension.id ? "active" : ""}
+              key={extension.id}
+              onClick={() => onSelect(extension)}
+              type="button"
+            >
+              <span>{extension.action_type || extension.id}</span>
+              <small>{extension.enabled ? "启用" : "停用"}</small>
+            </button>
+          ))
+        ) : (
+          <small>暂无扩展动作</small>
+        )}
+      </div>
+      <textarea value={code} onChange={(event) => onCode(event.target.value)} placeholder="粘贴 Python 动作扩展代码" />
+      <div className="agent-extension-actions">
+        <button type="button" onClick={onCheck} disabled={!code.trim()}>
+          <Check size={14} />
+          检查
+        </button>
+        <button type="button" onClick={onSave} disabled={!code.trim()}>
+          <Save size={14} />
+          保存启用
+        </button>
+        <button type="button" onClick={onSaveDisabled} disabled={!code.trim()}>
+          停用保存
+        </button>
+      </div>
+      <div className="agent-extension-manage">
+        {extensions.map((extension) => (
+          <div key={extension.id}>
+            <span>{extension.action_type || extension.id}</span>
+            <button type="button" onClick={() => onToggle(extension)}>
+              {extension.enabled ? "停用" : "启用"}
+            </button>
+            <button type="button" onClick={() => onDelete(extension)}>
+              <Trash2 size={13} />
+            </button>
+          </div>
+        ))}
+      </div>
+      <small className={check?.ok ? "agent-extension-status ok" : "agent-extension-status"}>{status}</small>
+      {check?.issues.length ? (
+        <div className="agent-extension-issues">
+          {check.issues.slice(0, 4).map((issue, index) => (
+            <small key={`${issue.message}-${index}`}>{issue.severity}: {issue.message}</small>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function upsertClip(animation: AgentAnimation | null, status: string, clip: AgentAnimationClip | null): AgentAnimation | null {
+  const current = animation?.clips ?? {};
+  const nextClips = { ...current };
+  if (clip) {
+    nextClips[status] = clip;
+  } else {
+    delete nextClips[status];
+  }
+  const idle = nextClips.idle ?? Object.values(nextClips)[0];
+  return idle ? { ...idle, clips: { ...nextClips, idle } } : null;
 }
 
 function nearbyAgents(world: WorldSnapshot, agentId: string) {
@@ -401,18 +702,29 @@ function formatPixels(value: number) {
 function clampAnimationScale(value: string) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) {
-    return 1.6;
+    return 1;
   }
   return Math.max(0.1, Math.min(6, parsed));
+}
+
+function clampWorldHeight(value: string) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return 72;
+  }
+  return Math.max(8, Math.min(800, parsed));
 }
 
 function stateLabel(status?: string) {
   const labels: Record<string, string> = {
     idle: "待机",
     moving: "移动中",
+    social: "社交中",
     speaking: "发言中",
     interact: "互动中",
-    use: "使用中"
+    use: "使用中",
+    waiting: "等待中",
+    stopped: "已停止"
   };
   return labels[status ?? "idle"] ?? status ?? "待机";
 }

@@ -2,12 +2,19 @@
   "name": "multi-agent-game-engine-frontend",
   "version": "0.1.0",
   "private": true,
+  "main": "electron/main.cjs",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
+    "build:backend:win": "cd .. && .\\.venv\\Scripts\\python -m PyInstaller --noconfirm --clean --distpath packaging\\backend-dist --workpath packaging\\backend-build packaging\\agent-engine-backend.spec",
+    "build:backend:mac": "cd .. && ./.venv/bin/python -m PyInstaller --noconfirm --clean --distpath packaging/backend-dist --workpath packaging/backend-build packaging/agent-engine-backend.spec",
     "electron:dev": "concurrently -k \"npm run dev -- --port 5173\" \"wait-on http://127.0.0.1:5173 && cross-env ELECTRON_START_URL=http://127.0.0.1:5173 electron electron/main.cjs\"",
     "electron:preview": "npm run build && electron electron/main.cjs",
+    "pack:win": "npm run build && npm run build:backend:win && electron-builder --win --dir",
+    "dist:win": "npm run build && npm run build:backend:win && electron-builder --win",
+    "pack:mac": "npm run build && npm run build:backend:mac && electron-builder --mac --dir",
+    "dist:mac": "npm run build && npm run build:backend:mac && electron-builder --mac",
     "preview": "vite preview --host 127.0.0.1",
     "test:e2e": "playwright test"
   },
@@ -30,8 +37,85 @@
     "concurrently": "^9.2.1",
     "cross-env": "^10.1.0",
     "electron": "^39.2.7",
+    "electron-builder": "^26.8.1",
     "pngjs": "^7.0.0",
     "typescript": "^5.9.3",
     "wait-on": "^9.0.3"
+  },
+  "build": {
+    "appId": "com.local.multiagentengine",
+    "productName": "Multi-Agent Engine",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "asar": true,
+    "npmRebuild": false,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../docs/user-manual.zh-CN.md",
+        "to": "docs/user-manual.zh-CN.md"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "extraResources": [
+        {
+          "from": "../packaging/backend-dist/agent-engine-backend.exe",
+          "to": "backend/agent-engine-backend.exe"
+        }
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "artifactName": "${productName}-${version}-mac-${arch}.${ext}",
+      "category": "public.app-category.developer-tools",
+      "identity": null,
+      "extraResources": [
+        {
+          "from": "../docs/user-manual.zh-CN.md",
+          "to": "docs/user-manual.zh-CN.md"
+        },
+        {
+          "from": "../packaging/backend-dist/agent-engine-backend",
+          "to": "backend/agent-engine-backend"
+        },
+        {
+          "from": "../runtime_project",
+          "to": "runtime_project"
+        }
+      ]
+    },
+    "nsis": {
+      "artifactName": "${productName}-${version}-win-installer-${arch}.${ext}",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "dmg": {
+      "artifactName": "${productName}-${version}-mac-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-win-portable-${arch}.${ext}"
+    }
   }
 }

@@ -13,6 +13,8 @@ class ModelRequest:
     identity: str
     observation: dict[str, Any]
     action_space: list[str]
+    action_definitions: list[dict[str, Any]] = field(default_factory=list)
+    language: str = "auto"
     system_prompt: str = ""
 
 
@@ -31,27 +33,116 @@ class ModelProvider(ABC):
         """Return language and optional structured actions without mutating the world."""
 
 
+def _enrich_identity(agent_id: str, agent_name: str, role: str, identity: str) -> str:
+    raw_identity = str(identity or "").strip()
+    name = str(agent_name or agent_id or "Agent").strip()
+    normalized_role = str(role or "resident").strip().lower()
+    if raw_identity and not _is_placeholder_identity(raw_identity, name, normalized_role):
+        return raw_identity
+    if raw_identity and " is " in raw_identity:
+        identity_name = raw_identity.split(" is ", 1)[0].strip()
+        if identity_name and len(identity_name) <= 40:
+            name = identity_name
+
+    role_key = normalized_role.replace(" ", "_")
+    if role_key == "mediator" or name.lower() == "mira":
+        return (
+            f"{name} is a mediator who wants the group to understand what changed between people. "
+            "Core desire: make tense moments speakable without flattening them. "
+            "Observation preference: who is avoided, who is being listened to, and what object anchors the conversation. "
+            "Voice: warm, specific, gently probing. Avoid: generic greetings, identity recaps, and empty reassurance."
+        )
+    if role_key == "builder" or name.lower() == "tao":
+        return (
+            f"{name} is a builder who thinks through materials, paths, weight, and practical precision. "
+            "Core desire: make the scene more workable and sturdy. "
+            "Observation preference: movable objects, road access, spatial constraints, and whether plans can hold up. "
+            "Voice: concrete, economical, craft-minded. Avoid: vague philosophizing, generic greetings, and pretending to be social for no reason."
+        )
+    if role_key == "observer" or name.lower() == "ren":
+        return (
+            f"{name} is an observer who tracks small patterns in movement, silence, and repeated choices. "
+            "Core desire: notice the detail everyone else skipped. "
+            "Observation preference: timing, distance, pauses, repeated routes, and mismatches between words and motion. "
+            "Voice: quiet, precise, slightly elliptical. Avoid: identity recaps, weather talk, and explaining plans out loud."
+        )
+    return (
+        f"{name} is a resident with a concrete point of view about this place. "
+        "Core desire: respond to nearby people and objects as if they matter. "
+        "Observation preference: local changes, useful objects, and recent conversation. "
+        "Voice: brief, situated, and first-person. Avoid: generic greetings, identity recaps, and action-plan narration."
+    )
+
+
+def _is_placeholder_identity(identity: str, agent_name: str, role: str) -> bool:
+    normalized = " ".join(identity.strip().lower().split())
+    name = agent_name.strip().lower()
+    role = role.strip().lower()
+    placeholders = {
+        "a curious resident in the scene.",
+        "a resident in the scene.",
+        f"{name} is a {role} with a distinct social point of view.",
+        f"{name} is an {role} with a distinct social point of view.",
+    }
+    if normalized in {item.lower() for item in placeholders}:
+        return True
+    return (
+        normalized.endswith("with a distinct social point of view.")
+        and (
+            normalized.startswith(f"{name} is ")
+            or f" is a {role} " in normalized
+            or f" is an {role} " in normalized
+        )
+    )
+
+
+def _effective_dialogue_language(language: str, identity: str) -> str:
+    normalized = str(language or "auto").strip()
+    if normalized in {"zh-CN", "en-US"}:
+        return normalized
+    return "zh-CN" if _contains_cjk(identity) else "en-US"
+
+
+def _contains_cjk(text: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in str(text or ""))
+
+
 class MockProvider(ModelProvider):
     name = "mock"
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
         agent_name = request.observation.get("agent_name", request.agent_id)
         tick = int(request.observation.get("tick", 0))
+        identity = _enrich_identity(request.agent_id, str(agent_name), request.role, request.identity)
+        language = str(
+            request.observation.get("effective_dialogue_language")
+            or request.observation.get("dialogue_language")
+            or request.language
+        )
+        zh = _effective_dialogue_language(language, identity) == "zh-CN"
         dialogue_candidates = request.observation.get("dialogue_candidates") or []
         nearby_items = request.observation.get("nearby_items") or []
         movement_targets = request.observation.get("movement_targets") or []
         held_item_id = request.observation.get("held_item_id")
+        if "move_to" in request.action_space and movement_targets and tick % 15 == 0:
+            target = movement_targets[0]
+            return ModelResponse(
+                text=f"{agent_name} moves toward a valid region target.",
+                actions=[{"type": "move_to", "payload": {"target": target.get("point")}}],
+            )
         if "social" in request.action_space and dialogue_candidates and tick % 10 == 0:
             target = dialogue_candidates[0]
             target_name = target.get("name", target.get("id", "there"))
+            text = f"{agent_name} 注意到 {target_name} 就在附近。" if zh else f"{agent_name} notices {target_name} nearby."
+            speech = _mock_utterance(str(agent_name), request.role, zh, str(target_name))
             return ModelResponse(
-                text=f"{agent_name} notices {target_name} nearby.",
+                text=text,
                 actions=[
                     {
                         "type": "social",
                         "payload": {
                             "target_agent_id": target.get("id"),
-                            "text": f"Hi {target_name}, what are you noticing here?",
+                            "text": speech,
                         },
                     }
                 ],
@@ -60,34 +151,83 @@ class MockProvider(ModelProvider):
         if "pick_up" in request.action_space and movable_items and not held_item_id and tick % 12 == 0:
             item = movable_items[0]
             return ModelResponse(
-                text=f"{agent_name} decides to pick up {item.get('name', item.get('id'))}.",
+                text=(
+                    f"{agent_name} 决定拿起 {item.get('name', item.get('id'))}。"
+                    if zh
+                    else f"{agent_name} decides to pick up {item.get('name', item.get('id'))}."
+                ),
                 actions=[{"type": "pick_up", "payload": {"item_id": item.get("id")}}],
             )
         if "move_to" in request.action_space and movement_targets and tick % 6 == 0:
             target = movement_targets[0]
             return ModelResponse(
-                text=f"{agent_name} chooses a nearby destination.",
+                text=f"{agent_name} 选择了一个附近的目的地。" if zh else f"{agent_name} chooses a nearby destination.",
                 actions=[{"type": "move_to", "payload": {"target": target.get("point")}}],
             )
         if "stop" in request.action_space and tick % 14 == 0:
             return ModelResponse(
-                text=f"{agent_name} rests for a moment.",
+                text=f"{agent_name} 暂时停下来休息。" if zh else f"{agent_name} rests for a moment.",
                 actions=[{"type": "stop", "payload": {"reason": "rest"}}],
             )
         if "say" in request.action_space and tick % 8 == 0:
             return ModelResponse(
-                text=f"{agent_name} shares a quick thought.",
+                text=f"{agent_name} 分享了一个简短想法。" if zh else f"{agent_name} shares a quick thought.",
                 actions=[
                     {
                         "type": "say",
-                        "payload": {"text": f"I am noticing the space at tick {tick}."},
+                        "payload": {
+                            "text": _mock_utterance(str(agent_name), request.role, zh)
+                        },
                     }
                 ],
             )
         return ModelResponse(
-            text=f"{agent_name} waits and watches.",
+            text=f"{agent_name} 等待并观察。" if zh else f"{agent_name} waits and watches.",
             actions=[{"type": "wait", "payload": {"duration": 1}}],
         )
+
+
+def _mock_utterance(agent_name: str, role: str, zh: bool, target_name: str | None = None) -> str:
+    role_key = str(role or "").lower()
+    if role_key == "mediator" or agent_name.lower() == "mira":
+        return (
+            f"我想把我们刚才的互动说清楚，{target_name}，你觉得哪里变了？"
+            if zh and target_name
+            else "我在听这里还没被说出来的那一部分。"
+            if zh
+            else f"I want to name what shifted between us, {target_name}; what changed for you?"
+            if target_name
+            else "I'm listening for the part of the room no one has named yet."
+        )
+    if role_key == "builder" or agent_name.lower() == "tao":
+        return (
+            f"我在判断这里怎么搭才稳，{target_name}，你觉得哪里需要加固？"
+            if zh and target_name
+            else "我先看哪一块真的能承重，再决定动手。"
+            if zh
+            else f"I'm checking what would hold up here, {target_name}; does this arrangement feel sturdy?"
+            if target_name
+            else "I'm checking which piece would carry weight before I touch anything."
+        )
+    if role_key == "observer" or agent_name.lower() == "ren":
+        return (
+            f"我看到我们总绕回这个位置，{target_name}，你也注意到了吗？"
+            if zh and target_name
+            else "我在记录大家停顿的位置，重复得很有意思。"
+            if zh
+            else f"I keep seeing us circle back to this spot, {target_name}; did you catch that too?"
+            if target_name
+            else "I'm tracking the small changes in where everyone pauses."
+        )
+    return (
+        f"我先说具体一点，{target_name}，刚才这里确实变了。"
+        if zh and target_name
+        else "我想先把眼前这件小事说准。"
+        if zh
+        else f"I want to be specific, {target_name}; something here just changed."
+        if target_name
+        else "I want to be specific about what just changed here."
+    )
 
 
 class OllamaProvider(ModelProvider):
@@ -150,10 +290,27 @@ class OpenAICompatibleProvider(ModelProvider):
 def _request_to_prompt(request: ModelRequest) -> str:
     import json
 
+    agent_name = str(request.observation.get("agent_name") or request.agent_id)
+    identity = _enrich_identity(request.agent_id, agent_name, request.role, request.identity)
+    language = _effective_dialogue_language(request.language, identity)
+    observation = dict(request.observation)
+    observation.setdefault("effective_dialogue_language", language)
+    language_line = (
+        "Reply in Simplified Chinese (zh-CN).\n"
+        if language == "zh-CN"
+        else "Reply in English (en-US).\n"
+    )
+    extension_lines = ""
+    if request.action_definitions:
+        extension_lines = (
+            "Extension action definitions: "
+            f"{json.dumps(request.action_definitions, ensure_ascii=False)}\n"
+        )
     return (
         "You control one agent in a live 2D game simulation. "
         "Return ONLY valid JSON with this shape: "
         "{\"text\": string, \"actions\": [{\"type\": string, \"payload\": object}]}.\n"
+        f"{language_line}"
         "Choose at most one action. Use only action types listed in Action space.\n"
         "Supported action payloads:\n"
         "- move_to: {\"target\":{\"x\":number,\"y\":number}} using a point from observation.movement_targets when possible.\n"
@@ -165,12 +322,34 @@ def _request_to_prompt(request: ModelRequest) -> str:
         "- interact/use: {\"target_id\": string} only for visible nearby targets.\n"
         "- say: {\"text\": string}.\n"
         "- wait: {\"duration\": number}.\n"
-        "Do not invent ids. Avoid repeating the same action if recent_events show it just happened.\n"
+        f"{extension_lines}"
+        "Output separation:\n"
+        "- Top-level text is private narration/debug summary and is NOT shown as a speech bubble.\n"
+        "- Visible speech is allowed ONLY in say.payload.text or social.payload.text.\n"
+        "- If you choose say/social, payload.text must be a direct in-character line, first-person or directly addressed, 1-2 short sentences.\n"
+        "- Never put identity summaries, JSON explanations, action plans, or third-person agent descriptions in visible speech.\n"
+        "Role speech rules:\n"
+        "- Make speech specific to identity, relationships, agent_recent_events, recent_utterances, conversation_focus, and nearby_items.\n"
+        "- Do not repeat identity/role text. Do not say generic greetings like \"How is your day going?\" or weather filler.\n"
+        "- For social, address the selected target and react to a recent event, relationship, object, or spatial situation.\n"
+        "- If there is no concrete thing to say, choose observe, wait, move_to, or interact instead of weak chatter.\n"
+        "Movement is visible only when you choose move_to. If move_to is available and movement_targets is not empty, "
+        "regularly choose move_to instead of only saying text. Copy target coordinates exactly from one "
+        "observation.movement_targets[].point; never invent coordinates. Respect observation.movement_constraints: "
+        "agent centers should keep the listed minimum distance from other agents, and the rules engine may adjust "
+        "a move target that would collide.\n"
+        "Base speech and social choices primarily on identity, observation.relationships, nearby agents/items, "
+        "and observation.agent_recent_events. observation.scene_context is weak background mood only; "
+        "do not quote narration as the agent's own speech.\n"
+        "Use observation.region_context: road/walkable targets have higher movement priority than action areas; "
+        "social regions favor social/say actions; residential regions favor calm local routines.\n"
+        "Do not invent ids. For social use only observation.dialogue_candidates ids; for interact/use/pick_up use visible nearby item ids. "
+        "Avoid repeating the same action if agent_recent_events show it just happened.\n"
         f"Agent: {request.agent_id}\n"
         f"Role: {request.role}\n"
-        f"Identity: {request.identity}\n"
+        f"Identity: {identity}\n"
         f"Action space: {json.dumps(request.action_space, ensure_ascii=False)}\n"
-        f"Observation: {json.dumps(request.observation, ensure_ascii=False)}\n"
+        f"Observation: {json.dumps(observation, ensure_ascii=False)}\n"
     )
 
 

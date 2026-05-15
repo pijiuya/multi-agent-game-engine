@@ -11,19 +11,20 @@ test.describe("transparent workstation rendering", () => {
     { name: "desktop", width: 1280, height: 820 },
     { name: "mobile", width: 390, height: 820 }
   ]) {
-    test(`workspace surface has rectangular fade on ${viewport.name}`, async ({ page }) => {
+    test(`workspace surface has stable canvas grid on ${viewport.name}`, async ({ page }) => {
       await page.setViewportSize({ width: viewport.width, height: viewport.height });
       await page.goto("/");
 
       await expect(page.getByTestId("scene-viewport")).toBeVisible();
       await expect(page.getByTestId("workspace-surface")).toBeVisible();
+      await expect(page.getByTestId("scene-grid-canvas")).toBeVisible();
       await expect(page.getByTestId("world-2d")).toHaveCount(0);
-      await expectRectangularFade(page);
+      await expectStableGrid(page);
     });
   }
 });
 
-async function expectRectangularFade(page: import("@playwright/test").Page) {
+async function expectStableGrid(page: import("@playwright/test").Page) {
   await page.addStyleTag({
     content: `
       .floating-panel,
@@ -44,14 +45,31 @@ async function expectRectangularFade(page: import("@playwright/test").Page) {
   const image = await page.screenshot({ omitBackground: true });
   const png = PNG.sync.read(image);
   const center = alphaAt(png, scene.x + scene.width * 0.5, scene.y + scene.height * 0.5);
-  const leftEdge = alphaAt(png, scene.x + scene.width * 0.03, scene.y + scene.height * 0.5);
-  const topEdge = alphaAt(png, scene.x + scene.width * 0.5, scene.y + scene.height * 0.03);
-  const corner = alphaAt(png, scene.x + scene.width * 0.03, scene.y + scene.height * 0.03);
+  const leftEdge = alphaAt(png, scene.x + 2, scene.y + scene.height * 0.5);
+  const topEdge = alphaAt(png, scene.x + scene.width * 0.5, scene.y + 2);
+  const corner = alphaAt(png, scene.x + 2, scene.y + 2);
+  const canvasState = await page.getByTestId("scene-grid-canvas").evaluate((element) => {
+    const canvas = element as HTMLCanvasElement;
+    const box = canvas.getBoundingClientRect();
+    return {
+      width: canvas.width,
+      height: canvas.height,
+      cssWidth: box.width,
+      cssHeight: box.height
+    };
+  });
 
-  expect(center).toBeGreaterThan(150);
-  expect(center).toBeGreaterThan(leftEdge + 8);
-  expect(center).toBeGreaterThan(topEdge + 8);
-  expect(center).toBeGreaterThan(corner + 16);
+  expect(canvasState.width).toBeGreaterThan(0);
+  expect(canvasState.height).toBeGreaterThan(0);
+  expect(canvasState.cssWidth).toBeGreaterThan(0);
+  expect(canvasState.cssHeight).toBeGreaterThan(0);
+  expect(center).toBeGreaterThan(80);
+  expect(center).toBeGreaterThan(leftEdge + 32);
+  expect(center).toBeGreaterThan(topEdge + 32);
+  expect(center).toBeGreaterThan(corner + 48);
+  expect(leftEdge).toBeLessThan(80);
+  expect(topEdge).toBeLessThan(80);
+  expect(corner).toBeLessThan(48);
 }
 
 function alphaAt(png: PNG, x: number, y: number) {

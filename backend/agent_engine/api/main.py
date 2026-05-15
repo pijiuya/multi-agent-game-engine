@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import shutil
 import asyncio
 import base64
@@ -22,7 +23,14 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from agent_engine.engine.environment_ai import EnvironmentArbiter
+from agent_engine.engine.action_extensions import (
+    ActionExtensionError,
+    check_action_extension_code,
+    compile_action_extension,
+    compile_action_extensions,
+)
 from agent_engine.engine.simulation import SimulationRuntime
+from agent_engine.engine.scene_director import LLMSceneDirector, MockSceneDirector
 from agent_engine.engine.world import (
     AgentAction,
     AgentProfile,
@@ -37,6 +45,7 @@ from agent_engine.engine.world import (
     normalize_action_space,
     normalize_agent_animation,
     normalize_dialogue_policy,
+    normalize_narrative_config,
 )
 from agent_engine.models.provider import MockProvider, OllamaProvider, OpenAICompatibleProvider
 from agent_engine.persistence.sqlite_store import ProjectStore
@@ -92,6 +101,13 @@ class ProposalSubmit(BaseModel):
     proposal: dict[str, Any]
 
 
+class NarrativePatch(BaseModel):
+    enabled: bool | None = None
+    premise: str | None = None
+    tone: str | None = None
+    cadence_ticks: int | None = None
+
+
 class WorldMapPatch(BaseModel):
     name: str | None = None
     width: int | None = None
@@ -110,6 +126,23 @@ class AgentPatch(BaseModel):
     hidden: bool | None = None
     animation: dict[str, Any] | None = None
     dialogue_policy: dict[str, Any] | None = None
+
+
+class ActionExtensionPayload(BaseModel):
+    id: str | None = None
+    name: str | None = None
+    code: str
+    enabled: bool = True
+
+
+class ActionExtensionPatch(BaseModel):
+    name: str | None = None
+    code: str | None = None
+    enabled: bool | None = None
+
+
+class ActionExtensionCheck(BaseModel):
+    code: str
 
 
 class WorldItemPatch(BaseModel):
@@ -157,6 +190,11 @@ class CapabilityConfigurePayload(BaseModel):
     base_url: str = ""
     api_key: str = ""
     model: str = ""
+
+
+class RemoteModelOption(BaseModel):
+    id: str
+    name: str | None = None
 
 
 class MapGenerationRequest(BaseModel):
@@ -213,6 +251,35 @@ capability_tasks: dict[str, dict[str, Any]] = {}
 capability_tasks_lock = threading.Lock()
 embedded_sam_cache: dict[str, Any] = {}
 
+OLLAMA_BASE_URL = "http://127.0.0.1:11434"
+LLM_LOCAL_MODEL_ID = "model_local_llm"
+LLM_DEFAULT_MODEL = "qwen2.5:7b"
+LLM_SMALL_MODEL = "qwen2.5:1.5b"
+LLM_VISION_MODEL = "qwen2.5vl:3b"
+LLM_REALTIME_MODEL = os.getenv("AGENT_ENGINE_REALTIME_LLM_MODEL", LLM_SMALL_MODEL)
+LLM_PREFERRED_MODELS = list(dict.fromkeys([LLM_REALTIME_MODEL, LLM_DEFAULT_MODEL, LLM_SMALL_MODEL, "gemma3:1b"]))
+OPENAI_IMAGE_PROVIDERS = {"image-http", "local-http-image"}
+IMAGE_MODEL_KEYWORDS = ("gpt-image", "image", "dall-e", "dalle", "flux", "sdxl", "stable-diffusion", "imagen")
+NON_LLM_MODEL_KEYWORDS = (
+    "image",
+    "dall-e",
+    "dalle",
+    "flux",
+    "sdxl",
+    "stable-diffusion",
+    "embedding",
+    "embed",
+    "audio",
+    "tts",
+    "whisper",
+    "moderation",
+    "rerank",
+)
+
+
+class RemoteProviderError(RuntimeError):
+    pass
+OLLAMA_WINGET_ID = "Ollama.Ollama"
 MOBILE_SAM_PROVIDER = "embedded-mobile-sam"
 MOBILE_SAM_MODEL_ID = "model_local_sam_embedded"
 MOBILE_SAM_WEIGHT_NAME = "mobile_sam.pt"
@@ -247,6 +314,18 @@ def get_world() -> dict[str, Any]:
 @app.put("/api/world")
 def replace_world(payload: dict[str, Any]) -> dict[str, Any]:
     runtime.world = GameWorld.from_dict(payload)
+    store.save_world(runtime.world)
+    return runtime.snapshot()
+
+
+@app.patch("/api/narrative")
+def patch_narrative(payload: NarrativePatch) -> dict[str, Any]:
+    runtime.world.narrative = normalize_narrative_config(
+        {
+            **runtime.world.narrative,
+            **_payload_data(payload),
+        }
+    )
     store.save_world(runtime.world)
     return runtime.snapshot()
 
@@ -357,6 +436,11 @@ def model_capabilities_status() -> dict[str, Any]:
     }
 
 
+@app.get("/api/local-llm/mac-diagnostics")
+def local_llm_mac_diagnostics() -> dict[str, Any]:
+    return _mac_local_llm_diagnostics()
+
+
 @app.post("/api/model-capabilities/{capability}/configure-local")
 def configure_local_capability(capability: str) -> dict[str, Any]:
     configs = store.load_model_configs()
@@ -381,6 +465,10 @@ def configure_local_capability(capability: str) -> dict[str, Any]:
 
 @app.post("/api/model-capabilities/{capability}/install-local")
 def install_local_capability(capability: str) -> dict[str, Any]:
+    if capability == "llm":
+        task = _create_capability_task(capability, title="安装并启用本地 LLM")
+        _start_llm_install_task(task["id"])
+        return {"task": task}
     if capability != "segmentation":
         raise HTTPException(status_code=400, detail="当前只有 SAM 分层支持内置安装")
     if _embedded_mobile_sam_ready():
@@ -415,12 +503,26 @@ def get_model_capability_task(task_id: str) -> dict[str, Any]:
 def configure_remote_capability(capability: str, payload: CapabilityConfigurePayload) -> dict[str, Any]:
     config = _remote_capability_config(capability, payload)
     configs = _upsert_model_config(store.load_model_configs(), config)
+    configs = _prefer_model_for_capability(configs, capability, config["id"])
     store.save_model_configs(configs)
     _sync_runtime_model_providers()
     return {
         "models": [_public_model_config(item) for item in configs],
         "capability": _capability_status(capability, configs, _detect_ollama_models(), _detect_local_model_services()),
     }
+
+
+@app.post("/api/model-capabilities/{capability}/remote-models")
+def remote_capability_models(capability: str, payload: CapabilityConfigurePayload) -> dict[str, Any]:
+    config = _remote_probe_config(capability, payload)
+    models = _list_remote_models(config, capability)
+    return {"models": models}
+
+
+@app.post("/api/model-capabilities/{capability}/test-remote")
+def test_remote_capability(capability: str, payload: CapabilityConfigurePayload) -> dict[str, Any]:
+    config = _remote_probe_config(capability, payload)
+    return _test_remote_capability(capability, config)
 
 
 @app.post("/api/models/{model_id}/test")
@@ -449,10 +551,14 @@ def create_map_generation(payload: MapGenerationRequest) -> dict[str, Any]:
     width = max(128, min(payload.width, 4096))
     height = max(128, min(payload.height, 4096))
     generation_id = new_id("gen")
-    candidates = [
-        _mock_generated_candidate(generation_id, index, payload.prompt, width, height)
-        for index in range(max(1, min(payload.count, 4)))
-    ]
+    config = _image_generation_config(payload.provider_id)
+    if config is not None and config.get("provider") in OPENAI_IMAGE_PROVIDERS:
+        candidates = _call_openai_image_provider(config, generation_id, payload.prompt, width, height, payload.count)
+    else:
+        candidates = [
+            _mock_generated_candidate(generation_id, index, payload.prompt, width, height)
+            for index in range(max(1, min(payload.count, 4)))
+        ]
     task = {
         "id": generation_id,
         "status": "done",
@@ -460,7 +566,7 @@ def create_map_generation(payload: MapGenerationRequest) -> dict[str, Any]:
         "ratio": payload.ratio,
         "width": width,
         "height": height,
-        "provider_id": payload.provider_id or "model_mock_image",
+        "provider_id": (config or {}).get("id") or payload.provider_id or "model_mock_image",
         "candidates": candidates,
         "selected_candidate_id": None,
     }
@@ -696,6 +802,63 @@ def asset(asset_name: str) -> FileResponse:
     return FileResponse(path)
 
 
+@app.get("/api/action-extensions")
+def get_action_extensions() -> dict[str, Any]:
+    return {"extensions": _load_action_extensions()}
+
+
+@app.post("/api/action-extensions/check")
+def check_action_extension(payload: ActionExtensionCheck) -> dict[str, Any]:
+    return check_action_extension_code(payload.code)
+
+
+@app.post("/api/action-extensions")
+def create_action_extension(payload: ActionExtensionPayload) -> dict[str, Any]:
+    data = _payload_data(payload)
+    if not data.get("id"):
+        data["id"] = new_id("action_ext")
+    try:
+        extension = compile_action_extension(data)
+    except ActionExtensionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    extensions = [item for item in _load_action_extensions() if item.get("id") != extension.id]
+    extensions.append(extension.to_dict())
+    _save_action_extensions(extensions)
+    _ensure_enabled_extension_actions(extensions)
+    _sync_runtime_action_extensions()
+    return {"extension": extension.to_dict(), "extensions": extensions}
+
+
+@app.patch("/api/action-extensions/{extension_id}")
+def patch_action_extension(extension_id: str, payload: ActionExtensionPatch) -> dict[str, Any]:
+    extensions = _load_action_extensions()
+    for index, current in enumerate(extensions):
+        if current.get("id") != extension_id:
+            continue
+        next_data = {**current, **_payload_data(payload), "id": extension_id}
+        try:
+            extension = compile_action_extension(next_data)
+        except ActionExtensionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        extensions[index] = extension.to_dict()
+        _save_action_extensions(extensions)
+        _ensure_enabled_extension_actions(extensions)
+        _sync_runtime_action_extensions()
+        return {"extension": extension.to_dict(), "extensions": extensions}
+    raise HTTPException(status_code=404, detail="Action extension not found")
+
+
+@app.delete("/api/action-extensions/{extension_id}")
+def delete_action_extension(extension_id: str) -> dict[str, Any]:
+    extensions = _load_action_extensions()
+    next_extensions = [item for item in extensions if item.get("id") != extension_id]
+    if len(next_extensions) == len(extensions):
+        raise HTTPException(status_code=404, detail="Action extension not found")
+    _save_action_extensions(next_extensions)
+    _sync_runtime_action_extensions()
+    return {"extensions": next_extensions}
+
+
 @app.post("/api/agents")
 def create_agent(payload: AgentCreate) -> dict[str, Any]:
     agent_id = new_id("agent")
@@ -706,7 +869,7 @@ def create_agent(payload: AgentCreate) -> dict[str, Any]:
         identity=payload.identity,
         color=payload.color,
         model_provider=payload.model_provider,
-        action_space=payload.action_space or list(DEFAULT_ACTION_SPACE),
+        action_space=normalize_action_space(payload.action_space),
     )
     position = Point.from_dict(payload.position) if payload.position else runtime.world.map.nearest_spawn()
     runtime.world.add_agent(profile, position=position)
@@ -848,6 +1011,36 @@ async def _handle_ws_message(message: dict[str, Any]) -> None:
         )
 
 
+def _load_action_extensions() -> list[dict[str, Any]]:
+    items = store.load_kv_json("action_extensions", [])
+    return items if isinstance(items, list) else []
+
+
+def _save_action_extensions(extensions: list[dict[str, Any]]) -> None:
+    store.save_kv_json("action_extensions", extensions)
+
+
+def _ensure_enabled_extension_actions(extensions: list[dict[str, Any]]) -> None:
+    action_types = {
+        str(item.get("type") or item.get("action_type") or "").strip()
+        for item in extensions
+        if item.get("enabled", True)
+    }
+    action_types.discard("")
+    changed = False
+    for profile in runtime.world.agent_profiles.values():
+        for action_type in sorted(action_types):
+            if action_type not in profile.action_space:
+                profile.action_space.append(action_type)
+                changed = True
+    if changed:
+        store.save_world(runtime.world)
+
+
+def _sync_runtime_action_extensions() -> None:
+    runtime.set_action_extensions(compile_action_extensions(_load_action_extensions()))
+
+
 def _model_config_dict(payload: ModelConfigPayload) -> dict[str, Any]:
     return {
         "id": payload.id or "",
@@ -869,7 +1062,8 @@ def _public_model_config(config: dict[str, Any]) -> dict[str, Any]:
         "kind": config.get("kind", "local"),
         "provider": config.get("provider", "mock"),
         "base_url": config.get("base_url", ""),
-        "api_key": config.get("api_key", ""),
+        "api_key": "",
+        "api_key_set": bool(config.get("api_key")),
         "model": config.get("model", ""),
         "enabled": bool(config.get("enabled", True)),
         "capabilities": list(config.get("capabilities", [])),
@@ -879,12 +1073,15 @@ def _public_model_config(config: dict[str, Any]) -> dict[str, Any]:
 def _sync_runtime_model_providers() -> None:
     providers = {"mock": MockProvider()}
     default_provider_id = "mock"
+    first_llm_provider = None
     for config in store.load_model_configs():
         if not config.get("enabled", True) or "llm" not in set(config.get("capabilities", [])):
             continue
         provider = _runtime_provider_from_model_config(config, providers["mock"])
         if provider is None:
             continue
+        if first_llm_provider is None and str(config.get("provider") or "mock") != "mock":
+            first_llm_provider = provider
         provider_id = str(config.get("id") or config.get("provider") or "mock")
         providers[provider_id] = provider
         provider_name = str(config.get("provider") or "mock")
@@ -893,6 +1090,23 @@ def _sync_runtime_model_providers() -> None:
             default_provider_id = provider_id
     runtime.providers = providers
     runtime.default_provider_id = default_provider_id
+    runtime.scene_director = _scene_director_for_local_chain(first_llm_provider)
+
+
+def _scene_director_for_local_chain(provider: Any | None):
+    if provider is None:
+        return MockSceneDirector()
+    if getattr(provider, "name", "") == "ollama":
+        models = set(_detect_ollama_models())
+        if LLM_SMALL_MODEL in models:
+            return LLMSceneDirector(
+                OllamaProvider(
+                    base_url=getattr(provider, "base_url", OLLAMA_BASE_URL),
+                    model=LLM_SMALL_MODEL,
+                ),
+                model_name=LLM_SMALL_MODEL,
+            )
+    return LLMSceneDirector(provider)
 
 
 def _runtime_provider_from_model_config(config: dict[str, Any], mock_provider: MockProvider):
@@ -948,6 +1162,9 @@ def _capability_status(
     elif recommendation:
         status = "local_available"
         summary = f"检测到可用本地方案：{recommendation['name']}"
+    elif capability == "llm":
+        status = "installable"
+        summary = f"可安装并启用本地 LLM：默认下载 {LLM_REALTIME_MODEL}"
     elif mock_config:
         status = "mock_only"
         summary = "当前只有测试 Mock，不能当作真实模型能力"
@@ -972,9 +1189,16 @@ def _capability_status(
         "local_available": recommendation is not None,
         "recommended_local": _public_model_config(recommendation) if recommendation else None,
         "installable": (
-            capability == "segmentation"
-            and recommendation is None
-            and (configured is None or embedded_unavailable or non_embedded_sam)
+            (
+                capability == "llm"
+                and recommendation is None
+                and configured is None
+            )
+            or (
+                capability == "segmentation"
+                and recommendation is None
+                and (configured is None or embedded_unavailable or non_embedded_sam)
+            )
         ),
         "suggestions": _capability_suggestions(capability, ollama_models, local_services),
     }
@@ -1008,26 +1232,30 @@ def _mock_model_for_capability(configs: list[dict[str, Any]], capability: str) -
     )
 
 
+def _local_llm_config(model: str) -> dict[str, Any]:
+    return {
+        "id": LLM_LOCAL_MODEL_ID,
+        "name": f"本地 LLM - {model}",
+        "kind": "local",
+        "provider": "ollama",
+        "base_url": OLLAMA_BASE_URL,
+        "api_key": "",
+        "model": model,
+        "enabled": True,
+        "capabilities": ["llm"],
+    }
+
+
 def _recommended_local_config(
     capability: str,
     ollama_models: list[str],
     local_services: dict[str, dict[str, Any]],
 ) -> dict[str, Any] | None:
     if capability == "llm":
-        model = _preferred_model(ollama_models, ["qwen2.5:7b", "qwen2.5:1.5b", "gemma3:1b"])
+        model = _preferred_model(ollama_models, LLM_PREFERRED_MODELS)
         if not model:
             return None
-        return {
-            "id": "model_local_llm",
-            "name": f"本地 LLM - {model}",
-            "kind": "local",
-            "provider": "ollama",
-            "base_url": "http://127.0.0.1:11434",
-            "api_key": "",
-            "model": model,
-            "enabled": True,
-            "capabilities": ["llm"],
-        }
+        return _local_llm_config(model)
     if capability == "image_generation":
         service = local_services.get("image_generation")
         if not service or not service.get("available"):
@@ -1064,7 +1292,7 @@ def _recommended_local_config(
 
 
 def _recommended_vision_config(ollama_models: list[str]) -> dict[str, Any] | None:
-    model = _preferred_model(ollama_models, ["qwen2.5vl:3b", "llava:7b"])
+    model = _preferred_model(ollama_models, [LLM_VISION_MODEL, "llava:7b"])
     if not model:
         return None
     return {
@@ -1089,17 +1317,236 @@ def _remote_capability_config(capability: str, payload: CapabilityConfigurePaylo
     if capability not in labels:
         raise HTTPException(status_code=404, detail="Unknown capability")
     model_id, name, provider, capabilities = labels[capability]
+    existing = _stored_remote_config_for_capability(capability)
+    api_key = payload.api_key
+    if not api_key and existing is not None:
+        api_key = str(existing.get("api_key") or "")
     return {
         "id": model_id,
         "name": name,
         "kind": "remote",
         "provider": provider,
         "base_url": payload.base_url,
-        "api_key": payload.api_key,
+        "api_key": api_key,
         "model": payload.model,
         "enabled": True,
         "capabilities": capabilities,
     }
+
+
+def _stored_remote_config_for_capability(capability: str) -> dict[str, Any] | None:
+    return next(
+        (
+            config
+            for config in store.load_model_configs()
+            if config.get("kind") == "remote"
+            and capability in set(config.get("capabilities", []))
+        ),
+        None,
+    )
+
+
+def _remote_probe_config(capability: str, payload: CapabilityConfigurePayload) -> dict[str, Any]:
+    labels = {
+        "llm": "openai-compatible",
+        "image_generation": "image-http",
+        "segmentation": "sam-http",
+    }
+    if capability not in labels:
+        raise HTTPException(status_code=404, detail="Unknown capability")
+    existing = _stored_remote_config_for_capability(capability) or {}
+    base_url = str(payload.base_url or existing.get("base_url") or "").strip()
+    api_key = str(payload.api_key or existing.get("api_key") or "").strip()
+    model = str(payload.model or existing.get("model") or "").strip()
+    if not base_url:
+        raise HTTPException(status_code=400, detail="Remote base_url is required")
+    return {
+        "id": str(existing.get("id") or f"probe_{capability}"),
+        "name": str(existing.get("name") or capability),
+        "kind": "remote",
+        "provider": labels[capability],
+        "base_url": base_url,
+        "api_key": api_key,
+        "model": model,
+        "enabled": True,
+        "capabilities": [capability],
+    }
+
+
+def _list_remote_models(config: dict[str, Any], capability: str) -> list[dict[str, Any]]:
+    try:
+        data = _openai_json_request(config, "GET", "models")
+    except RemoteProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    raw_models = data.get("data") if isinstance(data, dict) else []
+    if raw_models is None and isinstance(data, dict):
+        raw_models = data.get("models")
+    if not isinstance(raw_models, list):
+        raw_models = []
+    options: list[dict[str, Any]] = []
+    for raw in raw_models:
+        if isinstance(raw, str):
+            model_id = raw
+            name = raw
+        elif isinstance(raw, dict):
+            model_id = str(raw.get("id") or raw.get("name") or "").strip()
+            name = str(raw.get("name") or model_id).strip()
+        else:
+            continue
+        if not model_id or not _remote_model_matches_capability(model_id, capability):
+            continue
+        options.append({"id": model_id, "name": name or model_id})
+    options.sort(key=lambda item: _remote_model_sort_key(item["id"], capability))
+    return options
+
+
+def _test_remote_capability(capability: str, config: dict[str, Any]) -> dict[str, Any]:
+    model = str(config.get("model") or "").strip()
+    if not model:
+        return {"ok": False, "provider": config.get("provider", ""), "message": "Model name is required", "sample": ""}
+    try:
+        if capability == "llm":
+            data = _openai_json_request(
+                config,
+                "POST",
+                "chat/completions",
+                {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": "Return JSON with keys text and actions."},
+                        {"role": "user", "content": 'Return {"text":"ok","actions":[]} and nothing else.'},
+                    ],
+                    "response_format": {"type": "json_object"},
+                },
+                timeout=float(os.getenv("AGENT_ENGINE_REMOTE_TEST_TIMEOUT", "45")),
+            )
+            content = _chat_completion_text(data)
+            return {
+                "ok": bool(content),
+                "provider": config.get("provider", ""),
+                "model": data.get("model") or model if isinstance(data, dict) else model,
+                "message": "Remote LLM responded" if content else "Remote LLM response was empty",
+                "sample": content[:500],
+            }
+        if capability == "image_generation":
+            data = _openai_json_request(
+                config,
+                "POST",
+                "images/generations",
+                {
+                    "model": model,
+                    "prompt": "A simple 2D game map background test image.",
+                    "n": 1,
+                    "size": "1024x1024",
+                },
+                timeout=float(os.getenv("AGENT_ENGINE_REMOTE_IMAGE_TIMEOUT", "120")),
+            )
+            image_count = len(data.get("data") or []) if isinstance(data, dict) else 0
+            return {
+                "ok": image_count > 0,
+                "provider": config.get("provider", ""),
+                "model": model,
+                "message": "Remote image model responded" if image_count else "Remote image response had no images",
+                "sample": f"{image_count} image candidate(s)",
+            }
+        return {"ok": False, "provider": config.get("provider", ""), "message": "Unsupported capability", "sample": ""}
+    except RemoteProviderError as exc:
+        return {
+            "ok": False,
+            "provider": config.get("provider", ""),
+            "model": model,
+            "message": str(exc),
+            "sample": "",
+        }
+
+
+def _openai_json_request(
+    config: dict[str, Any],
+    method: str,
+    path: str,
+    body: dict[str, Any] | None = None,
+    timeout: float = 30,
+) -> dict[str, Any]:
+    base_url = str(config.get("base_url") or "").strip().rstrip("/")
+    if not base_url:
+        raise RemoteProviderError("Remote base_url is required")
+    url = f"{base_url}/{path.lstrip('/')}"
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "OpenAI/NodeJS/4.0.0",
+    }
+    api_key = str(config.get("api_key") or "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urlrequest.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urlrequest.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RemoteProviderError(f"HTTP {exc.code}: {_remote_error_message(detail)}") from exc
+    except (URLError, TimeoutError, ValueError, OSError, json.JSONDecodeError) as exc:
+        raise RemoteProviderError(str(exc)) from exc
+
+
+def _remote_error_message(detail: str) -> str:
+    if not detail:
+        return "remote request failed"
+    try:
+        data = json.loads(detail)
+    except json.JSONDecodeError:
+        return detail[:800]
+    error = data.get("error") if isinstance(data, dict) else None
+    if isinstance(error, dict):
+        return str(error.get("message") or error)[:800]
+    if isinstance(error, str):
+        return error[:800]
+    return str(data)[:800]
+
+
+def _chat_completion_text(data: dict[str, Any]) -> str:
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first = choices[0]
+    if not isinstance(first, dict):
+        return ""
+    message = first.get("message")
+    if isinstance(message, dict):
+        content = message.get("content")
+        if isinstance(content, list):
+            parts = [
+                str(item.get("text") or "")
+                for item in content
+                if isinstance(item, dict)
+            ]
+            return "".join(parts).strip()
+        return str(content or "").strip()
+    return str(first.get("text") or "").strip()
+
+
+def _remote_model_matches_capability(model_id: str, capability: str) -> bool:
+    lowered = model_id.lower()
+    if capability == "image_generation":
+        return any(keyword in lowered for keyword in IMAGE_MODEL_KEYWORDS)
+    if capability == "llm":
+        return not any(keyword in lowered for keyword in NON_LLM_MODEL_KEYWORDS)
+    return True
+
+
+def _remote_model_sort_key(model_id: str, capability: str) -> tuple[int, str]:
+    lowered = model_id.lower()
+    if capability == "image_generation":
+        priority = 0 if lowered.startswith("gpt-image") else 1
+    elif capability == "llm":
+        priority = 0 if lowered.startswith(("gpt", "claude", "gemini", "qwen", "llama")) else 1
+    else:
+        priority = 1
+    return (priority, lowered)
 
 
 def _upsert_model_config(configs: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1165,6 +1612,181 @@ def _set_capability_task(
             task["message"] = message
         if error is not None:
             task["error"] = error
+
+
+def _start_llm_install_task(task_id: str) -> None:
+    thread = threading.Thread(target=_run_llm_install_task, args=(task_id,), daemon=True)
+    thread.start()
+
+
+def _run_llm_install_task(task_id: str) -> None:
+    try:
+        _set_capability_task(task_id, stage="checking", progress=8, message="检查 Ollama")
+        if shutil.which("ollama") is None:
+            _set_capability_task(task_id, stage="install_ollama", progress=12, message="尝试安装 Ollama")
+        executable = _ensure_ollama_executable()
+
+        _set_capability_task(task_id, stage="start_ollama", progress=25, message="连接本机 Ollama 服务")
+        if not _wait_for_ollama_service(timeout_seconds=2):
+            _start_ollama_service(executable)
+            if not _wait_for_ollama_service(timeout_seconds=20):
+                raise RuntimeError("Ollama 服务未启动，请确认 Ollama 可以在本机运行。")
+
+        _set_capability_task(task_id, stage="checking", progress=42, message="检查已安装的 Ollama 模型")
+        ollama_models = _detect_ollama_models()
+        model = _preferred_model(ollama_models, LLM_PREFERRED_MODELS)
+        if not model:
+            model = LLM_REALTIME_MODEL
+            _set_capability_task(task_id, stage="pull_model", progress=50, message=f"下载 {model}")
+            if not _ollama_pull_model(executable, model):
+                _set_capability_task(task_id, stage="install_ollama", progress=55, message="尝试安装或修复 Ollama")
+                if _install_ollama_for_platform():
+                    executable = _ensure_ollama_executable(allow_install=False)
+                    if not _wait_for_ollama_service(timeout_seconds=2):
+                        _start_ollama_service(executable)
+                        _wait_for_ollama_service(timeout_seconds=20)
+                if not _ollama_pull_model(executable, model):
+                    raise RuntimeError(f"Ollama 下载 {model} 失败，请检查网络或手动运行 ollama pull {model}。")
+            ollama_models = _detect_ollama_models()
+        if model == LLM_DEFAULT_MODEL and LLM_SMALL_MODEL not in set(ollama_models):
+            _set_capability_task(task_id, stage="pull_small_model", progress=76, message=f"准备上下文压缩小模型：{LLM_SMALL_MODEL}")
+            _ollama_pull_model(executable, LLM_SMALL_MODEL)
+            ollama_models = _detect_ollama_models()
+
+        _set_capability_task(task_id, stage="configure", progress=90, message=f"启用本地 LLM：{model}")
+        configs = _upsert_model_config(store.load_model_configs(), _local_llm_config(model))
+        configs = _prefer_model_for_capability(configs, "llm", LLM_LOCAL_MODEL_ID)
+        vision_config = _recommended_vision_config(ollama_models)
+        if vision_config:
+            configs = _upsert_model_config(configs, vision_config)
+        store.save_model_configs(configs)
+        _sync_runtime_model_providers()
+        _set_capability_task(
+            task_id,
+            status="done",
+            stage="done",
+            progress=100,
+            message=f"本地 LLM 已启用：{model}",
+            error="",
+        )
+    except Exception as exc:  # pragma: no cover - surfaced through the task API.
+        _set_capability_task(
+            task_id,
+            status="error",
+            stage="error",
+            progress=100,
+            message="本地 LLM 安装或配置失败",
+            error=str(exc),
+        )
+
+
+def _ensure_ollama_executable(*, allow_install: bool = True) -> str:
+    executable = shutil.which("ollama")
+    if executable:
+        return executable
+    if allow_install and _install_ollama_for_platform():
+        executable = shutil.which("ollama")
+        if executable:
+            return executable
+    install_hint = "brew install ollama" if sys.platform == "darwin" else "winget install -e --id Ollama.Ollama"
+    raise RuntimeError(f"未找到 Ollama；请确认已安装，或手动运行 {install_hint}。")
+
+
+def _install_ollama_for_platform() -> bool:
+    if sys.platform == "darwin":
+        return _install_ollama_with_brew()
+    return _install_ollama_with_winget()
+
+
+def _install_ollama_with_brew() -> bool:
+    brew = shutil.which("brew")
+    if not brew:
+        return False
+    try:
+        result = subprocess.run(
+            [brew, "install", "ollama"],
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+            timeout=900,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _install_ollama_with_winget() -> bool:
+    winget = shutil.which("winget")
+    if not winget:
+        return False
+    try:
+        result = subprocess.run(
+            [
+                winget,
+                "install",
+                "-e",
+                "--id",
+                OLLAMA_WINGET_ID,
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+            ],
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+            timeout=900,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _start_ollama_service(executable: str) -> None:
+    try:
+        subprocess.Popen(
+            [executable, "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except OSError:
+        return
+
+
+def _wait_for_ollama_service(timeout_seconds: float) -> bool:
+    import time
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if _ollama_service_reachable():
+            return True
+        time.sleep(0.5)
+    return _ollama_service_reachable()
+
+
+def _ollama_service_reachable() -> bool:
+    try:
+        request = urlrequest.Request(f"{OLLAMA_BASE_URL}/api/tags", method="GET")
+        with urlrequest.urlopen(request, timeout=1):
+            return True
+    except (HTTPError, URLError, TimeoutError, ValueError, OSError):
+        return False
+
+
+def _ollama_pull_model(executable: str, model: str) -> bool:
+    try:
+        result = subprocess.run(
+            [executable, "pull", model],
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+            timeout=3600,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def _start_embedded_sam_install_task(task_id: str) -> None:
@@ -1316,7 +1938,27 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _detect_ollama_models_from_service() -> list[str]:
+    try:
+        request = urlrequest.Request(f"{OLLAMA_BASE_URL}/api/tags", method="GET")
+        with urlrequest.urlopen(request, timeout=1) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, ValueError, OSError, json.JSONDecodeError):
+        return []
+    models: list[str] = []
+    for item in data.get("models", []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("model") or "").strip()
+        if name:
+            models.append(name)
+    return models
+
+
 def _detect_ollama_models() -> list[str]:
+    service_models = _detect_ollama_models_from_service()
+    if service_models:
+        return service_models
     executable = shutil.which("ollama")
     if not executable:
         return []
@@ -1339,6 +1981,116 @@ def _detect_ollama_models() -> list[str]:
         if parts:
             models.append(parts[0])
     return models
+
+
+def _mac_local_llm_diagnostics() -> dict[str, Any]:
+    brew_path = shutil.which("brew")
+    ollama_path = shutil.which("ollama")
+    service_reachable = _ollama_service_reachable()
+    ollama_models = _detect_ollama_models()
+    configs = store.load_model_configs()
+    configured_llm = next(
+        (
+            _public_model_config(config)
+            for config in configs
+            if "llm" in set(config.get("capabilities", [])) and config.get("enabled", True)
+        ),
+        None,
+    )
+    recommended_commands = []
+    if not brew_path:
+        recommended_commands.append("安装 Homebrew：https://brew.sh")
+    if not ollama_path:
+        recommended_commands.append("brew install ollama")
+    if ollama_path and not service_reachable:
+        recommended_commands.append("ollama serve")
+    if LLM_DEFAULT_MODEL not in set(ollama_models):
+        recommended_commands.append(f"ollama pull {LLM_DEFAULT_MODEL}")
+    if LLM_SMALL_MODEL not in set(ollama_models):
+        recommended_commands.append(f"ollama pull {LLM_SMALL_MODEL}")
+    if LLM_VISION_MODEL not in set(ollama_models):
+        recommended_commands.append(f"ollama pull {LLM_VISION_MODEL}")
+    ok = bool(ollama_path and service_reachable and configured_llm and configured_llm.get("provider") == "ollama")
+    return {
+        "ok": ok,
+        "platform": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+            "mac_ver": platform.mac_ver()[0],
+            "python": platform.python_version(),
+        },
+        "hardware": _mac_hardware_summary(),
+        "homebrew": {"path": brew_path, "available": bool(brew_path)},
+        "ollama": {
+            "path": ollama_path,
+            "installed": bool(ollama_path),
+            "base_url": OLLAMA_BASE_URL,
+            "service_reachable": service_reachable,
+            "models": ollama_models,
+        },
+        "project": {
+            "project_dir": str(store.project_dir),
+            "configured_llm": configured_llm,
+            "model_configs": [_public_model_config(config) for config in configs],
+            "runtime_default_provider": runtime.default_provider_id,
+        },
+        "recommendation": {
+            "primary_llm": LLM_DEFAULT_MODEL,
+            "realtime_llm": LLM_REALTIME_MODEL,
+            "small_llm": LLM_SMALL_MODEL,
+            "vision": LLM_VISION_MODEL,
+            "commands": recommended_commands,
+        },
+    }
+
+
+def _mac_hardware_summary() -> dict[str, Any]:
+    if sys.platform != "darwin":
+        return {}
+    summary: dict[str, Any] = {}
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+            timeout=2,
+        )
+        if result.returncode == 0:
+            summary["chip"] = result.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "hw.memsize"],
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+            timeout=2,
+        )
+        if result.returncode == 0:
+            bytes_value = int(result.stdout.strip())
+            summary["memory_bytes"] = bytes_value
+            summary["memory_gb"] = round(bytes_value / (1024**3), 1)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        pass
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "hw.ncpu"],
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+            timeout=2,
+        )
+        if result.returncode == 0:
+            summary["cpu_count"] = int(result.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        pass
+    return summary
 
 
 def _detect_local_model_services() -> dict[str, dict[str, Any]]:
@@ -1387,7 +2139,7 @@ def _capability_suggestions(
     if capability == "llm":
         if ollama_models:
             return ["可以直接使用已安装的 Ollama 模型。"]
-        return ["安装 Ollama 后拉取 qwen2.5:1.5b 或 gemma3:1b。"]
+        return [f"点击一键安装并启用本地 LLM；默认会准备实时模型 {LLM_REALTIME_MODEL}。"]
     if capability == "image_generation":
         if local_services.get("image_generation", {}).get("available"):
             return ["检测到本地图片生成服务，可以一键配置。"]
@@ -1403,7 +2155,7 @@ def _capability_suggestions(
 
 def _missing_capability_message(capability: str) -> str:
     messages = {
-        "llm": "未检测到可用本地 LLM；建议安装 Ollama 并准备 qwen2.5:1.5b。",
+        "llm": f"未检测到可用本地 LLM；可一键安装 Ollama 并准备 {LLM_REALTIME_MODEL}。",
         "image_generation": "未检测到本地图片生成器；可先导入图片，或在高级配置接入图片生成服务。",
         "segmentation": "未检测到可直接启用的 SAM；可以安装内置 MobileSAM。",
     }
@@ -1618,6 +2370,140 @@ def _regions_from_provider_response(data: Any, config: dict[str, Any]) -> list[M
             )
         )
     return regions
+
+
+def _image_generation_config(provider_id: str | None) -> dict[str, Any] | None:
+    configs = store.load_model_configs()
+    if provider_id:
+        selected = next((config for config in configs if config.get("id") == provider_id), None)
+        if selected and "image_generation" in set(selected.get("capabilities", [])):
+            return selected
+    return _find_enabled_model("image_generation")
+
+
+def _call_openai_image_provider(
+    config: dict[str, Any],
+    generation_id: str,
+    prompt: str,
+    width: int,
+    height: int,
+    count: int,
+) -> list[dict[str, Any]]:
+    model = str(config.get("model") or "").strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="Image generation model is required")
+    body = {
+        "model": model,
+        "prompt": prompt,
+        "n": max(1, min(count, 4)),
+        "size": _openai_image_size(width, height),
+    }
+    try:
+        data = _openai_json_request(
+            config,
+            "POST",
+            "images/generations",
+            body,
+            timeout=float(os.getenv("AGENT_ENGINE_REMOTE_IMAGE_TIMEOUT", "180")),
+        )
+    except RemoteProviderError as exc:
+        raise HTTPException(status_code=502, detail=f"Image generation failed: {exc}") from exc
+    raw_images = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(raw_images, list) or not raw_images:
+        raise HTTPException(status_code=502, detail="Image generation response had no images")
+    candidates: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_images[: max(1, min(count, 4))]):
+        if not isinstance(raw, dict):
+            continue
+        asset_name = _save_generated_image_asset(config, raw, generation_id, index)
+        candidates.append(
+            {
+                "id": f"{generation_id}_candidate_{index + 1}",
+                "url": f"/api/assets/{asset_name}",
+                "prompt": prompt,
+                "width": width,
+                "height": height,
+                "provider_id": config.get("id") or "model_remote_image",
+            }
+        )
+    if not candidates:
+        raise HTTPException(status_code=502, detail="Image generation response could not be saved")
+    return candidates
+
+
+def _openai_image_size(width: int, height: int) -> str:
+    if abs(width - height) <= max(width, height) * 0.08:
+        return "1024x1024"
+    if width > height:
+        return "1536x1024"
+    return "1024x1536"
+
+
+def _save_generated_image_asset(
+    config: dict[str, Any],
+    raw: dict[str, Any],
+    generation_id: str,
+    index: int,
+) -> str:
+    if raw.get("b64_json"):
+        image_bytes = base64.b64decode(str(raw["b64_json"]))
+        suffix = ".png"
+    elif raw.get("url"):
+        image_bytes, suffix = _download_generated_image(
+            str(raw["url"]),
+            str(config.get("api_key") or ""),
+            str(config.get("base_url") or ""),
+        )
+    else:
+        raise HTTPException(status_code=502, detail="Image candidate missing url or b64_json")
+    asset_name = f"{generation_id}_{index + 1}{suffix}"
+    destination = store.assets_dir / asset_name
+    store.initialize()
+    destination.write_bytes(image_bytes)
+    return asset_name
+
+
+def _download_generated_image(url: str, api_key: str = "", base_url: str = "") -> tuple[bytes, str]:
+    headers = {
+        "Accept": "image/*",
+        "User-Agent": "OpenAI/NodeJS/4.0.0",
+    }
+    if api_key and _same_origin(url, base_url):
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = urlrequest.Request(url, headers=headers, method="GET")
+    try:
+        with urlrequest.urlopen(request, timeout=float(os.getenv("AGENT_ENGINE_REMOTE_IMAGE_DOWNLOAD_TIMEOUT", "120"))) as response:
+            content_type = response.headers.get("content-type", "")
+            suffix = _image_suffix_for_content_type(content_type) or _image_suffix_for_url(url)
+            return response.read(), suffix
+    except (HTTPError, URLError, TimeoutError, ValueError, OSError) as exc:
+        raise HTTPException(status_code=502, detail=f"Image download failed: {exc}") from exc
+
+
+def _same_origin(url: str, base_url: str) -> bool:
+    if not url or not base_url:
+        return False
+    from urllib.parse import urlparse
+
+    return urlparse(url).netloc == urlparse(base_url).netloc
+
+
+def _image_suffix_for_content_type(content_type: str) -> str:
+    lowered = content_type.lower()
+    if "jpeg" in lowered or "jpg" in lowered:
+        return ".jpg"
+    if "webp" in lowered:
+        return ".webp"
+    if "gif" in lowered:
+        return ".gif"
+    if "png" in lowered:
+        return ".png"
+    return ""
+
+
+def _image_suffix_for_url(url: str) -> str:
+    suffix = Path(url.split("?", 1)[0]).suffix.lower()
+    return suffix if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp"} else ".png"
 
 
 def _points_from_region_payload(raw: dict[str, Any]) -> list[Point]:
@@ -2085,3 +2971,14 @@ def _save_uploaded_asset(file: UploadFile, prefix: str) -> str:
 
 
 _sync_runtime_model_providers()
+_ensure_enabled_extension_actions(_load_action_extensions())
+_sync_runtime_action_extensions()
+
+
+@app.on_event("startup")
+async def _resume_runtime_after_backend_start() -> None:
+    _sync_runtime_model_providers()
+    _ensure_enabled_extension_actions(_load_action_extensions())
+    _sync_runtime_action_extensions()
+    if runtime.world.running:
+        await runtime.start_background()

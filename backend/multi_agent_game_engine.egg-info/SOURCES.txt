@@ -4,9 +4,11 @@ backend/agent_engine/__init__.py
 backend/agent_engine/api/__init__.py
 backend/agent_engine/api/main.py
 backend/agent_engine/engine/__init__.py
+backend/agent_engine/engine/action_extensions.py
 backend/agent_engine/engine/environment_ai.py
 backend/agent_engine/engine/geometry.py
 backend/agent_engine/engine/rules.py
+backend/agent_engine/engine/scene_director.py
 backend/agent_engine/engine/simulation.py
 backend/agent_engine/engine/world.py
 backend/agent_engine/models/__init__.py
@@ -18,6 +20,9 @@ backend/multi_agent_game_engine.egg-info/SOURCES.txt
 backend/multi_agent_game_engine.egg-info/dependency_links.txt
 backend/multi_agent_game_engine.egg-info/requires.txt
 backend/multi_agent_game_engine.egg-info/top_level.txt
+tests/test_action_extensions.py
+tests/test_agent_region_movement.py
+tests/test_api.py
 tests/test_environment_ai.py
 tests/test_geometry_and_rules.py
 tests/test_model_provider.py

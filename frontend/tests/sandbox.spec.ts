@@ -21,6 +21,8 @@ test("renders the transparent 2D workstation with floating panels", async ({ pag
   await expect(page.getByRole("button", { name: "暂停" })).toBeVisible();
   await expect(page.getByRole("button", { name: "停止" })).toBeVisible();
   await expect(page.getByRole("button", { name: "回归零点" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "背景透明度" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "应用默认面板布局" })).toBeVisible();
   await expect(page.getByRole("button", { name: "切换黑白反色" })).toBeVisible();
 
   await expect(page.getByTestId("panel-tools")).toBeVisible();
@@ -48,6 +50,28 @@ test("renders the transparent 2D workstation with floating panels", async ({ pag
   await expect(page.getByTestId("panel-properties").locator(".property-heading strong")).toHaveText("Agent");
 });
 
+test("top controls adjust app background opacity without map region controls", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.goto("/");
+
+  const controls = page.getByTestId("transport-controls");
+  await expect(controls.getByRole("button", { name: "背景透明度" })).toBeVisible();
+  await controls.getByRole("button", { name: "背景透明度" }).click();
+  await expect(page.getByTestId("background-opacity-popover")).toBeVisible();
+  await expect(page.getByText("应用背景")).toBeVisible();
+  await expect(page.getByLabel("应用背景不透明度")).toBeVisible();
+  await expect(page.getByRole("button", { name: "全图" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "区域", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "区域外" })).toHaveCount(0);
+
+  await page.getByLabel("应用背景不透明度").fill("0.5");
+  const opacity = await page.locator(".desktop-workspace").evaluate((element) =>
+    getComputedStyle(element).getPropertyValue("--app-background-opacity").trim()
+  );
+  expect(opacity).toBe("0.5");
+  await expect(page.getByText("只调整应用窗口底色，不影响地图或 agent 场景。")).toBeVisible();
+});
+
 test("floating panels drag and snap to the scene edge", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 820 });
   await page.goto("/");
@@ -67,7 +91,55 @@ test("floating panels drag and snap to the scene edge", async ({ page }) => {
   const after = await panel.boundingBox();
   expect(after).not.toBeNull();
   expect(after!.x).not.toBe(before!.x);
-  await expect(panel).toHaveAttribute("data-docked", /scene-/);
+  await expect(panel).toHaveAttribute("data-docked", /screen:/);
+});
+
+test("floating panels snap to each other", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.goto("/");
+
+  const tools = page.getByTestId("panel-tools");
+  const scene = page.getByTestId("panel-scene");
+  const title = page.getByTestId("panel-title-tools");
+  const toolsBox = await tools.boundingBox();
+  const sceneBox = await scene.boundingBox();
+  const titleBox = await title.boundingBox();
+  expect(toolsBox).not.toBeNull();
+  expect(sceneBox).not.toBeNull();
+  expect(titleBox).not.toBeNull();
+
+  const targetX = sceneBox!.x - toolsBox!.width - 10;
+  const targetY = sceneBox!.y;
+  await page.mouse.move(titleBox!.x + titleBox!.width / 2, titleBox!.y + titleBox!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(targetX + titleBox!.width / 2, targetY + titleBox!.height / 2, { steps: 10 });
+  await page.mouse.up();
+
+  const snappedTools = await tools.boundingBox();
+  const snappedScene = await scene.boundingBox();
+  expect(snappedTools).not.toBeNull();
+  expect(snappedScene).not.toBeNull();
+  expect(snappedScene!.x - (snappedTools!.x + snappedTools!.width)).toBeCloseTo(8, 0);
+  await expect(tools).toHaveAttribute("data-docked", /panel:/);
+});
+
+test("floating panels stay inside the bottom edge while dragging", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.goto("/");
+
+  const panel = page.getByTestId("panel-scene");
+  const title = page.getByTestId("panel-title-scene");
+  const titleBox = await title.boundingBox();
+  expect(titleBox).not.toBeNull();
+
+  await page.mouse.move(titleBox!.x + titleBox!.width / 2, titleBox!.y + titleBox!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(640, 900, { steps: 12 });
+  await page.mouse.up();
+
+  const panelBox = await panel.boundingBox();
+  expect(panelBox).not.toBeNull();
+  expect(panelBox!.y + panelBox!.height).toBeLessThanOrEqual(804);
 });
 
 test("floating panels minimize and expand from the titlebar button", async ({ page }) => {
@@ -95,7 +167,7 @@ test("scene window keeps an outer margin", async ({ page }) => {
   expect(scene!.height).toBeLessThan(820);
 });
 
-test("scene material and grid use rectangular linear fading", async ({ page }) => {
+test("scene material and grid use stable canvas rendering", async ({ page }) => {
   await page.goto("/");
 
   const sceneStyles = await page.getByTestId("scene-viewport").evaluate((element) => {
@@ -124,40 +196,60 @@ test("scene material and grid use rectangular linear fading", async ({ page }) =
   expect(canvasShellStyles.backgroundImage).toBe("none");
   expect(canvasShellStyles.boxShadow).toBe("none");
 
-  const gridStyles = await page.locator(".scene-window-grid").evaluate((element) => {
+  const surfaceStyles = await page.locator(".scene-window-surface").evaluate((element) => {
     const style = getComputedStyle(element);
-    const prefixed = style as CSSStyleDeclaration & { webkitMaskImage?: string };
+    const prefixed = style as CSSStyleDeclaration & {
+      webkitBackdropFilter?: string;
+      webkitMaskImage?: string;
+    };
     return {
-      backgroundImage: style.backgroundImage,
-      maskImage: style.maskImage || prefixed.webkitMaskImage
+      borderRadius: style.borderRadius,
+      maskImage: style.maskImage || prefixed.webkitMaskImage,
+      backdropFilter: style.backdropFilter || prefixed.webkitBackdropFilter
     };
   });
-  expect(gridStyles.backgroundImage).toContain("rgba(0, 0, 0");
-  expect(gridStyles.maskImage).toContain("linear-gradient");
-  expect(gridStyles.maskImage).not.toContain("radial-gradient");
+  expect(surfaceStyles.borderRadius).toBe("28px");
+  expect(surfaceStyles.maskImage === "none" || surfaceStyles.maskImage === "").toBeTruthy();
+  expect(surfaceStyles.backdropFilter === "none" || surfaceStyles.backdropFilter === "").toBeTruthy();
+
+  const gridState = await page.getByTestId("scene-grid-canvas").evaluate((element) => {
+    const canvas = element as HTMLCanvasElement;
+    const style = getComputedStyle(element);
+    const box = canvas.getBoundingClientRect();
+    return {
+      display: style.display,
+      width: canvas.width,
+      height: canvas.height,
+      cssWidth: box.width,
+      cssHeight: box.height
+    };
+  });
+  expect(gridState.display).toBe("block");
+  expect(gridState.width).toBeGreaterThan(0);
+  expect(gridState.height).toBeGreaterThan(0);
+  expect(gridState.cssWidth).toBeGreaterThan(0);
+  expect(gridState.cssHeight).toBeGreaterThan(0);
 
   const materialStyles = await page.locator(".scene-window-material").evaluate((element) => {
     const style = getComputedStyle(element);
     const prefixed = style as CSSStyleDeclaration & {
       webkitBackdropFilter?: string;
       webkitMaskImage?: string;
-      webkitMaskComposite?: string;
     };
     return {
+      backgroundColor: style.backgroundColor,
       backgroundImage: style.backgroundImage,
+      clipPath: style.clipPath,
       maskImage: style.maskImage || prefixed.webkitMaskImage,
-      maskComposite: style.maskComposite || prefixed.webkitMaskComposite,
       backdropFilter: style.backdropFilter || prefixed.webkitBackdropFilter
     };
   });
-  expect(materialStyles.backgroundImage).toContain("linear-gradient");
-  expect(materialStyles.backgroundImage).toContain("0.75");
+  expect(materialStyles.backgroundImage).toBe("none");
+  expect(materialStyles.backgroundColor).toBe("rgba(0, 0, 0, 0)");
   expect(materialStyles.backgroundImage).not.toContain("radial-gradient");
-  expect(materialStyles.maskImage).toContain("linear-gradient");
-  expect(materialStyles.maskImage).not.toContain("radial-gradient");
-  expect(materialStyles.maskComposite).not.toContain("intersect");
-  expect(materialStyles.maskComposite).not.toContain("source-in");
-  expect(materialStyles.backdropFilter).toContain("blur");
+  expect(materialStyles.clipPath).toBe("none");
+  expect(materialStyles.maskImage).toBe("none");
+  expect(materialStyles.backdropFilter).toBe("none");
 });
 
 test("floating panels resize from edges and scroll clipped content", async ({ page }) => {
@@ -204,7 +296,7 @@ test("floating panels resize from edges and scroll clipped content", async ({ pa
 test("floating panel layout persists across reloads", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 820 });
   await page.goto("/");
-  await page.evaluate(() => window.localStorage.removeItem("agent-workstation.panel-layout.v2"));
+  await page.evaluate(() => window.localStorage.removeItem("agent-workstation.panel-layout.v3"));
   await page.reload();
 
   const panel = page.getByTestId("panel-scene");
@@ -237,6 +329,48 @@ test("floating panel layout persists across reloads", async ({ page }) => {
   expect(restored!.height).toBeCloseTo(saved!.height, 0);
 });
 
+test("panel layout reset button applies and saves the default arrangement", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.goto("/");
+  await page.evaluate(() => window.localStorage.removeItem("agent-workstation.panel-layout.v3"));
+  await page.reload();
+
+  const scene = page.getByTestId("panel-scene");
+  const title = page.getByTestId("panel-title-scene");
+  const titleBox = await title.boundingBox();
+  expect(titleBox).not.toBeNull();
+
+  await page.mouse.move(titleBox!.x + titleBox!.width / 2, titleBox!.y + titleBox!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(640, 600, { steps: 10 });
+  await page.mouse.up();
+  const moved = await scene.boundingBox();
+  expect(moved).not.toBeNull();
+
+  await page.getByRole("button", { name: "应用默认面板布局" }).click();
+  const reset = await readPanelBoxes(page);
+  for (const box of reset) {
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(1280);
+    expect(box.y + box.height).toBeLessThanOrEqual(820);
+  }
+  for (let index = 0; index < reset.length; index += 1) {
+    for (let other = index + 1; other < reset.length; other += 1) {
+      expect(boxesOverlap(reset[index], reset[other])).toBe(false);
+    }
+  }
+  const resetScene = await scene.boundingBox();
+  expect(resetScene).not.toBeNull();
+  expect(resetScene!.x).not.toBeCloseTo(moved!.x, 0);
+
+  await page.reload();
+  const restoredScene = await page.getByTestId("panel-scene").boundingBox();
+  expect(restoredScene).not.toBeNull();
+  expect(restoredScene!.x).toBeCloseTo(resetScene!.x, 0);
+  expect(restoredScene!.y).toBeCloseTo(resetScene!.y, 0);
+});
+
 test("floating panels are more legible without becoming solid blocks", async ({ page }) => {
   await page.goto("/");
 
@@ -263,17 +397,17 @@ test("workspace can invert grid and translucent material tone", async ({ page })
   await expect(toggle).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator(".desktop-workspace")).toHaveClass(/tone-dark/);
 
-  const invertedStyles = await page.locator(".scene-window-grid").evaluate((element) => {
+  const invertedStyles = await page.getByTestId("scene-viewport").evaluate((element) => {
     const style = getComputedStyle(element);
-    return style.backgroundImage;
+    return style.getPropertyValue("--grid-rgb").trim();
   });
-  expect(invertedStyles).toContain("rgba(255, 255, 255");
+  expect(invertedStyles).toBe("255, 255, 255");
 
   const material = await page.locator(".scene-window-material").evaluate((element) => {
     const style = getComputedStyle(element);
-    return style.backgroundImage;
+    return style.backgroundColor;
   });
-  expect(material).toContain("rgba(10, 10, 10");
+  expect(material).toBe("rgba(0, 0, 0, 0)");
   expect(material).not.toContain("radial-gradient");
 });
 
@@ -362,7 +496,8 @@ test("workspace zoom and pan still work after tone inversion", async ({ page }) 
   const after = await readGridState(scene);
   expect(after.minorSize).toBeGreaterThan(before.minorSize);
   expect(after.panX).not.toBe(before.panX);
-  expect(after.backgroundImage).toContain("rgba(255, 255, 255");
+  expect(after.gridRgb).toBe("255, 255, 255");
+  expect(after.canvasWidth).toBeGreaterThan(0);
 });
 
 test("origin button centers the zero point without changing zoom", async ({ page }) => {
@@ -956,6 +1091,106 @@ test("sam capability starts embedded MobileSAM install without service address",
   await expect(modelsPanel.getByTestId("model-install-task-segmentation")).toContainText("内置 MobileSAM 已启用", { timeout: 4000 });
 });
 
+test("llm capability starts local Ollama model install when no model is available", async ({ page }) => {
+  let installed = false;
+  await page.route("**/api/model-capabilities/status", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        capabilities: [
+          {
+            id: "llm",
+            label: "语言模型 LLM",
+            status: installed ? "ready" : "installable",
+            summary: installed ? "已配置：本地 LLM - qwen2.5:7b" : "可安装并启用本地 LLM：默认下载 qwen2.5:7b",
+            configured: installed,
+            configured_model_id: installed ? "model_local_llm" : null,
+            configured_model_name: installed ? "本地 LLM - qwen2.5:7b" : null,
+            local_available: false,
+            installable: !installed,
+            recommended_local: null,
+            suggestions: ["点击一键安装并启用本地 LLM；默认会准备 qwen2.5:7b。"]
+          },
+          {
+            id: "image_generation",
+            label: "图片生成",
+            status: "missing",
+            summary: "未配置图片生成",
+            configured: false,
+            configured_model_id: null,
+            configured_model_name: null,
+            local_available: false,
+            installable: false,
+            recommended_local: null,
+            suggestions: []
+          },
+          {
+            id: "segmentation",
+            label: "SAM 分层",
+            status: "installable",
+            summary: "可安装内置 MobileSAM，本机完成分层，无需服务地址",
+            configured: false,
+            configured_model_id: null,
+            configured_model_name: null,
+            local_available: false,
+            installable: true,
+            recommended_local: null,
+            suggestions: []
+          }
+        ],
+        environment: {}
+      })
+    })
+  );
+  await page.route("**/api/model-capabilities/llm/install-local", async (route) => {
+    installed = true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        task: {
+          id: "task_local_llm",
+          capability: "llm",
+          title: "下载并启用本地 LLM",
+          status: "running",
+          stage: "pull_model",
+          progress: 50,
+          message: "下载 qwen2.5:7b",
+          error: null
+        }
+      })
+    });
+  });
+  await page.route("**/api/model-capabilities/tasks/task_local_llm", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        task: {
+          id: "task_local_llm",
+          capability: "llm",
+          title: "下载并启用本地 LLM",
+          status: "done",
+          stage: "done",
+          progress: 100,
+          message: "本地 LLM 已启用：qwen2.5:7b",
+          error: null
+        }
+      })
+    })
+  );
+
+  await page.goto("/");
+  const modelsPanel = page.getByTestId("panel-models");
+  const installButton = modelsPanel.getByRole("button", { name: /qwen2\.5:7b/ });
+  await expect(installButton).toBeEnabled();
+  await installButton.click();
+  await expect(modelsPanel.getByTestId("model-install-task-llm")).toContainText("正在连接 Ollama 并准备本地 LLM");
+  await expect(modelsPanel.getByTestId("model-install-task-llm")).toContainText("本地 LLM 已启用：qwen2.5:7b", { timeout: 4000 });
+});
+
 test("configured local model actions show inline confirmation", async ({ page }) => {
   await page.route("**/api/model-capabilities/status", (route) =>
     route.fulfill({
@@ -1244,14 +1479,34 @@ test("agent labels and origin icons stay crisp at a fixed screen size during zoo
 async function readGridState(scene: import("@playwright/test").Locator) {
   return scene.evaluate((element) => {
     const style = getComputedStyle(element);
-    const grid = getComputedStyle(element.querySelector(".scene-window-grid") as Element);
+    const canvas = element.querySelector(".scene-window-grid-canvas") as HTMLCanvasElement | null;
     return {
       density: element.getAttribute("data-grid-density"),
       panX: style.getPropertyValue("--grid-pan-x").trim(),
       panY: style.getPropertyValue("--grid-pan-y").trim(),
+      gridRgb: style.getPropertyValue("--grid-rgb").trim(),
       minorSize: parseFloat(style.getPropertyValue("--grid-size-minor")),
       majorSize: parseFloat(style.getPropertyValue("--grid-size-major")),
-      backgroundImage: grid.backgroundImage
+      canvasWidth: canvas?.width ?? 0,
+      canvasHeight: canvas?.height ?? 0
     };
   });
+}
+
+async function readPanelBoxes(page: import("@playwright/test").Page) {
+  const ids = ["tools", "scene", "regions", "regionDraw", "agents", "mapStudio", "models", "properties"];
+  const boxes = [];
+  for (const id of ids) {
+    const box = await page.getByTestId(`panel-${id}`).boundingBox();
+    expect(box).not.toBeNull();
+    boxes.push(box!);
+  }
+  return boxes;
+}
+
+function boxesOverlap(
+  a: { x: number; y: number; width: number; height: number },
+  b: { x: number; y: number; width: number; height: number }
+) {
+  return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 }

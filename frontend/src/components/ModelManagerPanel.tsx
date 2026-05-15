@@ -1,10 +1,18 @@
 import { Bot, CheckCircle2, Cloud, ImagePlus, Layers3, RefreshCw, WandSparkles } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { ModelCapabilityId, ModelCapabilityStatus, ModelCapabilityTask, ModelConfig } from "../types";
+import type {
+  ModelCapabilityId,
+  ModelCapabilityStatus,
+  ModelCapabilityTask,
+  ModelConfig,
+  RemoteModelOption,
+  RemoteModelTestResult
+} from "../types";
 
 type RemoteDraft = {
   baseUrl: string;
   apiKey: string;
+  apiKeySet: boolean;
   model: string;
 };
 
@@ -16,6 +24,8 @@ type Props = {
   onConfigureLocal: (capability: ModelCapabilityId) => void;
   onInstallLocal: (capability: ModelCapabilityId) => void;
   onConfigureRemote: (capability: ModelCapabilityId, draft: RemoteDraft) => void;
+  onFetchRemoteModels: (capability: ModelCapabilityId, draft: RemoteDraft) => Promise<RemoteModelOption[]>;
+  onTestRemote: (capability: ModelCapabilityId, draft: RemoteDraft) => Promise<RemoteModelTestResult>;
 };
 
 const CAPABILITY_ORDER: ModelCapabilityId[] = ["llm", "image_generation", "segmentation"];
@@ -59,7 +69,17 @@ const CAPABILITY_META: Record<
   }
 };
 
-export function ModelManagerPanel({ statuses, tasks, models, onRefresh, onConfigureLocal, onInstallLocal, onConfigureRemote }: Props) {
+export function ModelManagerPanel({
+  statuses,
+  tasks,
+  models,
+  onRefresh,
+  onConfigureLocal,
+  onInstallLocal,
+  onConfigureRemote,
+  onFetchRemoteModels,
+  onTestRemote
+}: Props) {
   const [activeCapability, setActiveCapability] = useState<ModelCapabilityId>("llm");
   const [advancedOpen, setAdvancedOpen] = useState<Record<ModelCapabilityId, boolean>>({
     llm: false,
@@ -71,6 +91,8 @@ export function ModelManagerPanel({ statuses, tasks, models, onRefresh, onConfig
     image_generation: defaultRemoteDraft("image_generation", models),
     segmentation: defaultRemoteDraft("segmentation", models)
   }));
+  const [remoteModelOptions, setRemoteModelOptions] = useState<Partial<Record<ModelCapabilityId, RemoteModelOption[]>>>({});
+  const [remoteStatus, setRemoteStatus] = useState<Partial<Record<ModelCapabilityId, { loading: boolean; message: string; ok: boolean | null }>>>({});
   const statusMap = new Map(statuses.map((status) => [status.id, status]));
 
   useEffect(() => {
@@ -100,6 +122,45 @@ export function ModelManagerPanel({ statuses, tasks, models, onRefresh, onConfig
         ...patch
       }
     }));
+  }
+
+  async function loadRemoteModels(capability: ModelCapabilityId) {
+    const draft = remoteDrafts[capability];
+    setRemoteStatus((current) => ({ ...current, [capability]: { loading: true, message: "正在读取模型列表", ok: null } }));
+    try {
+      const options = await onFetchRemoteModels(capability, draft);
+      setRemoteModelOptions((current) => ({ ...current, [capability]: options }));
+      setRemoteStatus((current) => ({
+        ...current,
+        [capability]: { loading: false, message: options.length ? `已读取 ${options.length} 个可用模型` : "没有匹配当前能力的模型", ok: options.length > 0 }
+      }));
+    } catch (error) {
+      setRemoteStatus((current) => ({
+        ...current,
+        [capability]: { loading: false, message: error instanceof Error ? error.message : "读取模型列表失败", ok: false }
+      }));
+    }
+  }
+
+  async function testRemote(capability: ModelCapabilityId) {
+    const draft = remoteDrafts[capability];
+    setRemoteStatus((current) => ({ ...current, [capability]: { loading: true, message: "正在测试 API 响应", ok: null } }));
+    try {
+      const result = await onTestRemote(capability, draft);
+      setRemoteStatus((current) => ({
+        ...current,
+        [capability]: {
+          loading: false,
+          message: `${result.message}${result.sample ? `：${result.sample}` : ""}`,
+          ok: result.ok
+        }
+      }));
+    } catch (error) {
+      setRemoteStatus((current) => ({
+        ...current,
+        [capability]: { loading: false, message: error instanceof Error ? error.message : "API 测试失败", ok: false }
+      }));
+    }
   }
 
   return (
@@ -132,10 +193,14 @@ export function ModelManagerPanel({ statuses, tasks, models, onRefresh, onConfig
         advancedOpen={advancedOpen[activeCapability]}
         capability={activeCapability}
         draft={remoteDrafts[activeCapability]}
+        remoteModels={remoteModelOptions[activeCapability] ?? []}
+        remoteStatus={remoteStatus[activeCapability] ?? null}
         onConfigureLocal={onConfigureLocal}
         onInstallLocal={onInstallLocal}
         onConfigureRemote={() => onConfigureRemote(activeCapability, remoteDrafts[activeCapability])}
+        onLoadRemoteModels={() => void loadRemoteModels(activeCapability)}
         onRefresh={onRefresh}
+        onTestRemote={() => void testRemote(activeCapability)}
         task={tasks[activeCapability] ?? null}
         onToggleAdvanced={() => setAdvancedOpen((current) => ({ ...current, [activeCapability]: !current[activeCapability] }))}
         onUpdateDraft={(patch) => updateRemoteDraft(activeCapability, patch)}
@@ -149,36 +214,44 @@ function CapabilityDetail({
   capability,
   status,
   draft,
+  remoteModels,
+  remoteStatus,
   advancedOpen,
   task,
   onRefresh,
   onConfigureLocal,
   onInstallLocal,
   onConfigureRemote,
+  onLoadRemoteModels,
+  onTestRemote,
   onToggleAdvanced,
   onUpdateDraft
 }: {
   capability: ModelCapabilityId;
   status: ModelCapabilityStatus;
   draft: RemoteDraft;
+  remoteModels: RemoteModelOption[];
+  remoteStatus: { loading: boolean; message: string; ok: boolean | null } | null;
   advancedOpen: boolean;
   task: ModelCapabilityTask | null;
   onRefresh: () => void;
   onConfigureLocal: (capability: ModelCapabilityId) => void;
   onInstallLocal: (capability: ModelCapabilityId) => void;
   onConfigureRemote: () => void;
+  onLoadRemoteModels: () => void;
+  onTestRemote: () => void;
   onToggleAdvanced: () => void;
   onUpdateDraft: (patch: Partial<RemoteDraft>) => void;
 }) {
   const meta = CAPABILITY_META[capability];
   const canUseLocal = Boolean(status.recommended_local);
-  const canInstallLocal = capability === "segmentation" && status.installable;
+  const canInstallLocal = (capability === "llm" || capability === "segmentation") && status.installable;
   const isInstalling = task?.status === "running";
   const isReady = status.status === "ready";
   const actionLabel = isInstalling
     ? `安装中 ${task.progress}%`
     : canInstallLocal
-      ? "安装并启用内置 SAM"
+      ? installActionLabel(capability)
       : isReady
         ? readyActionLabel(capability)
         : meta.localLabel;
@@ -249,13 +322,49 @@ function CapabilityDetail({
           </label>
           <label>
             <span>API Key</span>
-            <input aria-label={`${meta.title} API Key`} onChange={(event) => onUpdateDraft({ apiKey: event.currentTarget.value })} value={draft.apiKey} />
+            <input
+              aria-label={`${meta.title} API Key`}
+              onChange={(event) => onUpdateDraft({ apiKey: event.currentTarget.value })}
+              placeholder={draft.apiKeySet ? "已保存，留空沿用旧 key" : ""}
+              type="password"
+              value={draft.apiKey}
+            />
           </label>
+          {remoteModels.length ? (
+            <label>
+              <span>可用模型</span>
+              <select
+                aria-label={`${meta.title} 可用模型`}
+                onChange={(event) => onUpdateDraft({ model: event.currentTarget.value })}
+                value={remoteModels.some((model) => model.id === draft.model) ? draft.model : ""}
+              >
+                <option value="">选择模型</option>
+                {remoteModels.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name && model.name !== model.id ? `${model.name} (${model.id})` : model.id}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <label>
             <span>模型名称</span>
             <input aria-label={`${meta.title} 模型名称`} onChange={(event) => onUpdateDraft({ model: event.currentTarget.value })} value={draft.model} />
           </label>
-          <button className="panel-action-button" disabled={!draft.baseUrl.trim()} onClick={onConfigureRemote} type="button">
+          <div className="model-action-row">
+            <button className="panel-action-button" disabled={!draft.baseUrl.trim() || remoteStatus?.loading} onClick={onLoadRemoteModels} type="button">
+              读取模型列表
+            </button>
+            <button className="panel-action-button" disabled={!draft.baseUrl.trim() || !draft.model.trim() || remoteStatus?.loading} onClick={onTestRemote} type="button">
+              测试 API 响应
+            </button>
+          </div>
+          {remoteStatus ? (
+            <div className={remoteStatus.ok === false ? "model-install-progress error" : "model-install-progress"} data-testid={`model-remote-status-${capability}`}>
+              <small>{remoteStatus.message}</small>
+            </div>
+          ) : null}
+          <button className="panel-action-button" disabled={!draft.baseUrl.trim() || !draft.model.trim()} onClick={onConfigureRemote} type="button">
             保存远程备用配置
           </button>
         </div>
@@ -285,11 +394,22 @@ function readyActionLabel(capability: ModelCapabilityId) {
   return "重新启用本地模型";
 }
 
+function installActionLabel(capability: ModelCapabilityId) {
+  if (capability === "llm") {
+    return "下载并启用 qwen2.5:7b";
+  }
+  if (capability === "segmentation") {
+    return "安装并启用内置 SAM";
+  }
+  return "安装并启用本地模型";
+}
+
 function defaultRemoteDraft(capability: ModelCapabilityId, models: ModelConfig[]): RemoteDraft {
   const existing = models.find((model) => model.kind === "remote" && model.capabilities.includes(capability));
   return {
     baseUrl: existing?.baseUrl ?? "",
     apiKey: existing?.apiKey ?? "",
+    apiKeySet: existing?.apiKeySet ?? false,
     model: existing?.model ?? ""
   };
 }
@@ -298,14 +418,18 @@ function fallbackStatus(capability: ModelCapabilityId): ModelCapabilityStatus {
   return {
     id: capability,
     label: CAPABILITY_META[capability].title,
-    status: "missing",
-    summary: "等待后端检测本机模型环境",
+    status: capability === "llm" ? "installable" : "missing",
+    summary: capability === "llm" ? "可安装并启用本地 LLM：默认下载 qwen2.5:7b" : "等待后端检测本机模型环境",
     configured: false,
     configured_model_id: null,
     configured_model_name: null,
     local_available: false,
-    installable: capability === "segmentation",
+    installable: capability === "llm" || capability === "segmentation",
     recommended_local: null,
-    suggestions: ["点击重新检测获取本机模型状态。"]
+    suggestions: [
+      capability === "llm"
+        ? "点击一键安装并启用本地 LLM；默认会准备 qwen2.5:7b。"
+        : "点击重新检测获取本机模型状态。"
+    ]
   };
 }

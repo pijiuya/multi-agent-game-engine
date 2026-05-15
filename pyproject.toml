@@ -9,6 +9,7 @@ dependencies = [
   "pydantic>=2.7.0",
   "python-multipart>=0.0.9",
   "httpx>=0.27.0",
+  "Pillow>=10.0.0",
   "shapely>=2.0.0"
 ]
 
@@ -23,7 +24,8 @@ include = ["agent_engine*"]
 [project.optional-dependencies]
 dev = [
   "pytest>=8.2.0",
-  "pytest-asyncio>=0.23.0"
+  "pytest-asyncio>=0.23.0",
+  "pyinstaller>=6.0.0"
 ]
 
 [tool.pytest.ini_options]

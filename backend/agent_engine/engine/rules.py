@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import atan2, cos, pi, sin
 from typing import Any
 
+from .action_extensions import ActionExtension, apply_extension_action, validate_extension_action
 from .geometry import distance
-from .world import AgentAction, GameWorld, Point, WorldItem
+from .world import AgentAction, GameWorld, Point, Relationship, WorldItem
 
 
 @dataclass(slots=True)
@@ -18,6 +20,27 @@ class RuleEngine:
     """Validates and applies structured agent actions."""
 
     interaction_range = 120.0
+    agent_radius = 24.0
+    agent_min_center_distance = agent_radius * 2
+
+    def __init__(self, action_extensions: list[ActionExtension] | None = None):
+        self.action_extensions = action_extensions or []
+
+    def set_action_extensions(self, action_extensions: list[ActionExtension]) -> None:
+        self.action_extensions = action_extensions
+
+    def enabled_extension_types(self) -> set[str]:
+        return {extension.type for extension in self.action_extensions if extension.enabled}
+
+    def _extension_for(self, action_type: str) -> ActionExtension | None:
+        return next(
+            (
+                extension
+                for extension in self.action_extensions
+                if extension.enabled and extension.type == action_type
+            ),
+            None,
+        )
 
     def validate(self, world: GameWorld, action: AgentAction) -> ActionResult:
         profile = world.agent_profiles.get(action.agent_id)
@@ -26,8 +49,12 @@ class RuleEngine:
             return ActionResult(False, f"Unknown agent: {action.agent_id}")
         if profile.hidden:
             return ActionResult(False, f"{profile.name} is hidden")
-        if action.type not in profile.action_space:
+        extension = self._extension_for(action.type)
+        if action.type not in profile.action_space and extension is None:
             return ActionResult(False, f"{profile.name} cannot perform {action.type}")
+        if extension is not None:
+            ok, message = validate_extension_action(extension, world, action)
+            return ActionResult(ok, message)
 
         if action.type == "stop":
             return ActionResult(True, "stop accepted")
@@ -38,6 +65,8 @@ class RuleEngine:
                 return ActionResult(False, "move_to requires a target point")
             if not world.map.is_walkable(target):
                 return ActionResult(False, "target is outside walkable space or inside an obstacle")
+            if self.collision_free_agent_point(world, action.agent_id, target) is None:
+                return ActionResult(False, "target is blocked by nearby agents")
             return ActionResult(True, "move accepted")
 
         if action.type == "say":
@@ -124,6 +153,22 @@ class RuleEngine:
             world.add_event("rejected_action", result.message, agent_id=action.agent_id, payload=action.to_dict())
             return result
 
+        extension = self._extension_for(action.type)
+        if extension is not None:
+            ok, message, event = apply_extension_action(extension, world, action)
+            if not ok:
+                world.add_event("rejected_action", message, agent_id=action.agent_id, payload=action.to_dict())
+                return ActionResult(False, message)
+            if event is None:
+                event_obj = world.add_event(
+                    "extension_action",
+                    message,
+                    agent_id=action.agent_id,
+                    payload={"action": action.to_dict(), "extension_id": extension.id},
+                )
+                event = event_obj.to_dict()
+            return ActionResult(True, message, event)
+
         profile = world.agent_profiles[action.agent_id]
         state = world.agent_states[action.agent_id]
 
@@ -139,15 +184,25 @@ class RuleEngine:
             return ActionResult(True, "stop applied", event.to_dict())
 
         if action.type == "move_to":
-            target = self._point_from_payload(action.payload)
-            assert target is not None
+            requested_target = self._point_from_payload(action.payload)
+            assert requested_target is not None
+            target = self.collision_free_agent_point(world, action.agent_id, requested_target) or requested_target
+            collision_adjusted = distance(requested_target.to_dict(), target.to_dict()) > 0.01
             state.target = target
             state.status = "moving"
+            payload = {
+                "action": action.to_dict(),
+                "target": target.to_dict(),
+                "agent_min_center_distance": self.agent_min_center_distance,
+            }
+            if collision_adjusted:
+                payload["requested_target"] = requested_target.to_dict()
+                payload["collision_adjusted"] = True
             event = world.add_event(
                 "action",
                 f"{profile.name} starts moving.",
                 agent_id=profile.id,
-                payload={"action": action.to_dict(), "target": target.to_dict()},
+                payload=payload,
             )
             return ActionResult(True, "move_to applied", event.to_dict())
 
@@ -175,6 +230,7 @@ class RuleEngine:
             target_state = world.agent_states.get(target_id)
             if target_state is not None:
                 target_state.cooldowns["social_until"] = world.tick + max(1, cooldown)
+            relationship = self._upsert_relationship(world, profile.id, target_id)
             event = world.add_event(
                 "dialogue",
                 f"{profile.name} → {target_profile.name}: {text}",
@@ -183,6 +239,7 @@ class RuleEngine:
                     "action": action.to_dict(),
                     "target_agent_id": target_id,
                     "participants": [profile.id, target_id],
+                    "relationship": relationship.to_dict(),
                     "text": text,
                 },
             )
@@ -286,6 +343,105 @@ class RuleEngine:
             return None
         return Point(float(raw["x"]), float(raw["y"]))
 
+    def collision_free_agent_point(
+        self,
+        world: GameWorld,
+        agent_id: str,
+        point: Point,
+        *,
+        include_targets: bool = True,
+    ) -> Point | None:
+        if self._is_agent_point_clear(world, agent_id, point, include_targets=include_targets):
+            return point
+        candidates = self._agent_collision_candidates(world, agent_id, point, include_targets=include_targets)
+        current = world.agent_states.get(agent_id).position if agent_id in world.agent_states else point
+        candidates.sort(
+            key=lambda candidate: (
+                distance(candidate.to_dict(), point.to_dict()),
+                distance(candidate.to_dict(), current.to_dict()),
+            )
+        )
+        for candidate in candidates:
+            if self._is_agent_point_clear(world, agent_id, candidate, include_targets=include_targets):
+                return candidate
+        return None
+
+    def _is_agent_point_clear(
+        self,
+        world: GameWorld,
+        agent_id: str,
+        point: Point,
+        *,
+        include_targets: bool = True,
+    ) -> bool:
+        if not world.map.is_walkable(point):
+            return False
+        for occupied in self._agent_collision_points(world, agent_id, include_targets=include_targets):
+            if distance(point.to_dict(), occupied.to_dict()) < self.agent_min_center_distance:
+                return False
+        return True
+
+    def _agent_collision_points(
+        self,
+        world: GameWorld,
+        agent_id: str,
+        *,
+        include_targets: bool = True,
+    ) -> list[Point]:
+        occupied: list[Point] = []
+        for other_id, other_state in world.agent_states.items():
+            if other_id == agent_id:
+                continue
+            other_profile = world.agent_profiles.get(other_id)
+            if other_profile is None or other_profile.hidden:
+                continue
+            occupied.append(other_state.position)
+            if include_targets and other_state.target is not None:
+                occupied.append(other_state.target)
+        return occupied
+
+    def _agent_collision_candidates(
+        self,
+        world: GameWorld,
+        agent_id: str,
+        point: Point,
+        *,
+        include_targets: bool = True,
+    ) -> list[Point]:
+        current = world.agent_states.get(agent_id).position if agent_id in world.agent_states else point
+        candidates: list[Point] = []
+        min_distance = self.agent_min_center_distance
+        offsets = (0, 45, -45, 90, -90, 135, -135, 180)
+        for index, occupied in enumerate(
+            sorted(
+                self._agent_collision_points(world, agent_id, include_targets=include_targets),
+                key=lambda occupied_point: distance(point.to_dict(), occupied_point.to_dict()),
+            )
+        ):
+            dx = point.x - occupied.x
+            dy = point.y - occupied.y
+            if abs(dx) + abs(dy) <= 0.001:
+                dx = current.x - occupied.x
+                dy = current.y - occupied.y
+            if abs(dx) + abs(dy) <= 0.001:
+                angle = ((sum(ord(char) for char in f"{agent_id}:{index}") % 360) / 180) * pi
+            else:
+                angle = atan2(dy, dx)
+            for offset in offsets:
+                candidate_angle = angle + (offset / 180) * pi
+                candidates.append(
+                    Point(
+                        occupied.x + cos(candidate_angle) * min_distance,
+                        occupied.y + sin(candidate_angle) * min_distance,
+                    )
+                )
+        for ring in (1.0, 1.5, 2.0, 2.5):
+            radius = min_distance * ring
+            for step in range(16):
+                angle = (step / 16) * 2 * pi
+                candidates.append(Point(point.x + cos(angle) * radius, point.y + sin(angle) * radius))
+        return candidates
+
     def _target_position(self, world: GameWorld, target_id: str) -> Point | None:
         target_profile = world.agent_profiles.get(target_id)
         if target_id in world.agent_states and target_profile is not None and not target_profile.hidden:
@@ -303,6 +459,19 @@ class RuleEngine:
         if not raw:
             return None
         return str(raw).strip()
+
+    def _upsert_relationship(self, world: GameWorld, from_agent: str, to_agent: str) -> Relationship:
+        for relationship in world.relationships:
+            if (
+                relationship.from_agent == from_agent
+                and relationship.to_agent == to_agent
+                and relationship.label == "knows"
+            ):
+                relationship.score = min(1.0, relationship.score + 0.08)
+                return relationship
+        relationship = Relationship(from_agent=from_agent, to_agent=to_agent, label="knows", score=0.08)
+        world.relationships.append(relationship)
+        return relationship
 
     def _item_from_payload(self, world: GameWorld, payload: dict[str, Any]) -> WorldItem | None:
         item_id = str(payload.get("item_id") or payload.get("target_id") or "").strip()
