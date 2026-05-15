@@ -323,6 +323,10 @@ select,
   outline-offset: 2px;
 }
 
+.scene-window.tool-move .world-image-layer:not(.locked) {
+  cursor: move;
+}
+
 .world-map-frame {
   position: absolute;
   z-index: 0;

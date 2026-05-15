@@ -10,6 +10,7 @@ import type {
   CanvasViewState,
   EditTool,
   ImageSelectionMode,
+  MapImageLayer,
   MapRegionFunction,
   Point,
   SelectionState,
@@ -41,6 +42,8 @@ type Props = {
   onRenameAgent: (agentId: string, name: string) => void;
   onPreviewItem: (itemId: string, patch: Partial<Omit<WorldItem, "id">>) => void;
   onCommitItem: (itemId: string, patch: Partial<Omit<WorldItem, "id">>) => void;
+  onPreviewImageLayer: (layerId: string, patch: Partial<Pick<MapImageLayer, "x" | "y">>) => void;
+  onCommitImageLayer: (layerId: string, patch: Partial<Pick<MapImageLayer, "x" | "y">>) => void;
 };
 
 type PanDrag = {
@@ -61,6 +64,13 @@ type ItemTransform = {
   mode: "move" | "scale" | "rotate";
   offset: Point;
   lastPatch: Partial<Omit<WorldItem, "id">>;
+};
+
+type ImageLayerTransform = {
+  pointerId: number;
+  layer: MapImageLayer;
+  offset: Point;
+  lastPatch: Partial<Pick<MapImageLayer, "x" | "y">>;
 };
 
 const MIN_ZOOM = 0.125;
@@ -89,11 +99,14 @@ export function SceneViewport({
   onObjectContext,
   onRenameAgent,
   onPreviewItem,
-  onCommitItem
+  onCommitItem,
+  onPreviewImageLayer,
+  onCommitImageLayer
 }: Props) {
   const panDragRef = useRef<PanDrag | null>(null);
   const imageSelectionDragRef = useRef<ImageSelectionDrag | null>(null);
   const transformRef = useRef<ItemTransform | null>(null);
+  const imageLayerTransformRef = useRef<ImageLayerTransform | null>(null);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const gridCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [isPanning, setIsPanning] = useState(false);
@@ -211,6 +224,15 @@ export function SceneViewport({
       onPreviewItem(transform.item.id, patch);
       return;
     }
+    const imageLayerTransform = imageLayerTransformRef.current;
+    if (imageLayerTransform && imageLayerTransform.pointerId === event.pointerId) {
+      event.preventDefault();
+      const point = localWorldFromClient(event.clientX, event.clientY);
+      const patch = imageLayerPatchFromDrag(imageLayerTransform, point);
+      imageLayerTransform.lastPatch = patch;
+      onPreviewImageLayer(imageLayerTransform.layer.id, patch);
+      return;
+    }
     const drag = panDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) {
       return;
@@ -247,6 +269,16 @@ export function SceneViewport({
         event.currentTarget.releasePointerCapture(event.pointerId);
       }
       onCommitItem(transform.item.id, transform.lastPatch);
+      return;
+    }
+    const imageLayerTransform = imageLayerTransformRef.current;
+    if (imageLayerTransform && imageLayerTransform.pointerId === event.pointerId) {
+      event.preventDefault();
+      imageLayerTransformRef.current = null;
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      onCommitImageLayer(imageLayerTransform.layer.id, imageLayerTransform.lastPatch);
       return;
     }
     const drag = panDragRef.current;
@@ -337,6 +369,26 @@ export function SceneViewport({
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
+  }
+
+  function startImageLayerMove(layer: MapImageLayer, event: PointerEvent<HTMLElement>) {
+    if (event.button !== 0 || editTool !== "move" || layer.locked) {
+      return;
+    }
+    event.stopPropagation();
+    event.preventDefault();
+    const point = localWorldFromClient(event.clientX, event.clientY);
+    imageLayerTransformRef.current = {
+      pointerId: event.pointerId,
+      layer,
+      offset: {
+        x: point.x - layer.x,
+        y: point.y - layer.y
+      },
+      lastPatch: {}
+    };
+    onSelect({ kind: "imageLayer", id: layer.id });
+    event.currentTarget.setPointerCapture(event.pointerId);
   }
 
   function renameAgent(agentId: string, currentName: string) {
@@ -445,7 +497,7 @@ export function SceneViewport({
           {world.map.image_layers.filter((layer) => !layer.hidden).map((layer) => (
             <img
               alt={layer.name}
-              className={`world-image-layer${selection.kind === "imageLayer" && selection.id === layer.id ? " active" : ""}`}
+              className={`world-image-layer${selection.kind === "imageLayer" && selection.id === layer.id ? " active" : ""}${layer.locked ? " locked" : ""}`}
               data-testid={`world-image-layer-${layer.id}`}
               draggable={false}
               key={layer.id}
@@ -454,6 +506,7 @@ export function SceneViewport({
                 onSelect({ kind: "imageLayer", id: layer.id });
               }}
               onContextMenu={(event) => openObjectMenu(event, { kind: "imageLayer", id: layer.id })}
+              onPointerDown={(event) => startImageLayerMove(layer, event)}
               src={assetUrl(layer.image) ?? layer.image}
               style={{
                 left: layer.x,
@@ -816,6 +869,13 @@ function itemPatchFromDrag(transform: ItemTransform, point: Point, zoom: number)
   }
   return {
     rotation: Math.round((Math.atan2(point.y - transform.item.position.y, point.x - transform.item.position.x) * 180) / Math.PI + 90)
+  };
+}
+
+function imageLayerPatchFromDrag(transform: ImageLayerTransform, point: Point): Partial<Pick<MapImageLayer, "x" | "y">> {
+  return {
+    x: Math.round((point.x - transform.offset.x) * 10) / 10,
+    y: Math.round((point.y - transform.offset.y) * 10) / 10
   };
 }
 

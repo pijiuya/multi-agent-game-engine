@@ -1265,6 +1265,14 @@ export default function App() {
     }
   }
 
+  function previewImageLayerPatch(layerId: string, patch: ImageLayerPatch) {
+    if (Object.keys(patch).length === 0) {
+      return;
+    }
+    setSelection({ kind: "imageLayer", id: layerId });
+    setWorld((current) => (current ? applyImageLayerPatch(current, layerId, patch) : current));
+  }
+
   function resizePanel(id: PanelState["id"], x: number, y: number, width: number, height: number) {
     setPanels((current) =>
       current.map((panel) => {
@@ -1406,6 +1414,8 @@ export default function App() {
         onRenameAgent={(agentId, name) => void updateAgentProfile(agentId, { name })}
         onPreviewItem={previewItemPatch}
         onCommitItem={(itemId, patch) => void updateItemPatch(itemId, patch)}
+        onPreviewImageLayer={previewImageLayerPatch}
+        onCommitImageLayer={(layerId, patch) => void updateImageLayer(layerId, patch)}
       />
 
       {narrativeLine ? (
