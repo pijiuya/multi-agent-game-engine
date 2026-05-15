@@ -2769,11 +2769,33 @@ def _generate_image_layer(
         if config.get("provider") == "mock":
             asset_name = _mock_image_layer_asset(generation_id, prompt, selection_points, left, top, int(math.ceil(width)), int(math.ceil(height)), mode)
         elif use_reference:
-            asset_name = _call_openai_image_edit_provider(config, generation_id, prompt, selection_points, int(math.ceil(width)), int(math.ceil(height)))
+            try:
+                asset_name = _call_openai_image_edit_provider(config, generation_id, prompt, selection_points, int(math.ceil(width)), int(math.ceil(height)))
+            except HTTPException as exc:
+                missing_reference = exc.status_code == 400 and "缺少可参考" in str(exc.detail)
+                if exc.status_code != 502 and not missing_reference:
+                    raise
+                asset_name = _call_openai_image_layer_generation_provider(
+                    config,
+                    generation_id,
+                    _reference_fallback_prompt(prompt, mode),
+                    selection_points,
+                    left,
+                    top,
+                    int(math.ceil(width)),
+                    int(math.ceil(height)),
+                )
         elif config is not None and config.get("provider") in OPENAI_IMAGE_PROVIDERS:
-            candidates = _call_openai_image_provider(config, generation_id, prompt, int(math.ceil(width)), int(math.ceil(height)), 1)
-            asset_name = candidates[0]["url"].rsplit("/", 1)[-1]
-            asset_name = _clip_layer_asset_to_selection(asset_name, selection_points, left, top, int(math.ceil(width)), int(math.ceil(height)))
+            asset_name = _call_openai_image_layer_generation_provider(
+                config,
+                generation_id,
+                prompt,
+                selection_points,
+                left,
+                top,
+                int(math.ceil(width)),
+                int(math.ceil(height)),
+            )
         else:
             raise HTTPException(status_code=400, detail=f"图片生成服务类型暂不支持：{config.get('provider') or 'unknown'}")
     except HTTPException:
@@ -2851,6 +2873,31 @@ def _call_openai_image_edit_provider(
     asset_name = _save_generated_image_asset(config, raw_images[0], generation_id, 0)
     left, top, _, _ = _points_bounds(points)
     return _clip_layer_asset_to_selection(asset_name, points, left, top, width, height)
+
+
+def _call_openai_image_layer_generation_provider(
+    config: dict[str, Any],
+    generation_id: str,
+    prompt: str,
+    points: list[Point],
+    left: float,
+    top: float,
+    width: int,
+    height: int,
+) -> str:
+    candidates = _call_openai_image_provider(config, generation_id, prompt, width, height, 1)
+    asset_name = candidates[0]["url"].rsplit("/", 1)[-1]
+    return _clip_layer_asset_to_selection(asset_name, points, left, top, width, height)
+
+
+def _reference_fallback_prompt(prompt: str, mode: str) -> str:
+    action = "outpaint an edge extension tile" if mode == "extension" else "create a transparent top-down map layer asset"
+    return (
+        f"{prompt}\n\n"
+        f"The configured image provider does not support image edit/inpaint requests, so {action} from text only. "
+        "Match the current map's clean top-down 2D game-map style where possible. "
+        "Do not create a flat colored placeholder, stripe pattern, UI panel, or text label."
+    )
 
 
 def _region_edit_inputs_base64(background_path: str, points: list[Point], width: int, height: int) -> tuple[str, str]:

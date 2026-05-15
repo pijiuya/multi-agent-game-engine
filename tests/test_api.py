@@ -1020,6 +1020,69 @@ def test_api_image_layer_generation_with_background_uses_edit_path(monkeypatch):
     assert response.json()["layer"]["kind"] == "region"
 
 
+def test_api_image_layer_generation_edit_failure_falls_back_to_real_generation(monkeypatch):
+    client = TestClient(app)
+    api_main.runtime.world = api_main.GameWorld.default()
+    api_main.runtime.world.map.image_layers = []
+    background = api_main.store.assets_dir / "test-layer-bg-fallback.png"
+    background.parent.mkdir(parents=True, exist_ok=True)
+    from PIL import Image
+
+    Image.new("RGBA", (256, 256), (80, 120, 160, 255)).save(background)
+    api_main.runtime.world.map.background_image = "/api/assets/test-layer-bg-fallback.png"
+    client.patch(
+        "/api/models",
+        json={
+            "models": [
+                {
+                    "id": "model_remote_image",
+                    "name": "Remote image",
+                    "kind": "remote",
+                    "provider": "image-http",
+                    "base_url": "https://api.example.test/v1",
+                    "api_key": "image-secret",
+                    "model": "gpt-image-2",
+                    "enabled": True,
+                    "capabilities": ["image_generation"],
+                }
+            ]
+        },
+    )
+    called: list[str] = []
+
+    def fake_openai_json_request(config, method, path, body=None, timeout=30):
+        called.append(path)
+        if path == "images/edits":
+            raise api_main.RemoteProviderError("edit endpoint unsupported")
+        assert path == "images/generations"
+        assert "stripe pattern" in body["prompt"]
+        import io
+
+        output = io.BytesIO()
+        Image.new("RGBA", (90, 80), (60, 160, 220, 255)).save(output, format="PNG")
+        return {"data": [{"b64_json": api_main.base64.b64encode(output.getvalue()).decode("ascii")}]}
+
+    monkeypatch.setattr(api_main, "_openai_json_request", fake_openai_json_request)
+
+    response = client.post(
+        "/api/map/image-layers/generate",
+        json={
+            "prompt": "参考背景生成飞船",
+            "selection": {"type": "rect", "x": 10, "y": 12, "width": 90, "height": 80},
+            "mode": "region",
+            "reference_background": True,
+            "provider_id": "model_remote_image",
+        },
+    )
+
+    assert response.status_code == 200
+    assert called == ["images/edits", "images/generations"]
+    layer = response.json()["layer"]
+    assert layer["kind"] == "region"
+    assert "mock" not in layer["image"]
+    assert len(api_main.runtime.world.map.image_layers) == 1
+
+
 def test_api_image_layer_generation_real_provider_failure_does_not_create_mock(monkeypatch):
     client = TestClient(app)
     api_main.runtime.world = api_main.GameWorld.default()
