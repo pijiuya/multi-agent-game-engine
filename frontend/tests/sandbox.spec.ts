@@ -1203,10 +1203,10 @@ test("llm capability starts local Ollama model install when no model is availabl
                 memory_gb: 8,
                 disk_gb: 1.5,
                 description: "适合多 agent 实时互动",
-                installed: false,
+                installed: true,
                 recommended: false,
                 selected_by_default: false,
-                reason: "可选安装"
+                reason: "已下载"
               },
               {
                 id: "qwen25_7b",
@@ -1256,6 +1256,9 @@ test("llm capability starts local Ollama model install when no model is availabl
     })
   );
   await page.route("**/api/model-capabilities/llm/install-local", async (route) => {
+    const payload = route.request().postDataJSON() as { model?: string; models?: string[] };
+    expect(payload.model).toBe("qwen2.5:7b");
+    expect(payload.models).toEqual(expect.arrayContaining(["qwen2.5:1.5b", "qwen2.5:7b"]));
     installed = true;
     await new Promise((resolve) => setTimeout(resolve, 100));
     return route.fulfill({
@@ -1296,8 +1299,16 @@ test("llm capability starts local Ollama model install when no model is availabl
 
   await page.goto("/");
   const modelsPanel = page.getByTestId("panel-models");
+  await expect(modelsPanel.getByTestId("llm-connection-mode").getByRole("button", { name: "本地模型" })).toHaveClass(/active/);
   await expect(modelsPanel.getByTestId("local-model-list-llm")).toContainText("推荐 7B");
+  await expect(modelsPanel.getByTestId("local-model-list-llm")).toContainText("已下载");
+  await expect(modelsPanel.getByTestId("local-model-list-llm")).toContainText("需要下载");
   await expect(modelsPanel).toContainText("不要求用户电脑预装 Python");
+  await modelsPanel.getByRole("button", { name: "远程 LLM" }).click();
+  await expect(modelsPanel.getByTestId("model-advanced-llm").getByText("服务地址", { exact: true })).toBeVisible();
+  await expect(modelsPanel.getByRole("button", { name: "保存并使用远程 LLM" })).toBeDisabled();
+  await modelsPanel.getByRole("button", { name: "本地模型" }).click();
+  await modelsPanel.getByTestId("local-model-list-llm").locator("label").filter({ hasText: "实时 1.5B" }).locator("input").check();
   const installButton = modelsPanel.getByRole("button", { name: /qwen2\.5:7b/ });
   await expect(installButton).toBeEnabled();
   await installButton.click();

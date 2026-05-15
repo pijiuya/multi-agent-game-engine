@@ -1984,6 +1984,32 @@ textarea:focus {
   white-space: normal;
 }
 
+.model-connection-mode {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+}
+
+.model-connection-mode button {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 9px;
+  color: var(--ink);
+  background: rgba(var(--material-rgb), 0.52);
+  border: 1px solid rgba(var(--grid-rgb), 0.24);
+  border-radius: 8px;
+}
+
+.model-connection-mode button.active {
+  color: var(--active-ink);
+  background: var(--active-bg);
+  border-color: var(--active-bg);
+  text-shadow: none;
+}
+
 .local-model-list {
   display: grid;
   gap: 6px;
@@ -2010,6 +2036,29 @@ textarea:focus {
   overflow-wrap: anywhere;
   font-size: 11px;
   color: var(--soft-muted);
+}
+
+.local-model-list-summary {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr auto;
+  gap: 6px;
+  align-items: center;
+  padding: 6px 7px;
+  background: rgba(var(--panel-rgb), 0.44);
+  border: 1px solid rgba(var(--grid-rgb), 0.16);
+  border-radius: 8px;
+}
+
+.local-model-list-summary span {
+  overflow: hidden;
+  font-size: 10px;
+  color: var(--soft-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.local-model-list-summary strong {
+  font-size: 11px;
 }
 
 .local-model-option {
@@ -2054,6 +2103,14 @@ textarea:focus {
 .local-model-option small {
   font-size: 10px;
   color: var(--soft-muted);
+}
+
+.local-model-option small.downloaded {
+  color: #10b981;
+}
+
+.local-model-option small.missing {
+  color: #f59e0b;
 }
 
 .local-model-option em {

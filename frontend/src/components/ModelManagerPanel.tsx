@@ -1,4 +1,4 @@
-import { Bot, CheckCircle2, Cloud, ImagePlus, Layers3, RefreshCw, WandSparkles } from "lucide-react";
+import { Bot, CheckCircle2, Cloud, HardDrive, ImagePlus, Layers3, RefreshCw, WandSparkles } from "lucide-react";
 import { useEffect, useState } from "react";
 import type {
   LocalModelOption,
@@ -30,6 +30,7 @@ type Props = {
 };
 
 const CAPABILITY_ORDER: ModelCapabilityId[] = ["llm", "image_generation", "segmentation"];
+type ModelConnectionMode = "local" | "remote";
 
 const CAPABILITY_META: Record<
   ModelCapabilityId,
@@ -95,6 +96,7 @@ export function ModelManagerPanel({
   const [remoteModelOptions, setRemoteModelOptions] = useState<Partial<Record<ModelCapabilityId, RemoteModelOption[]>>>({});
   const [remoteStatus, setRemoteStatus] = useState<Partial<Record<ModelCapabilityId, { loading: boolean; message: string; ok: boolean | null }>>>({});
   const [selectedLocalModels, setSelectedLocalModels] = useState<Partial<Record<ModelCapabilityId, string[]>>>({});
+  const [connectionModes, setConnectionModes] = useState<Partial<Record<ModelCapabilityId, ModelConnectionMode>>>({});
   const statusMap = new Map(statuses.map((status) => [status.id, status]));
 
   useEffect(() => {
@@ -113,6 +115,16 @@ export function ModelManagerPanel({
         }
       }
       return changed ? next : current;
+    });
+  }, [models]);
+
+  useEffect(() => {
+    setConnectionModes((current) => {
+      if (current.llm) {
+        return current;
+      }
+      const enabledRemoteLlm = models.some((model) => model.enabled && model.kind === "remote" && model.capabilities.includes("llm"));
+      return enabledRemoteLlm ? { ...current, llm: "remote" } : current;
     });
   }, [models]);
 
@@ -227,6 +239,7 @@ export function ModelManagerPanel({
         draft={remoteDrafts[activeCapability]}
         remoteModels={remoteModelOptions[activeCapability] ?? []}
         remoteStatus={remoteStatus[activeCapability] ?? null}
+        connectionMode={connectionModes[activeCapability] ?? "local"}
         onConfigureLocal={onConfigureLocal}
         onInstallLocal={onInstallLocal}
         onConfigureRemote={() => onConfigureRemote(activeCapability, remoteDrafts[activeCapability])}
@@ -239,6 +252,7 @@ export function ModelManagerPanel({
         }}
         onRefresh={onRefresh}
         onTestRemote={() => void testRemote(activeCapability)}
+        onChangeConnectionMode={(mode) => setConnectionModes((current) => ({ ...current, [activeCapability]: mode }))}
         task={tasks[activeCapability] ?? null}
         selectedLocalModels={selectedLocalModels[activeCapability] ?? []}
         onToggleAdvanced={() => setAdvancedOpen((current) => ({ ...current, [activeCapability]: !current[activeCapability] }))}
@@ -255,6 +269,7 @@ function CapabilityDetail({
   draft,
   remoteModels,
   remoteStatus,
+  connectionMode,
   advancedOpen,
   task,
   selectedLocalModels,
@@ -265,6 +280,7 @@ function CapabilityDetail({
   onLoadRemoteModels,
   onSelectLocalModel,
   onTestRemote,
+  onChangeConnectionMode,
   onToggleAdvanced,
   onUpdateDraft
 }: {
@@ -273,6 +289,7 @@ function CapabilityDetail({
   draft: RemoteDraft;
   remoteModels: RemoteModelOption[];
   remoteStatus: { loading: boolean; message: string; ok: boolean | null } | null;
+  connectionMode: ModelConnectionMode;
   advancedOpen: boolean;
   task: ModelCapabilityTask | null;
   selectedLocalModels: string[];
@@ -283,21 +300,26 @@ function CapabilityDetail({
   onLoadRemoteModels: () => void;
   onSelectLocalModel: (model: string, selected: boolean) => void;
   onTestRemote: () => void;
+  onChangeConnectionMode: (mode: ModelConnectionMode) => void;
   onToggleAdvanced: () => void;
   onUpdateDraft: (patch: Partial<RemoteDraft>) => void;
 }) {
   const meta = CAPABILITY_META[capability];
   const localSelection = localSelectionPayload(status, selectedLocalModels);
   const selectedInstalledLocal = status.local_options.some((option) => selectedLocalModels.includes(option.model) && option.installed);
+  const selectedMissingLocal = status.local_options.some((option) => selectedLocalModels.includes(option.model) && !option.installed);
+  const selectedMissingLocalCount = status.local_options.filter((option) => selectedLocalModels.includes(option.model) && !option.installed).length;
   const hasSelectedInstallModels = capability !== "llm" || selectedLocalModels.length > 0 || !status.local_options.length;
   const canUseLocal = Boolean(status.recommended_local) || selectedInstalledLocal;
-  const canInstallLocal = (capability === "llm" || capability === "segmentation") && status.installable && hasSelectedInstallModels;
+  const canInstallLocal = capability === "llm"
+    ? selectedMissingLocal && hasSelectedInstallModels
+    : capability === "segmentation" && status.installable && hasSelectedInstallModels;
   const isInstalling = task?.status === "running";
   const isReady = status.status === "ready";
   const actionLabel = isInstalling
     ? `安装中 ${task.progress}%`
     : canInstallLocal
-      ? installActionLabel(capability, selectedLocalModels.length, localSelection?.model ?? "")
+      ? installActionLabel(capability, selectedMissingLocalCount, localSelection?.model ?? "")
       : isReady
         ? readyActionLabel(capability)
         : meta.localLabel;
@@ -312,31 +334,47 @@ function CapabilityDetail({
         {status.status === "ready" ? <CheckCircle2 size={16} /> : <WandSparkles size={16} />}
         <span>{status.summary}</span>
       </div>
-      {status.recommended_local ? (
+      {capability === "llm" ? (
+        <ConnectionModeSelector mode={connectionMode} onChange={onChangeConnectionMode} />
+      ) : null}
+      {connectionMode === "remote" && capability === "llm" ? (
+        <RemoteModelPanel
+          capability={capability}
+          draft={draft}
+          metaTitle={meta.title}
+          remoteModels={remoteModels}
+          remoteStatus={remoteStatus}
+          onConfigureRemote={onConfigureRemote}
+          onLoadRemoteModels={onLoadRemoteModels}
+          onTestRemote={onTestRemote}
+          onUpdateDraft={onUpdateDraft}
+        />
+      ) : null}
+      {connectionMode === "local" && status.recommended_local ? (
         <div className="model-dialogue-row">
           <span>推荐本地方案</span>
           <strong>{status.recommended_local.name}</strong>
           <small>{status.recommended_local.model || status.recommended_local.provider}</small>
         </div>
       ) : null}
-      {capability === "llm" && status.device_recommendation ? (
+      {connectionMode === "local" && capability === "llm" && status.device_recommendation ? (
         <div className="model-dialogue-row">
           <span>本机推荐</span>
           <strong>{status.device_recommendation.name} · {status.device_recommendation.model}</strong>
           <small>{status.device_recommendation.reason}</small>
         </div>
       ) : null}
-      {capability === "llm" && status.local_options.length ? (
+      {connectionMode === "local" && capability === "llm" && status.local_options.length ? (
         <LocalModelList
           options={status.local_options}
           selectedModels={selectedLocalModels}
           onSelect={onSelectLocalModel}
         />
       ) : null}
-      {status.suggestions.map((suggestion) => (
+      {connectionMode === "local" ? status.suggestions.map((suggestion) => (
         <div className="model-suggestion" key={suggestion}>{suggestion}</div>
-      ))}
-      {status.status !== "ready" ? (
+      )) : null}
+      {connectionMode === "local" && status.status !== "ready" ? (
         <div className="model-setup-steps">
           <span>最快路径</span>
           <ol>
@@ -354,7 +392,7 @@ function CapabilityDetail({
           <small>{taskMessage}</small>
         </div>
       ) : null}
-      <div className="model-action-row">
+      {connectionMode === "local" ? <div className="model-action-row">
         <button
           className="panel-action-button"
           disabled={isInstalling || (!canUseLocal && !canInstallLocal)}
@@ -369,71 +407,23 @@ function CapabilityDetail({
           <RefreshCw size={15} />
           重新检测
         </button>
-      </div>
-      <button className="model-advanced-toggle" data-testid={`model-advanced-toggle-${capability}`} onClick={onToggleAdvanced} type="button">
+      </div> : null}
+      {capability !== "llm" ? <button className="model-advanced-toggle" data-testid={`model-advanced-toggle-${capability}`} onClick={onToggleAdvanced} type="button">
         <Cloud size={14} />
         {advancedOpen ? "收起高级配置" : "高级配置"}
-      </button>
-      {advancedOpen ? (
-        <div className="model-advanced-panel" data-testid={`model-advanced-${capability}`}>
-          <label>
-            <span>服务地址</span>
-            <input
-              aria-label={`${meta.title} 服务地址`}
-              onChange={(event) => onUpdateDraft({ baseUrl: event.currentTarget.value })}
-              placeholder={capability === "image_generation" || capability === "llm" ? "https://host 或 https://host/v1" : ""}
-              value={draft.baseUrl}
-            />
-            {(capability === "image_generation" || capability === "llm") ? <small>兼容多数 OpenAI 格式中转站；填根域名时会自动尝试 /v1。</small> : null}
-          </label>
-          <label>
-            <span>API Key</span>
-            <input
-              aria-label={`${meta.title} API Key`}
-              onChange={(event) => onUpdateDraft({ apiKey: event.currentTarget.value })}
-              placeholder={draft.apiKeySet ? "已保存，留空沿用旧 key" : ""}
-              type="password"
-              value={draft.apiKey}
-            />
-          </label>
-          {remoteModels.length ? (
-            <label>
-              <span>可用模型</span>
-              <select
-                aria-label={`${meta.title} 可用模型`}
-                onChange={(event) => onUpdateDraft({ model: event.currentTarget.value })}
-                value={remoteModels.some((model) => model.id === draft.model) ? draft.model : ""}
-              >
-                <option value="">选择模型</option>
-                {remoteModels.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.name && model.name !== model.id ? `${model.name} (${model.id})` : model.id}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
-          <label>
-            <span>模型名称</span>
-            <input aria-label={`${meta.title} 模型名称`} onChange={(event) => onUpdateDraft({ model: event.currentTarget.value })} value={draft.model} />
-          </label>
-          <div className="model-action-row">
-            <button className="panel-action-button" disabled={!draft.baseUrl.trim() || remoteStatus?.loading} onClick={onLoadRemoteModels} type="button">
-              读取模型列表
-            </button>
-            <button className="panel-action-button" disabled={!draft.baseUrl.trim() || !draft.model.trim() || remoteStatus?.loading} onClick={onTestRemote} type="button">
-              测试 API 响应
-            </button>
-          </div>
-          {remoteStatus ? (
-            <div className={remoteStatus.ok === false ? "model-install-progress error" : "model-install-progress"} data-testid={`model-remote-status-${capability}`}>
-              <small>{remoteStatus.message}</small>
-            </div>
-          ) : null}
-          <button className="panel-action-button" disabled={!draft.baseUrl.trim() || !draft.model.trim()} onClick={onConfigureRemote} type="button">
-            保存远程备用配置
-          </button>
-        </div>
+      </button> : null}
+      {advancedOpen && capability !== "llm" ? (
+        <RemoteModelPanel
+          capability={capability}
+          draft={draft}
+          metaTitle={meta.title}
+          remoteModels={remoteModels}
+          remoteStatus={remoteStatus}
+          onConfigureRemote={onConfigureRemote}
+          onLoadRemoteModels={onLoadRemoteModels}
+          onTestRemote={onTestRemote}
+          onUpdateDraft={onUpdateDraft}
+        />
       ) : null}
     </section>
   );
@@ -473,6 +463,111 @@ function installActionLabel(capability: ModelCapabilityId, selectedCount = 0, pr
   return "安装并启用本地模型";
 }
 
+function ConnectionModeSelector({
+  mode,
+  onChange
+}: {
+  mode: ModelConnectionMode;
+  onChange: (mode: ModelConnectionMode) => void;
+}) {
+  return (
+    <div className="model-connection-mode" data-testid="llm-connection-mode">
+      <button className={mode === "local" ? "active" : ""} onClick={() => onChange("local")} type="button">
+        <HardDrive size={14} />
+        本地模型
+      </button>
+      <button className={mode === "remote" ? "active" : ""} onClick={() => onChange("remote")} type="button">
+        <Cloud size={14} />
+        远程 LLM
+      </button>
+    </div>
+  );
+}
+
+function RemoteModelPanel({
+  capability,
+  draft,
+  metaTitle,
+  remoteModels,
+  remoteStatus,
+  onConfigureRemote,
+  onLoadRemoteModels,
+  onTestRemote,
+  onUpdateDraft
+}: {
+  capability: ModelCapabilityId;
+  draft: RemoteDraft;
+  metaTitle: string;
+  remoteModels: RemoteModelOption[];
+  remoteStatus: { loading: boolean; message: string; ok: boolean | null } | null;
+  onConfigureRemote: () => void;
+  onLoadRemoteModels: () => void;
+  onTestRemote: () => void;
+  onUpdateDraft: (patch: Partial<RemoteDraft>) => void;
+}) {
+  return (
+    <div className="model-advanced-panel" data-testid={`model-advanced-${capability}`}>
+      <label>
+        <span>服务地址</span>
+        <input
+          aria-label={`${metaTitle} 服务地址`}
+          onChange={(event) => onUpdateDraft({ baseUrl: event.currentTarget.value })}
+          placeholder={capability === "image_generation" || capability === "llm" ? "https://host 或 https://host/v1" : ""}
+          value={draft.baseUrl}
+        />
+        {(capability === "image_generation" || capability === "llm") ? <small>兼容多数 OpenAI 格式中转站；填根域名时会自动尝试 /v1。</small> : null}
+      </label>
+      <label>
+        <span>API Key</span>
+        <input
+          aria-label={`${metaTitle} API Key`}
+          onChange={(event) => onUpdateDraft({ apiKey: event.currentTarget.value })}
+          placeholder={draft.apiKeySet ? "已保存，留空沿用旧 key" : ""}
+          type="password"
+          value={draft.apiKey}
+        />
+      </label>
+      {remoteModels.length ? (
+        <label>
+          <span>可用模型</span>
+          <select
+            aria-label={`${metaTitle} 可用模型`}
+            onChange={(event) => onUpdateDraft({ model: event.currentTarget.value })}
+            value={remoteModels.some((model) => model.id === draft.model) ? draft.model : ""}
+          >
+            <option value="">选择模型</option>
+            {remoteModels.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.name && model.name !== model.id ? `${model.name} (${model.id})` : model.id}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+      <label>
+        <span>模型名称</span>
+        <input aria-label={`${metaTitle} 模型名称`} onChange={(event) => onUpdateDraft({ model: event.currentTarget.value })} value={draft.model} />
+      </label>
+      <div className="model-action-row">
+        <button className="panel-action-button" disabled={!draft.baseUrl.trim() || remoteStatus?.loading} onClick={onLoadRemoteModels} type="button">
+          读取模型列表
+        </button>
+        <button className="panel-action-button" disabled={!draft.baseUrl.trim() || !draft.model.trim() || remoteStatus?.loading} onClick={onTestRemote} type="button">
+          测试 API 响应
+        </button>
+      </div>
+      {remoteStatus ? (
+        <div className={remoteStatus.ok === false ? "model-install-progress error" : "model-install-progress"} data-testid={`model-remote-status-${capability}`}>
+          <small>{remoteStatus.message}</small>
+        </div>
+      ) : null}
+      <button className="panel-action-button" disabled={!draft.baseUrl.trim() || !draft.model.trim()} onClick={onConfigureRemote} type="button">
+        {capability === "llm" ? "保存并使用远程 LLM" : "保存远程备用配置"}
+      </button>
+    </div>
+  );
+}
+
 function LocalModelList({
   options,
   selectedModels,
@@ -488,6 +583,12 @@ function LocalModelList({
         <span>本地模型尺寸</span>
         <small>可多选下载；推荐项会作为主模型启用</small>
       </div>
+      <div className="local-model-list-summary">
+        <span>已下载</span>
+        <strong>{options.filter((option) => option.installed).length}</strong>
+        <span>需要下载</span>
+        <strong>{options.filter((option) => !option.installed).length}</strong>
+      </div>
       {options.map((option) => {
         const selected = selectedModels.includes(option.model);
         return (
@@ -502,7 +603,7 @@ function LocalModelList({
               <small>{option.model}</small>
             </span>
             <em>{option.sizeLabel}</em>
-            <small>{option.installed ? "已安装" : option.reason || "可安装"}</small>
+            <small className={option.installed ? "downloaded" : "missing"}>{option.installed ? "已下载" : "需要下载"}</small>
           </label>
         );
       })}
