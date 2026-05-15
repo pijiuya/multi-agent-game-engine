@@ -12,6 +12,7 @@ import math
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 from urllib import request as urlrequest
@@ -36,6 +37,7 @@ from agent_engine.engine.world import (
     AgentProfile,
     DEFAULT_ACTION_SPACE,
     GameWorld,
+    MapImageLayer,
     MapRegion,
     Point,
     PolygonArea,
@@ -88,6 +90,7 @@ class WorldMapUpdate(BaseModel):
     items: list[dict[str, Any]] = Field(default_factory=list)
     triggers: list[dict[str, Any]] = Field(default_factory=list)
     spawn_points: list[dict[str, float]] = Field(default_factory=list)
+    image_layers: list[dict[str, Any]] = Field(default_factory=list)
     regions: list[dict[str, Any]] = Field(default_factory=list)
 
 
@@ -114,6 +117,7 @@ class WorldMapPatch(BaseModel):
     height: int | None = None
     background_image: str | None = None
     regions: list[dict[str, Any]] | None = None
+    image_layers: list[dict[str, Any]] | None = None
 
 
 class AgentPatch(BaseModel):
@@ -234,6 +238,36 @@ class RegionBooleanPayload(BaseModel):
     holes: list[list[dict[str, float]]] = Field(default_factory=list)
 
 
+class MapImageSelection(BaseModel):
+    type: str = "polygon"
+    points: list[dict[str, float]] = Field(default_factory=list)
+    x: float | None = None
+    y: float | None = None
+    width: float | None = None
+    height: float | None = None
+
+
+class MapImageLayerGeneratePayload(BaseModel):
+    prompt: str
+    selection: MapImageSelection
+    mode: str = "region"
+    reference_background: bool = True
+    provider_id: str | None = None
+    target_layer_id: str | None = None
+    region_id: str | None = None
+
+
+class MapImageLayerPatch(BaseModel):
+    name: str | None = None
+    hidden: bool | None = None
+    locked: bool | None = None
+    opacity: float | None = None
+    x: float | None = None
+    y: float | None = None
+    width: float | None = None
+    height: float | None = None
+
+
 REGION_FUNCTION_LABELS = {
     "walkable": "道路",
     "obstacle": "不可通过",
@@ -345,6 +379,11 @@ def update_map(payload: WorldMapUpdate) -> dict[str, Any]:
         triggers=[PolygonArea.from_dict(area) for area in payload.triggers],
         spawn_points=[Point.from_dict(point) for point in payload.spawn_points],
         regions=[MapRegion.from_dict(region) for region in payload.regions],
+        image_layers=[
+            MapImageLayer.from_dict(layer)
+            for layer in payload.image_layers
+            if isinstance(layer, dict) and layer.get("image")
+        ],
     )
     runtime.world.map.sync_functional_regions()
     store.save_world(runtime.world)
@@ -356,6 +395,12 @@ def patch_map(payload: WorldMapPatch) -> dict[str, Any]:
     data = _payload_data(payload)
     if "regions" in data:
         runtime.world.map.regions = [MapRegion.from_dict(region) for region in data.pop("regions")]
+    if "image_layers" in data:
+        runtime.world.map.image_layers = [
+            MapImageLayer.from_dict(layer)
+            for layer in data.pop("image_layers")
+            if isinstance(layer, dict) and layer.get("image")
+        ]
     for field_name, value in data.items():
         setattr(runtime.world.map, field_name, value)
     runtime.world.map.sync_functional_regions()
@@ -433,6 +478,35 @@ def model_capabilities_status() -> dict[str, Any]:
             "docker": shutil.which("docker") is not None,
             "nvidia": shutil.which("nvidia-smi") is not None,
         },
+    }
+
+
+@app.get("/api/runtime/status")
+def runtime_status() -> dict[str, Any]:
+    snapshot = runtime.snapshot()
+    model_tasks = snapshot.get("model_tasks", {})
+    pending_tasks = [
+        {
+            "agent_id": str(agent_id),
+            "provider": str(task.get("provider") or ""),
+            "model": str(task.get("model") or ""),
+            "started_tick": int(task.get("started_tick") or 0),
+            "age_ticks": int(task.get("age_ticks") or 0),
+        }
+        for agent_id, task in model_tasks.items()
+        if isinstance(task, dict) and not bool(task.get("done"))
+    ]
+    return {
+        "timestamp": time.time(),
+        "simulation": {
+            "running": bool(snapshot.get("running")),
+            "tick": int(snapshot.get("tick") or 0),
+            "scene_director_pending": bool(snapshot.get("scene_director", {}).get("pending")),
+            "pending_model_task_count": len(pending_tasks),
+            "pending_model_tasks": pending_tasks,
+        },
+        "models": _runtime_model_statuses(pending_tasks),
+        "hardware": _hardware_pressure_summary(),
     }
 
 
@@ -759,7 +833,76 @@ def regenerate_region(region_id: str, payload: dict[str, Any] | None = None) -> 
         raise HTTPException(status_code=404, detail="Region not found")
     prompt = str((payload or {}).get("prompt") or region.image_prompt or region.name)
     region.image_prompt = prompt
-    region.notes = f"已为区域“{region.name}”创建局部重绘提示：{prompt}"
+    layer = _generate_image_layer(
+        prompt=prompt,
+        selection_points=region.points,
+        mode="region",
+        reference_background=bool(runtime.world.map.background_image),
+        provider_id=None,
+        target_layer_id=None,
+        region_id=region.id,
+    )
+    region.notes = f"已为区域“{region.name}”生成局部图层：{prompt}"
+    store.save_world(runtime.world)
+    snapshot = runtime.snapshot()
+    snapshot["layer"] = layer.to_dict()
+    return snapshot
+
+
+@app.post("/api/map/image-layers/generate")
+def generate_image_layer(payload: MapImageLayerGeneratePayload) -> dict[str, Any]:
+    if payload.mode not in {"region", "extension", "repaint"}:
+        raise HTTPException(status_code=400, detail="图像生成模式只支持 region/extension/repaint")
+    points = _selection_points(payload.selection)
+    if len(points) < 3:
+        raise HTTPException(status_code=400, detail="图像生成区域至少需要 3 个点")
+    layer = _generate_image_layer(
+        prompt=payload.prompt,
+        selection_points=points,
+        mode=payload.mode,
+        reference_background=payload.reference_background,
+        provider_id=payload.provider_id,
+        target_layer_id=payload.target_layer_id,
+        region_id=payload.region_id,
+    )
+    store.save_world(runtime.world)
+    return {"world": runtime.snapshot(), "layer": layer.to_dict()}
+
+
+@app.patch("/api/map/image-layers/{layer_id}")
+def patch_image_layer(layer_id: str, payload: MapImageLayerPatch) -> dict[str, Any]:
+    layer = _image_layer_by_id(layer_id)
+    data = _payload_data(payload)
+    if "opacity" in data:
+        data["opacity"] = max(0.0, min(1.0, float(data["opacity"])))
+    if "width" in data:
+        data["width"] = max(1.0, float(data["width"]))
+    if "height" in data:
+        data["height"] = max(1.0, float(data["height"]))
+    for field_name, value in data.items():
+        setattr(layer, field_name, value)
+    store.save_world(runtime.world)
+    return runtime.snapshot()
+
+
+@app.delete("/api/map/image-layers/{layer_id}")
+def delete_image_layer(layer_id: str) -> dict[str, Any]:
+    _image_layer_by_id(layer_id)
+    runtime.world.map.image_layers = [layer for layer in runtime.world.map.image_layers if layer.id != layer_id]
+    store.save_world(runtime.world)
+    return runtime.snapshot()
+
+
+@app.post("/api/map/image-layers/{layer_id}/merge-background")
+def merge_image_layer(layer_id: str) -> dict[str, Any]:
+    layer = _image_layer_by_id(layer_id)
+    background_path = _asset_path_for_url(runtime.world.map.background_image)
+    layer_path = _asset_path_for_url(layer.image)
+    if not background_path or not layer_path:
+        raise HTTPException(status_code=400, detail="缺少可合并的背景图或图层图像")
+    asset_name = _merge_layer_into_background(background_path, layer_path, layer)
+    runtime.world.map.background_image = f"/api/assets/{asset_name}"
+    runtime.world.map.image_layers = [candidate for candidate in runtime.world.map.image_layers if candidate.id != layer_id]
     store.save_world(runtime.world)
     return runtime.snapshot()
 
@@ -1091,6 +1234,166 @@ def _sync_runtime_model_providers() -> None:
     runtime.providers = providers
     runtime.default_provider_id = default_provider_id
     runtime.scene_director = _scene_director_for_local_chain(first_llm_provider)
+
+
+def _runtime_model_statuses(pending_tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    recent_events = runtime.world.decision_events[-80:]
+    configs = [_public_model_config(config) for config in store.load_model_configs()]
+    statuses: list[dict[str, Any]] = []
+    for config in configs:
+        provider = str(config.get("provider") or "")
+        model = str(config.get("model") or "")
+        matching_events = [
+            event
+            for event in recent_events
+            if event.provider == provider and (not model or event.model == model)
+        ]
+        matching_pending = [
+            task
+            for task in pending_tasks
+            if task.get("provider") == provider and (not model or task.get("model") == model)
+        ]
+        statuses.append(
+            {
+                "id": config.get("id", ""),
+                "name": config.get("name", ""),
+                "kind": config.get("kind", "local"),
+                "provider": provider,
+                "model": model,
+                "capabilities": list(config.get("capabilities", [])),
+                "enabled": bool(config.get("enabled", True)),
+                "pending_count": len(matching_pending),
+                "recent_event_count": len(matching_events),
+                "recent_error_count": sum(1 for event in matching_events if _decision_event_failed(event)),
+            }
+        )
+    return statuses
+
+
+def _decision_event_failed(event: Any) -> bool:
+    for result in getattr(event, "results", []) or []:
+        if isinstance(result, dict) and result.get("ok") is False:
+            return True
+    return False
+
+
+def _hardware_pressure_summary() -> dict[str, Any]:
+    cpu_count = os.cpu_count() or _sysctl_int("hw.ncpu")
+    load_average = _load_average()
+    memory_total = _sysctl_int("hw.memsize")
+    memory_available = _available_memory_bytes(memory_total)
+    gpu_reason = "低影响采样不读取 GPU/ANE 压力；macOS 深度指标通常需要 powermetrics 或系统权限。"
+    if sys.platform != "darwin":
+        gpu_reason = "当前平台未启用低影响 GPU 压力采样。"
+    return {
+        "platform": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+            "python": platform.python_version(),
+        },
+        "chip": _sysctl_text("machdep.cpu.brand_string") if sys.platform == "darwin" else platform.processor(),
+        "cpu_count": cpu_count,
+        "load_average": load_average,
+        "load_percent": _normalized_load_percent(load_average, cpu_count),
+        "memory_total_bytes": memory_total,
+        "memory_available_bytes": memory_available,
+        "memory_used_percent": _memory_used_percent(memory_total, memory_available),
+        "gpu_pressure_available": False,
+        "gpu_pressure_reason": gpu_reason,
+    }
+
+
+def _load_average() -> list[float]:
+    try:
+        return [round(float(value), 2) for value in os.getloadavg()]
+    except (AttributeError, OSError):
+        return []
+
+
+def _normalized_load_percent(load_average: list[float], cpu_count: int | None) -> float | None:
+    if not load_average or not cpu_count:
+        return None
+    return round(max(0.0, min(1.0, load_average[0] / max(1, cpu_count))) * 100, 1)
+
+
+def _memory_used_percent(total: int | None, available: int | None) -> float | None:
+    if not total or available is None:
+        return None
+    used = max(0, total - available)
+    return round((used / total) * 100, 1)
+
+
+def _available_memory_bytes(total: int | None) -> int | None:
+    if sys.platform == "darwin":
+        available = _darwin_available_memory_bytes()
+        if available is not None:
+            return available
+    if hasattr(os, "sysconf"):
+        try:
+            pages = int(os.sysconf("SC_AVPHYS_PAGES"))
+            page_size = int(os.sysconf("SC_PAGE_SIZE"))
+            return pages * page_size
+        except (OSError, ValueError):
+            return None
+    return None
+
+
+def _darwin_available_memory_bytes() -> int | None:
+    try:
+        result = subprocess.run(
+            ["vm_stat"],
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+            timeout=1,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    page_size = 4096
+    free_pages = 0
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip().rstrip(".")
+        if "page size of" in line:
+            parts = [part for part in line.split() if part.isdigit()]
+            if parts:
+                page_size = int(parts[-1])
+            continue
+        key, _, value = line.partition(":")
+        if key in {"Pages free", "Pages inactive", "Pages speculative"}:
+            try:
+                free_pages += int(value.strip().replace(".", ""))
+            except ValueError:
+                pass
+    return free_pages * page_size if free_pages else None
+
+
+def _sysctl_text(name: str) -> str:
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", name],
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+            timeout=1,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _sysctl_int(name: str) -> int | None:
+    text = _sysctl_text(name)
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
 
 
 def _scene_director_for_local_chain(provider: Any | None):
@@ -1470,7 +1773,7 @@ def _openai_json_request(
     base_url = str(config.get("base_url") or "").strip().rstrip("/")
     if not base_url:
         raise RemoteProviderError("Remote base_url is required")
-    url = f"{base_url}/{path.lstrip('/')}"
+    urls = _openai_compatible_urls(base_url, path)
     headers = {
         "Accept": "application/json",
         "User-Agent": "OpenAI/NodeJS/4.0.0",
@@ -1482,15 +1785,59 @@ def _openai_json_request(
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
-    request = urlrequest.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urlrequest.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RemoteProviderError(f"HTTP {exc.code}: {_remote_error_message(detail)}") from exc
-    except (URLError, TimeoutError, ValueError, OSError, json.JSONDecodeError) as exc:
-        raise RemoteProviderError(str(exc)) from exc
+    failures: list[str] = []
+    for url in urls:
+        request = urlrequest.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urlrequest.urlopen(request, timeout=timeout) as response:
+                raw = response.read().decode("utf-8", errors="replace")
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    failures.append(f"{_safe_url_for_error(url)} returned non-JSON: {_summarize_non_json(raw) or str(exc)}")
+                    continue
+                if not isinstance(parsed, dict):
+                    failures.append(f"{_safe_url_for_error(url)} returned JSON but not an object")
+                    continue
+                return parsed
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            failures.append(f"{_safe_url_for_error(url)} HTTP {exc.code}: {_remote_error_message(detail)}")
+            if exc.code not in {404, 405}:
+                continue
+        except (URLError, TimeoutError, ValueError, OSError) as exc:
+            failures.append(f"{_safe_url_for_error(url)} {exc}")
+    raise RemoteProviderError(_combined_remote_failures(failures))
+
+
+def _openai_compatible_urls(base_url: str, path: str) -> list[str]:
+    clean_path = path.lstrip("/")
+    urls = [f"{base_url}/{clean_path}"]
+    lowered = base_url.lower().rstrip("/")
+    if not lowered.endswith("/v1") and "/v1/" not in lowered:
+        urls.append(f"{base_url}/v1/{clean_path}")
+    seen: set[str] = set()
+    return [url for url in urls if not (url in seen or seen.add(url))]
+
+
+def _safe_url_for_error(url: str) -> str:
+    return url.split("?", 1)[0]
+
+
+def _summarize_non_json(raw: str) -> str:
+    text = raw.strip()
+    if not text:
+        return "empty response"
+    lowered = text[:200].lower()
+    if "<!doctype html" in lowered or "<html" in lowered:
+        return "HTML page; try an OpenAI-compatible API base such as https://host/v1"
+    return text[:240]
+
+
+def _combined_remote_failures(failures: list[str]) -> str:
+    if not failures:
+        return "remote request failed"
+    return "；".join(failures[-3:])
 
 
 def _remote_error_message(detail: str) -> str:
@@ -2370,6 +2717,218 @@ def _regions_from_provider_response(data: Any, config: dict[str, Any]) -> list[M
             )
         )
     return regions
+
+
+def _selection_points(selection: MapImageSelection) -> list[Point]:
+    if selection.type == "rect" or (selection.width is not None and selection.height is not None):
+        x = float(selection.x or 0)
+        y = float(selection.y or 0)
+        width = max(1.0, float(selection.width or 1))
+        height = max(1.0, float(selection.height or 1))
+        return [
+            Point(x, y),
+            Point(x + width, y),
+            Point(x + width, y + height),
+            Point(x, y + height),
+        ]
+    return [Point.from_dict(point) for point in selection.points]
+
+
+def _image_layer_by_id(layer_id: str) -> MapImageLayer:
+    layer = next((candidate for candidate in runtime.world.map.image_layers if candidate.id == layer_id), None)
+    if layer is None:
+        raise HTTPException(status_code=404, detail="Image layer not found")
+    return layer
+
+
+def _generate_image_layer(
+    prompt: str,
+    selection_points: list[Point],
+    mode: str,
+    reference_background: bool,
+    provider_id: str | None,
+    target_layer_id: str | None,
+    region_id: str | None,
+) -> MapImageLayer:
+    left, top, width, height = _points_bounds(selection_points)
+    if width < 1 or height < 1:
+        raise HTTPException(status_code=400, detail="图像生成区域无效")
+    if mode == "extension":
+        runtime.world.map.width = max(runtime.world.map.width, math.ceil(left + width))
+        runtime.world.map.height = max(runtime.world.map.height, math.ceil(top + height))
+    generation_id = new_id("layer")
+    config = _image_generation_config(provider_id)
+    use_reference = reference_background and bool(runtime.world.map.background_image) and config is not None and config.get("provider") in OPENAI_IMAGE_PROVIDERS
+    try:
+        if use_reference:
+            asset_name = _call_openai_image_edit_provider(config, generation_id, prompt, selection_points, int(math.ceil(width)), int(math.ceil(height)))
+        elif config is not None and config.get("provider") in OPENAI_IMAGE_PROVIDERS:
+            candidates = _call_openai_image_provider(config, generation_id, prompt, int(math.ceil(width)), int(math.ceil(height)), 1)
+            asset_name = candidates[0]["url"].rsplit("/", 1)[-1]
+            asset_name = _clip_layer_asset_to_selection(asset_name, selection_points, left, top, int(math.ceil(width)), int(math.ceil(height)))
+        else:
+            asset_name = _mock_image_layer_asset(generation_id, prompt, selection_points, left, top, int(math.ceil(width)), int(math.ceil(height)), mode)
+    except HTTPException:
+        if config is None or config.get("provider") in OPENAI_IMAGE_PROVIDERS:
+            asset_name = _mock_image_layer_asset(generation_id, prompt, selection_points, left, top, int(math.ceil(width)), int(math.ceil(height)), mode)
+        else:
+            raise
+    layer_kind = "extension" if mode == "extension" else "region"
+    next_layer = MapImageLayer(
+        id=target_layer_id or generation_id,
+        name=("边缘延展" if layer_kind == "extension" else "区域生成") + f" {len(runtime.world.map.image_layers) + 1}",
+        kind=layer_kind,
+        image=f"/api/assets/{asset_name}",
+        x=left,
+        y=top,
+        width=width,
+        height=height,
+        prompt=prompt,
+        region_id=region_id,
+        opacity=1.0,
+    )
+    if target_layer_id:
+        existing = _image_layer_by_id(target_layer_id)
+        existing.image = next_layer.image
+        existing.x = next_layer.x
+        existing.y = next_layer.y
+        existing.width = next_layer.width
+        existing.height = next_layer.height
+        existing.prompt = prompt
+        existing.region_id = region_id or existing.region_id
+        existing.hidden = False
+        return existing
+    runtime.world.map.image_layers.append(next_layer)
+    return next_layer
+
+
+def _points_bounds(points: list[Point]) -> tuple[float, float, float, float]:
+    left = math.floor(min(point.x for point in points))
+    top = math.floor(min(point.y for point in points))
+    right = math.ceil(max(point.x for point in points))
+    bottom = math.ceil(max(point.y for point in points))
+    return float(left), float(top), float(max(1, right - left)), float(max(1, bottom - top))
+
+
+def _call_openai_image_edit_provider(
+    config: dict[str, Any],
+    generation_id: str,
+    prompt: str,
+    points: list[Point],
+    width: int,
+    height: int,
+) -> str:
+    background_path = _asset_path_for_url(runtime.world.map.background_image)
+    if not background_path:
+        raise HTTPException(status_code=400, detail="当前地图缺少可参考的背景图")
+    image_b64, mask_b64 = _region_edit_inputs_base64(background_path, points, width, height)
+    body = {
+        "model": str(config.get("model") or ""),
+        "prompt": prompt,
+        "size": _openai_image_size(width, height),
+        "image": image_b64,
+        "mask": mask_b64,
+        "n": 1,
+    }
+    try:
+        data = _openai_json_request(
+            config,
+            "POST",
+            "images/edits",
+            body,
+            timeout=float(os.getenv("AGENT_ENGINE_REMOTE_IMAGE_TIMEOUT", "180")),
+        )
+    except RemoteProviderError as exc:
+        raise HTTPException(status_code=502, detail=f"Image edit failed: {exc}") from exc
+    raw_images = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(raw_images, list) or not raw_images:
+        raise HTTPException(status_code=502, detail="Image edit response had no images")
+    asset_name = _save_generated_image_asset(config, raw_images[0], generation_id, 0)
+    left, top, _, _ = _points_bounds(points)
+    return _clip_layer_asset_to_selection(asset_name, points, left, top, width, height)
+
+
+def _region_edit_inputs_base64(background_path: str, points: list[Point], width: int, height: int) -> tuple[str, str]:
+    from io import BytesIO
+    from PIL import Image, ImageDraw
+
+    left, top, _, _ = _points_bounds(points)
+    image = Image.open(background_path).convert("RGBA")
+    crop = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    crop.alpha_composite(image.crop((int(left), int(top), int(left + width), int(top + height))), (0, 0))
+    mask = Image.new("RGBA", (width, height), (0, 0, 0, 255))
+    draw = ImageDraw.Draw(mask)
+    draw.polygon([(point.x - left, point.y - top) for point in points], fill=(255, 255, 255, 0))
+    return _png_base64(crop), _png_base64(mask)
+
+
+def _mock_image_layer_asset(
+    generation_id: str,
+    prompt: str,
+    points: list[Point],
+    left: float,
+    top: float,
+    width: int,
+    height: int,
+    mode: str,
+) -> str:
+    from PIL import Image, ImageDraw
+
+    asset_name = f"{generation_id}_1.png"
+    store.initialize()
+    image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image, "RGBA")
+    hue = (len(prompt) * 11 + (41 if mode == "extension" else 0)) % 360
+    color = _hsl_to_rgb(hue, 0.5, 0.62) + (210,)
+    outline = _hsl_to_rgb((hue + 130) % 360, 0.42, 0.36) + (230,)
+    shifted = [(point.x - left, point.y - top) for point in points]
+    draw.polygon(shifted, fill=color, outline=outline)
+    step = max(16, min(width, height) // 8)
+    for x in range(0, width + step, step):
+        draw.line((x, 0, x - height, height), fill=(255, 255, 255, 38), width=2)
+    draw.text((12, 12), "AI", fill=(255, 255, 255, 220))
+    image.save(store.assets_dir / asset_name, format="PNG")
+    return asset_name
+
+
+def _clip_layer_asset_to_selection(asset_name: str, points: list[Point], left: float, top: float, width: int, height: int) -> str:
+    from PIL import Image, ImageDraw
+
+    path = store.assets_dir / asset_name
+    image = Image.open(path).convert("RGBA").resize((width, height))
+    mask = Image.new("L", (width, height), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.polygon([(point.x - left, point.y - top) for point in points], fill=255)
+    image.putalpha(mask)
+    clipped_name = f"{Path(asset_name).stem}_alpha.png"
+    image.save(store.assets_dir / clipped_name, format="PNG")
+    return clipped_name
+
+
+def _png_base64(image: Any) -> str:
+    from io import BytesIO
+
+    output = BytesIO()
+    image.save(output, format="PNG")
+    return base64.b64encode(output.getvalue()).decode("ascii")
+
+
+def _merge_layer_into_background(background_path: str, layer_path: str, layer: MapImageLayer) -> str:
+    from PIL import Image
+
+    background = Image.open(background_path).convert("RGBA")
+    width = max(background.width, math.ceil(layer.x + layer.width))
+    height = max(background.height, math.ceil(layer.y + layer.height))
+    canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    canvas.alpha_composite(background, (0, 0))
+    overlay = Image.open(layer_path).convert("RGBA").resize((int(layer.width), int(layer.height)))
+    if layer.opacity < 1:
+        alpha = overlay.getchannel("A").point(lambda value: int(value * layer.opacity))
+        overlay.putalpha(alpha)
+    canvas.alpha_composite(overlay, (int(layer.x), int(layer.y)))
+    asset_name = f"{new_id('merged')}.png"
+    canvas.save(store.assets_dir / asset_name, format="PNG")
+    return asset_name
 
 
 def _image_generation_config(provider_id: str | None) -> dict[str, Any] | None:

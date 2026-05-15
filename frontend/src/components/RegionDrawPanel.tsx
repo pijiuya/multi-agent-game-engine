@@ -6,6 +6,8 @@ type Props = {
   targetFunction: MapRegionFunction;
   targetLayer: RegionLayer | null;
   draftCount: number;
+  finishMinPoints?: number;
+  title?: string;
   onOperation: (operation: RegionDrawOperation) => void;
   onTargetFunction: (fn: MapRegionFunction) => void;
   onFinish: () => void;
@@ -20,6 +22,8 @@ export function RegionDrawPanel({
   targetFunction,
   targetLayer,
   draftCount,
+  finishMinPoints = 3,
+  title = "区域绘制",
   onOperation,
   onTargetFunction,
   onFinish,
@@ -27,10 +31,10 @@ export function RegionDrawPanel({
   onClear
 }: Props) {
   const targetCount = targetLayer?.region_ids.length ?? 0;
-  const finishDisabled = draftCount < 3 || (operation === "subtract" && targetCount === 0);
+  const finishDisabled = draftCount < finishMinPoints || (operation === "subtract" && targetCount === 0);
   return (
     <div className="region-draw-panel" data-testid="region-draw-panel">
-      <div className="panel-section-label">区域绘制</div>
+      <div className="panel-section-label">{title}</div>
       <div className="ratio-row" data-testid="region-draw-operation">
         <button className={operation === "add" ? "active" : ""} onClick={() => onOperation("add")} type="button">
           <Plus size={14} />
@@ -70,7 +74,7 @@ export function RegionDrawPanel({
           清空
         </button>
       </div>
-      <div className="segmentation-status">Enter 完成绘制；Esc 清空草稿。</div>
+      <div className="segmentation-status">{finishMinPoints <= 2 ? "两点生成矩形；三点以上生成手绘区域。Enter 完成；Esc 清空。" : "Enter 完成绘制；Esc 清空草稿。"}</div>
     </div>
   );
 }

@@ -59,6 +59,63 @@ def test_api_patch_narrative_updates_saved_snapshot():
     assert client.get("/api/world").json()["narrative"] == narrative
 
 
+def test_api_runtime_status_is_read_only(monkeypatch):
+    client = TestClient(app)
+    api_main.runtime.world = api_main.GameWorld.default()
+    api_main.runtime.world.running = True
+    api_main.runtime.world.tick = 42
+    api_main.runtime.world.add_decision_event(
+        agent_id="agent_mira",
+        provider="ollama",
+        model="qwen2.5:7b",
+        observation={},
+        text="ok",
+        actions=[],
+        results=[{"ok": True, "elapsed_ms": 12}],
+    )
+    configs = [
+        {
+            "id": "model_local_llm",
+            "name": "本地 LLM",
+            "kind": "local",
+            "provider": "ollama",
+            "base_url": "http://127.0.0.1:11434",
+            "api_key": "",
+            "model": "qwen2.5:7b",
+            "enabled": True,
+            "capabilities": ["llm"],
+        },
+        {
+            "id": "model_remote_llm",
+            "name": "线上 LLM",
+            "kind": "remote",
+            "provider": "openai-compatible",
+            "base_url": "https://example.test/v1",
+            "api_key": "secret",
+            "model": "remote-model",
+            "enabled": False,
+            "capabilities": ["llm"],
+        },
+    ]
+    monkeypatch.setattr(api_main.store, "load_model_configs", lambda: configs)
+    before_world = api_main.runtime.world.to_dict()
+
+    response = client.get("/api/runtime/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["simulation"]["running"] is True
+    assert payload["simulation"]["tick"] == 42
+    assert payload["simulation"]["pending_model_task_count"] == 0
+    assert payload["models"][0]["name"] == "本地 LLM"
+    assert payload["models"][0]["recent_event_count"] == 1
+    assert payload["models"][0]["recent_error_count"] == 0
+    assert payload["models"][1]["kind"] == "remote"
+    assert "cpu_count" in payload["hardware"]
+    assert "gpu_pressure_reason" in payload["hardware"]
+    assert api_main.runtime.world.to_dict() == before_world
+
+
 def test_api_patch_editor_entities():
     client = TestClient(app)
 
@@ -808,6 +865,168 @@ def test_openai_image_provider_accepts_url_candidates(monkeypatch):
 
     assert downloaded["url"] == "https://cdn.example.test/image.png"
     assert candidates[0]["url"].startswith("/api/assets/")
+
+
+def test_openai_compatible_request_falls_back_to_v1_for_relay_root(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, body: str):
+            self.body = body.encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return self.body
+
+    def fake_urlopen(request, timeout=30):
+        calls.append(request.full_url)
+        if request.full_url == "https://relay.example.test/models":
+            return FakeResponse("<html>relay home</html>")
+        return FakeResponse('{"data":[{"id":"gpt-image-2"}]}')
+
+    monkeypatch.setattr(api_main.urlrequest, "urlopen", fake_urlopen)
+
+    data = api_main._openai_json_request(
+        {
+            "base_url": "https://relay.example.test",
+            "api_key": "secret",
+            "model": "gpt-image-2",
+        },
+        "GET",
+        "models",
+    )
+
+    assert calls == ["https://relay.example.test/models", "https://relay.example.test/v1/models"]
+    assert data["data"][0]["id"] == "gpt-image-2"
+
+
+def test_api_image_layer_generation_without_background_creates_alpha_layer():
+    client = TestClient(app)
+    api_main.runtime.world = api_main.GameWorld.default()
+    api_main.runtime.world.map.background_image = None
+    api_main.runtime.world.map.image_layers = []
+
+    response = client.post(
+        "/api/map/image-layers/generate",
+        json={
+            "prompt": "透明区域花园",
+            "selection": {
+                "type": "polygon",
+                "points": [{"x": 20, "y": 30}, {"x": 180, "y": 30}, {"x": 180, "y": 140}, {"x": 20, "y": 140}],
+            },
+            "mode": "region",
+            "reference_background": False,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    layer = payload["layer"]
+    assert layer["kind"] == "region"
+    assert layer["image"].startswith("/api/assets/")
+    assert payload["world"]["map"]["image_layers"][0]["id"] == layer["id"]
+    asset_name = layer["image"].rsplit("/", 1)[-1]
+    assert (api_main.store.assets_dir / asset_name).exists()
+
+
+def test_api_image_layer_generation_with_background_uses_edit_path(monkeypatch):
+    client = TestClient(app)
+    api_main.runtime.world = api_main.GameWorld.default()
+    api_main.runtime.world.map.image_layers = []
+    background = api_main.store.assets_dir / "test-layer-bg.png"
+    background.parent.mkdir(parents=True, exist_ok=True)
+    from PIL import Image
+
+    Image.new("RGBA", (256, 256), (80, 120, 160, 255)).save(background)
+    api_main.runtime.world.map.background_image = "/api/assets/test-layer-bg.png"
+    client.patch(
+        "/api/models",
+        json={
+            "models": [
+                {
+                    "id": "model_remote_image",
+                    "name": "Remote image",
+                    "kind": "remote",
+                    "provider": "image-http",
+                    "base_url": "https://api.example.test/v1",
+                    "api_key": "image-secret",
+                    "model": "gpt-image-2",
+                    "enabled": True,
+                    "capabilities": ["image_generation"],
+                }
+            ]
+        },
+    )
+    called = {"path": ""}
+
+    def fake_openai_json_request(config, method, path, body=None, timeout=30):
+        called["path"] = path
+        assert method == "POST"
+        assert body["image"]
+        assert body["mask"]
+        import io
+
+        output = io.BytesIO()
+        Image.new("RGBA", (90, 80), (200, 120, 80, 255)).save(output, format="PNG")
+        return {"data": [{"b64_json": api_main.base64.b64encode(output.getvalue()).decode("ascii")}]}
+
+    monkeypatch.setattr(api_main, "_openai_json_request", fake_openai_json_request)
+
+    response = client.post(
+        "/api/map/image-layers/generate",
+        json={
+            "prompt": "参考背景生成小屋",
+            "selection": {"type": "rect", "x": 10, "y": 12, "width": 90, "height": 80},
+            "mode": "region",
+            "reference_background": True,
+            "provider_id": "model_remote_image",
+        },
+    )
+
+    assert response.status_code == 200
+    assert called["path"] == "images/edits"
+    assert response.json()["layer"]["kind"] == "region"
+
+
+def test_api_extension_layer_expands_map_and_layer_management():
+    client = TestClient(app)
+    api_main.runtime.world = api_main.GameWorld.default()
+    api_main.runtime.world.map.width = 100
+    api_main.runtime.world.map.height = 100
+    api_main.runtime.world.map.image_layers = []
+
+    generated = client.post(
+        "/api/map/image-layers/generate",
+        json={
+            "prompt": "向右扩展森林边缘",
+            "selection": {"type": "rect", "x": 80, "y": 20, "width": 90, "height": 60},
+            "mode": "extension",
+            "reference_background": False,
+        },
+    )
+    assert generated.status_code == 200
+    layer = generated.json()["layer"]
+    assert generated.json()["world"]["map"]["width"] == 170
+    assert layer["kind"] == "extension"
+
+    patched = client.patch(
+        f"/api/map/image-layers/{layer['id']}",
+        json={"name": "右侧森林", "hidden": True, "opacity": 0.45},
+    )
+    assert patched.status_code == 200
+    patched_layer = patched.json()["map"]["image_layers"][0]
+    assert patched_layer["name"] == "右侧森林"
+    assert patched_layer["hidden"] is True
+    assert patched_layer["opacity"] == 0.45
+
+    deleted = client.delete(f"/api/map/image-layers/{layer['id']}")
+    assert deleted.status_code == 200
+    assert deleted.json()["map"]["image_layers"] == []
 
 
 def test_api_llm_install_task_pulls_default_qwen_and_configures(monkeypatch):

@@ -108,7 +108,7 @@ export function FloatingPanel({
       }}
       onPointerDown={(event) => {
         const target = event.target as HTMLElement;
-        if (target.closest("button, input, label")) {
+        if (target.closest("button, input, textarea, select, label, [contenteditable='true']")) {
           return;
         }
         onBringToFront(panel.id);

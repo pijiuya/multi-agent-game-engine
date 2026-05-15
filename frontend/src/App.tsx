@@ -7,6 +7,7 @@ import { latestNarrativeLine, NarrativePanel } from "./components/NarrativePanel
 import { PropertiesPanel } from "./components/PropertiesPanel";
 import { RegionDrawPanel } from "./components/RegionDrawPanel";
 import { RegionPanel } from "./components/RegionPanel";
+import { RuntimeMonitorPanel } from "./components/RuntimeMonitorPanel";
 import { SceneElementsPanel } from "./components/SceneElementsPanel";
 import { SceneViewport } from "./components/SceneViewport";
 import { ToolPanel } from "./components/ToolPanel";
@@ -22,19 +23,23 @@ import {
   createMapRegion,
   createAgent as createAgentRemote,
   deleteAgent,
+  deleteMapImageLayer,
   deleteMapItem,
   deleteMapRegion,
   createMapGeneration,
+  generateMapImageLayer,
   configureLocalCapability,
   configureRemoteCapability,
   fetchRemoteCapabilityModels,
   getModelCapabilityTask,
   getModelCapabilityStatus,
+  getRuntimeStatus,
   getWorld,
   getModels,
   idleSegmentation,
   installLocalCapability,
   patchAgent,
+  patchMapImageLayer,
   patchMap,
   patchMapItem,
   patchMapRegion,
@@ -59,6 +64,7 @@ import type {
   CanvasViewState,
   EditTool,
   MapGenerationState,
+  MapImageLayer,
   MapRatioPreset,
   MapRegion,
   MapRegionFunction,
@@ -74,6 +80,7 @@ import type {
   PolygonArea,
   RemoteModelOption,
   RemoteModelTestResult,
+  RuntimeStatus,
   SelectionState,
   WorldItem,
   WorldMap,
@@ -86,13 +93,14 @@ type AnchorMenuState = {
   point: Point;
 };
 
-type ObjectMenuTarget = { kind: "agent" | "item" | "region"; id: string };
+type ObjectMenuTarget = { kind: "agent" | "item" | "region" | "imageLayer"; id: string };
 type ObjectMenuState = ObjectMenuTarget & { x: number; y: number };
 
 type ItemPatch = Partial<Omit<WorldItem, "id">>;
+type ImageLayerPatch = Partial<Omit<MapImageLayer, "id" | "kind" | "image" | "prompt" | "region_id" | "created_at">>;
 type MapPatch = Partial<Pick<WorldMap, "name" | "width" | "height" | "background_image">>;
 type AgentPatch = Partial<Omit<AgentProfile, "id">>;
-const PANEL_LAYOUT_STORAGE_KEY = "agent-workstation.panel-layout.v3";
+const PANEL_LAYOUT_STORAGE_KEY = "agent-workstation.panel-layout.v5";
 const PANEL_MARGIN = 16;
 const PANEL_GAP = 8;
 const PANEL_SNAP_DISTANCE = 20;
@@ -124,6 +132,8 @@ export default function App() {
   const [models, setModels] = useState<ModelConfig[]>([]);
   const [modelCapabilityStatuses, setModelCapabilityStatuses] = useState<ModelCapabilityStatus[]>([]);
   const [modelCapabilityTasks, setModelCapabilityTasks] = useState<Partial<Record<ModelCapabilityId, ModelCapabilityTask>>>({});
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
+  const [runtimeStatusStale, setRuntimeStatusStale] = useState(false);
   const [generation, setGeneration] = useState<MapGenerationState | null>(null);
   const [segmentation, setSegmentation] = useState<MapSegmentationState>(() => idleSegmentation());
   const [panels, setPanels] = useState<PanelState[]>(() => loadPanelLayout(createInitialPanels()));
@@ -156,6 +166,10 @@ export default function App() {
     return Boolean(world.agent_profiles[selectedAgentId]);
   }, [world, selectedAgentId]);
   const narrativeLine = useMemo(() => (world ? latestNarrativeLine(world.events) : null), [world?.events]);
+  const runtimeMonitorActive = useMemo(
+    () => panels.some((panel) => panel.id === "runtimeMonitor" && !panel.minimized),
+    [panels]
+  );
 
   useEffect(() => {
     void refreshWorld();
@@ -170,6 +184,34 @@ export default function App() {
     }, 3500);
     return () => window.clearInterval(retry);
   }, []);
+
+  useEffect(() => {
+    if (!runtimeMonitorActive) {
+      return;
+    }
+    let cancelled = false;
+    const refresh = async () => {
+      if (document.visibilityState === "hidden") {
+        return;
+      }
+      const nextStatus = await getRuntimeStatus();
+      if (cancelled) {
+        return;
+      }
+      if (nextStatus) {
+        setRuntimeStatus(nextStatus);
+        setRuntimeStatusStale(false);
+      } else {
+        setRuntimeStatusStale(true);
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [runtimeMonitorActive]);
 
   useEffect(() => {
     savePanelLayout(panels);
@@ -219,6 +261,9 @@ export default function App() {
     if (selection.kind === "item" && !world.map.items.some((item) => item.id === selection.id)) {
       setSelection({ kind: "map", id: world.map.id });
     }
+    if (selection.kind === "imageLayer" && !world.map.image_layers.some((layer) => layer.id === selection.id)) {
+      setSelection({ kind: "map", id: world.map.id });
+    }
     if (selection.kind === "region" && !world.map.regions.some((region) => region.id === selection.id)) {
       setSelection({ kind: "map", id: world.map.id });
     }
@@ -234,7 +279,7 @@ export default function App() {
   }, [activeRegionId, canvasPoints, selection, selectedAgentExists, world]);
 
   useEffect(() => {
-    if (editTool !== "region") {
+    if (!["region", "imageGenerate", "edgeExtend"].includes(editTool)) {
       return;
     }
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -244,7 +289,7 @@ export default function App() {
       }
       if (event.key === "Enter") {
         event.preventDefault();
-        void finalizePolygon();
+        void finalizeActiveDraft();
       }
       if (event.key === "Escape") {
         event.preventDefault();
@@ -273,6 +318,16 @@ export default function App() {
 
   async function refreshModelCapabilities() {
     setModelCapabilityStatuses(await getModelCapabilityStatus());
+  }
+
+  async function refreshRuntimeStatus() {
+    const nextStatus = await getRuntimeStatus();
+    if (nextStatus) {
+      setRuntimeStatus(nextStatus);
+      setRuntimeStatusStale(false);
+    } else {
+      setRuntimeStatusStale(true);
+    }
   }
 
   async function setSimulationRunning(running: boolean, stopped = false) {
@@ -343,7 +398,7 @@ export default function App() {
       setSelection({ kind: "map", id: world.map.id });
       return;
     }
-    if (editTool === "region") {
+    if (editTool === "region" || editTool === "imageGenerate" || editTool === "edgeExtend") {
       setDraftPoints((points) => [...points, snapWorldPointToGrid(point, canvasView.zoom)]);
       return;
     }
@@ -386,7 +441,7 @@ export default function App() {
   }
 
   async function finalizePolygon() {
-    if (!world || draftPoints.length < 3) {
+    if (!world || draftPoints.length < 2) {
       return;
     }
     if (editTool !== "region") {
@@ -464,6 +519,42 @@ export default function App() {
       setSelection({ kind: "regionLayer", id: regionDrawTargetFunction });
       setStatus("本地手绘区域");
       setDraftPoints([]);
+    }
+  }
+
+  async function finalizeActiveDraft() {
+    if (editTool === "imageGenerate" || editTool === "edgeExtend") {
+      await generateLayerFromDraft(editTool);
+      return;
+    }
+    await finalizePolygon();
+  }
+
+  async function generateLayerFromDraft(tool: "imageGenerate" | "edgeExtend") {
+    if (!world || draftPoints.length < 3) {
+      return;
+    }
+    const prompt = window.prompt(tool === "edgeExtend" ? "边缘延展提示" : "区域图像提示", tool === "edgeExtend" ? "延展地图边缘，保持原地图俯视风格" : "生成适合这个区域的俯视地图元素");
+    if (!prompt?.trim()) {
+      return;
+    }
+    const provider = enabledModelForCapability(models, "image_generation");
+    setStatus(tool === "edgeExtend" ? "正在生成边缘延展图层" : "正在生成区域图层");
+    try {
+      const result = await generateMapImageLayer({
+        prompt: prompt.trim(),
+        selection: imageSelectionFromDraft(draftPoints),
+        mode: tool === "edgeExtend" ? "extension" : "region",
+        reference_background: Boolean(world.map.background_image),
+        provider_id: provider?.id ?? null
+      });
+      setWorld(result.world);
+      setSelection({ kind: "imageLayer", id: result.layer.id });
+      setDraftPoints([]);
+      setEditTool("select");
+      setStatus(tool === "edgeExtend" ? "边缘延展图层已生成" : "区域图层已生成");
+    } catch (error) {
+      setStatus(`图像生成失败：${error instanceof Error ? error.message : "接口不可用"}`);
     }
   }
 
@@ -569,6 +660,11 @@ export default function App() {
       setStatus(hidden ? "元素已隐藏" : "元素已显示");
       return;
     }
+    if (target.kind === "imageLayer") {
+      await updateImageLayer(target.id, { hidden });
+      setStatus(hidden ? "图层已隐藏" : "图层已显示");
+      return;
+    }
     await updateRegion(target.id, { hidden });
     setStatus(hidden ? "区域已隐藏" : "区域已显示");
   }
@@ -602,6 +698,18 @@ export default function App() {
         setStatus("元素已删除");
       } else {
         setStatus("本地已删除元素");
+      }
+      return;
+    }
+    if (target.kind === "imageLayer") {
+      setWorld({ ...world, map: { ...world.map, image_layers: world.map.image_layers.filter((layer) => layer.id !== target.id) } });
+      setSelection({ kind: "map", id: world.map.id });
+      const snapshot = await deleteMapImageLayer(target.id);
+      if (snapshot) {
+        setWorld(snapshot);
+        setStatus("图层已删除");
+      } else {
+        setStatus("本地已删除图层");
       }
       return;
     }
@@ -828,7 +936,12 @@ export default function App() {
     const snapshot = await regenerateMapRegion(regionId, prompt);
     if (snapshot) {
       setWorld(snapshot);
-      setStatus("区域重绘提示已保存");
+      const regionLayers = snapshot.map.image_layers.filter((layer) => layer.region_id === regionId);
+      const latestLayer = regionLayers[regionLayers.length - 1];
+      if (latestLayer) {
+        setSelection({ kind: "imageLayer", id: latestLayer.id });
+      }
+      setStatus("区域重绘图层已生成");
     } else {
       setWorld((current) =>
         current
@@ -1066,6 +1179,21 @@ export default function App() {
     );
   }
 
+  async function updateImageLayer(layerId: string, patch: ImageLayerPatch) {
+    if (!world || Object.keys(patch).length === 0) {
+      return;
+    }
+    setSelection({ kind: "imageLayer", id: layerId });
+    setWorld((current) => (current ? applyImageLayerPatch(current, layerId, patch) : current));
+    const snapshot = await patchMapImageLayer(layerId, patch);
+    if (snapshot) {
+      setWorld(snapshot);
+      setStatus("图层已保存");
+    } else {
+      setStatus("本地图层更改");
+    }
+  }
+
   function resizePanel(id: PanelState["id"], x: number, y: number, width: number, height: number) {
     setPanels((current) =>
       current.map((panel) => {
@@ -1105,8 +1233,24 @@ export default function App() {
     setPanels((current) => {
       const nextZ = maxPanelZ(current) + 1;
       setZCursor(nextZ);
-      return current.map((panel) => (panel.id === id ? { ...panel, minimized: false, zIndex: nextZ } : panel));
+      return current.map((panel) =>
+        panel.id === id ? clampPanelToViewport({ ...panel, minimized: false, zIndex: nextZ }) : panel
+      );
     });
+  }
+
+  function openRuntimeMonitor() {
+    setPanels((current) => {
+      const nextZ = maxPanelZ(current) + 1;
+      setZCursor(nextZ);
+      const focusedPanel = runtimeMonitorPanelForViewport(nextZ);
+      if (!current.some((panel) => panel.id === "runtimeMonitor")) {
+        return [...current, focusedPanel];
+      }
+      return current.map((panel) => (panel.id === "runtimeMonitor" ? { ...focusedPanel, dockedTo: panel.dockedTo } : panel));
+    });
+    setStatus("运行监控已打开");
+    void refreshRuntimeStatus();
   }
 
   function resetPanelLayout() {
@@ -1176,6 +1320,7 @@ export default function App() {
         onStop={() => void setSimulationRunning(false, true)}
         onAppBackgroundOpacity={setAppBackgroundOpacity}
         onCenterOrigin={() => centerOnWorldPoint(ORIGIN_POINT)}
+        onOpenRuntimeMonitor={openRuntimeMonitor}
         appearanceMode={appearanceMode}
         onToggleAppearance={() => setAppearanceMode((mode) => (mode === "light" ? "dark" : "light"))}
         onResetPanelLayout={resetPanelLayout}
@@ -1220,13 +1365,16 @@ export default function App() {
               zoomPercent={Math.round(canvasView.zoom * 100)}
               onEditTool={(tool) => {
                 setEditTool(tool);
-                if (tool !== "region") {
+                if (!["region", "imageGenerate", "edgeExtend"].includes(tool)) {
                   setDraftPoints([]);
                 }
                 if (tool === "region") {
                   setMapStudioStep("layers");
                   openPanel("regionDraw");
                   openPanel("regions");
+                }
+                if (tool === "imageGenerate" || tool === "edgeExtend") {
+                  openPanel("regionDraw");
                 }
               }}
               onStep={() => void handleStep()}
@@ -1259,13 +1407,15 @@ export default function App() {
               targetFunction={regionDrawTargetFunction}
               targetLayer={world.map.region_layers.find((layer) => layer.function === regionDrawTargetFunction) ?? null}
               draftCount={draftPoints.length}
+              finishMinPoints={editTool === "imageGenerate" || editTool === "edgeExtend" ? 2 : 3}
+              title={editTool === "edgeExtend" ? "边缘延展选区" : editTool === "imageGenerate" ? "区域图像选区" : "区域绘制"}
               onOperation={setRegionDrawOperation}
               onTargetFunction={(fn) => {
                 setRegionDrawTargetFunction(fn);
                 setActiveRegionId(null);
                 setSelection({ kind: "regionLayer", id: fn });
               }}
-              onFinish={() => void finalizePolygon()}
+              onFinish={() => void finalizeActiveDraft()}
               onUndoPoint={() => setDraftPoints((points) => points.slice(0, -1))}
               onClear={() => setDraftPoints([])}
             />
@@ -1296,6 +1446,13 @@ export default function App() {
               onConfigureRemote={(capability, draft) => void configureRemoteModelCapability(capability, draft)}
               onFetchRemoteModels={loadRemoteModelsForCapability}
               onTestRemote={testRemoteModelCapability}
+            />
+          ) : null}
+          {panel.id === "runtimeMonitor" ? (
+            <RuntimeMonitorPanel
+              status={runtimeStatus}
+              stale={runtimeStatusStale}
+              onRefresh={() => void refreshRuntimeStatus()}
             />
           ) : null}
           {panel.id === "mapStudio" ? (
@@ -1329,6 +1486,7 @@ export default function App() {
               onUpdateMap={(patch) => void updateMapPatch(patch)}
               onUpdateAgent={(agentId, patch) => void updateAgentProfile(agentId, patch)}
               onUpdateItem={(itemId, patch) => void updateItemPatch(itemId, patch)}
+              onUpdateImageLayer={(layerId, patch) => void updateImageLayer(layerId, patch)}
               onUploadItemImage={(itemId, file) => void uploadItemImage(itemId, file)}
               onUpdateRegion={(regionId, patch) => void updateRegion(regionId, patch)}
               onRegenerateRegion={(regionId, prompt) => void regenerateRegion(regionId, prompt)}
@@ -1382,6 +1540,10 @@ function objectMenuTarget(world: WorldSnapshot, menu: ObjectMenuTarget) {
     const item = world.map.items.find((candidate) => candidate.id === menu.id);
     return item ? { name: item.name, hidden: item.hidden, label: "元素" } : null;
   }
+  if (menu.kind === "imageLayer") {
+    const layer = world.map.image_layers.find((candidate) => candidate.id === menu.id);
+    return layer ? { name: layer.name, hidden: layer.hidden, label: layer.kind === "extension" ? "边缘延展图层" : "区域图层" } : null;
+  }
   const region = world.map.regions.find((candidate) => candidate.id === menu.id);
   return region ? { name: region.name, hidden: region.hidden, label: "区域轮廓" } : null;
 }
@@ -1390,6 +1552,7 @@ function objectKindLabel(kind: ObjectMenuTarget["kind"]) {
   const labels: Record<ObjectMenuTarget["kind"], string> = {
     agent: "Agent",
     item: "元素",
+    imageLayer: "图像图层",
     region: "区域轮廓"
   };
   return labels[kind];
@@ -1416,7 +1579,8 @@ function createInitialPanels(): PanelState[] {
       makePanel("regionDraw", "区域绘制", PANEL_MARGIN, nextY(PANEL_MINIMIZED_HEIGHT), panelWidth, 220, 47, true),
       makePanel("narrative", "场景叙事", PANEL_MARGIN, nextY(PANEL_MINIMIZED_HEIGHT), panelWidth, 260, 48, true),
       makePanel("mapStudio", "地图工作台", PANEL_MARGIN, nextY(PANEL_MINIMIZED_HEIGHT), panelWidth, 240, 45, true),
-      makePanel("models", "模型管理", PANEL_MARGIN, nextY(PANEL_MINIMIZED_HEIGHT), panelWidth, 240, 41, true)
+      makePanel("models", "模型管理", PANEL_MARGIN, nextY(PANEL_MINIMIZED_HEIGHT), panelWidth, 240, 41, true),
+      makePanel("runtimeMonitor", "运行监控", PANEL_MARGIN, nextY(PANEL_MINIMIZED_HEIGHT), panelWidth, 260, 49, true)
     ].map(clampPanelToViewport);
   }
   if (width < 1120) {
@@ -1432,8 +1596,9 @@ function createInitialPanels(): PanelState[] {
       makePanel("agents", "Agent 面板", rightX, 96, rightWidth, 220, 42),
       makePanel("properties", "属性", rightX, 324, rightWidth, 210, 40),
       makePanel("regionDraw", "区域绘制", rightX, 542, rightWidth, 220, 47),
-      makePanel("narrative", "场景叙事", rightX, 770, rightWidth, 220, 48),
-      makePanel("models", "模型管理", rightX, 998, rightWidth, 220, 41)
+      makePanel("runtimeMonitor", "运行监控", rightX, 770, rightWidth, 260, 49),
+      makePanel("narrative", "场景叙事", rightX, 1038, rightWidth, 220, 48, true),
+      makePanel("models", "模型管理", rightX, 1266, rightWidth, 220, 41, true)
     ].map(clampPanelToViewport);
   }
   const top = 96;
@@ -1451,7 +1616,8 @@ function createInitialPanels(): PanelState[] {
     makePanel("models", "模型管理", centerX, top + 528, 360, Math.max(160, height - top - 544), 41),
     makePanel("agents", "Agent 面板", rightX, top, rightWidth, 260, 42),
     makePanel("properties", "属性", rightX, top + 268, rightWidth, 248, 40),
-    makePanel("narrative", "场景叙事", rightX, top + 524, rightWidth, Math.max(180, height - top - 540), 48)
+    makePanel("runtimeMonitor", "运行监控", rightX, top + 524, rightWidth, 292, 49),
+    makePanel("narrative", "场景叙事", rightX, top + 824, rightWidth, Math.max(180, height - top - 840), 48, true)
   ].map(clampPanelToViewport);
 }
 
@@ -1466,6 +1632,16 @@ function makePanel(
   minimized = false
 ): PanelState {
   return { id, title, x, y, width, height, minimized, dockedTo: null, zIndex };
+}
+
+function runtimeMonitorPanelForViewport(zIndex: number): PanelState {
+  const viewportWidth = typeof window === "undefined" ? 1280 : window.innerWidth;
+  const viewportHeight = typeof window === "undefined" ? 820 : window.innerHeight;
+  const width = clamp(Math.min(360, viewportWidth - PANEL_MARGIN * 2), PANEL_MIN_WIDTH, 360);
+  const height = clamp(Math.min(320, viewportHeight - 132), PANEL_MIN_HEIGHT, 360);
+  const x = Math.max(PANEL_MARGIN, viewportWidth - width - PANEL_MARGIN);
+  const y = Math.min(112, Math.max(PANEL_MARGIN, viewportHeight - height - PANEL_MARGIN));
+  return clampPanelToViewport(makePanel("runtimeMonitor", "运行监控", x, y, width, height, zIndex, false));
 }
 
 function loadPanelLayout(defaultPanels: PanelState[]): PanelState[] {
@@ -1647,6 +1823,32 @@ function applyItemPatch(world: WorldSnapshot, itemId: string, patch: Partial<Omi
       items: world.map.items.map((item) => (item.id === itemId ? { ...item, ...patch } : item))
     }
   };
+}
+
+function applyImageLayerPatch(world: WorldSnapshot, layerId: string, patch: ImageLayerPatch): WorldSnapshot {
+  return {
+    ...world,
+    map: {
+      ...world.map,
+      image_layers: world.map.image_layers.map((layer) => (layer.id === layerId ? { ...layer, ...patch } : layer))
+    }
+  };
+}
+
+function imageSelectionFromDraft(points: Point[]) {
+  if (points.length === 2) {
+    const [first, second] = points;
+    const x = Math.min(first.x, second.x);
+    const y = Math.min(first.y, second.y);
+    return {
+      type: "rect" as const,
+      x,
+      y,
+      width: Math.max(1, Math.abs(second.x - first.x)),
+      height: Math.max(1, Math.abs(second.y - first.y))
+    };
+  }
+  return { type: "polygon" as const, points };
 }
 
 function applyRegionPatch(world: WorldSnapshot, regionId: string, patch: Partial<Omit<MapRegion, "id" | "points" | "source">>): WorldSnapshot {

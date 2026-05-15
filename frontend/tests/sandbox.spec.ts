@@ -17,9 +17,10 @@ test("renders the transparent 2D workstation with floating panels", async ({ pag
   await expect(page.getByRole("button", { name: "3D" })).toHaveCount(0);
 
   await expect(page.getByTestId("transport-controls")).toBeVisible();
-  await expect(page.getByRole("button", { name: "运行" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "暂停" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "停止" })).toBeVisible();
+  await expect(page.getByTestId("transport-controls").getByRole("button", { name: "运行", exact: true })).toBeVisible();
+  await expect(page.getByTestId("transport-controls").getByRole("button", { name: "暂停", exact: true })).toBeVisible();
+  await expect(page.getByTestId("transport-controls").getByRole("button", { name: "停止", exact: true })).toBeVisible();
+  await expect(page.getByTestId("transport-controls").getByRole("button", { name: "运行监控" })).toBeVisible();
   await expect(page.getByRole("button", { name: "回归零点" })).toBeVisible();
   await expect(page.getByRole("button", { name: "背景透明度" })).toBeVisible();
   await expect(page.getByRole("button", { name: "应用默认面板布局" })).toBeVisible();
@@ -32,6 +33,7 @@ test("renders the transparent 2D workstation with floating panels", async ({ pag
   await expect(page.getByTestId("region-draw-panel")).toBeVisible();
   await expect(page.getByTestId("panel-agents")).toBeVisible();
   await expect(page.getByTestId("panel-models")).toBeVisible();
+  await expect(page.getByTestId("panel-runtimeMonitor")).toBeVisible();
   await expect(page.getByTestId("panel-mapStudio")).toBeVisible();
   await expect(page.getByTestId("panel-properties")).toBeVisible();
   await expect(page.getByTestId("panel-title-tools")).toContainText("工具");
@@ -39,6 +41,7 @@ test("renders the transparent 2D workstation with floating panels", async ({ pag
   await expect(page.getByTestId("panel-title-regions")).toContainText("区域");
   await expect(page.getByTestId("panel-title-regionDraw")).toContainText("区域绘制");
   await expect(page.getByTestId("panel-title-models")).toContainText("模型管理");
+  await expect(page.getByTestId("panel-title-runtimeMonitor")).toContainText("运行监控");
   await expect(page.getByTestId("panel-title-mapStudio")).toContainText("地图工作台");
   await expect(page.getByTestId("panel-title-properties")).toContainText("属性");
 
@@ -48,6 +51,82 @@ test("renders the transparent 2D workstation with floating panels", async ({ pag
 
   await page.getByTestId("panel-agents").locator(".agent-card").first().click();
   await expect(page.getByTestId("panel-properties").locator(".property-heading strong")).toHaveText("Agent");
+});
+
+test("runtime monitor shows model groups and local device pressure", async ({ page }) => {
+  await page.route("**/api/runtime/status", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        timestamp: 1765814400,
+        simulation: {
+          running: true,
+          tick: 88,
+          scene_director_pending: false,
+          pending_model_task_count: 1,
+          pending_model_tasks: [
+            { agent_id: "agent_mira", provider: "ollama", model: "qwen2.5:7b", started_tick: 80, age_ticks: 8 }
+          ]
+        },
+        models: [
+          {
+            id: "local",
+            name: "本地 LLM",
+            kind: "local",
+            provider: "ollama",
+            model: "qwen2.5:7b",
+            capabilities: ["llm"],
+            enabled: true,
+            pending_count: 1,
+            recent_event_count: 4,
+            recent_error_count: 0
+          },
+          {
+            id: "remote",
+            name: "线上备用",
+            kind: "remote",
+            provider: "openai-compatible",
+            model: "gpt-test",
+            capabilities: ["llm"],
+            enabled: false,
+            pending_count: 0,
+            recent_event_count: 2,
+            recent_error_count: 1
+          }
+        ],
+        hardware: {
+          platform: { system: "Darwin", release: "25.0.0", machine: "arm64", python: "3.11" },
+          chip: "Apple M 系列",
+          cpu_count: 12,
+          load_average: [3.2, 2.5, 2.1],
+          load_percent: 26.7,
+          memory_total_bytes: 68719476736,
+          memory_available_bytes: 34359738368,
+          memory_used_percent: 50,
+          gpu_pressure_available: false,
+          gpu_pressure_reason: "低影响采样不读取 GPU/ANE 压力"
+        }
+      })
+    })
+  );
+  await page.goto("/");
+
+  const monitor = page.getByTestId("runtime-monitor-panel");
+  await expect(monitor).toBeVisible();
+  await expect(monitor.getByText("Tick 88")).toBeVisible();
+  await expect(monitor.getByText("本地模型")).toBeVisible();
+  await expect(monitor.getByText("本地 LLM")).toBeVisible();
+  await expect(monitor.getByText("运行中 1")).toBeVisible();
+  await expect(monitor.getByText("线上模型")).toBeVisible();
+  await expect(monitor.getByText("线上备用")).toBeVisible();
+  await expect(monitor.getByText("Apple M 系列")).toBeVisible();
+  await expect(monitor.getByText("低影响采样不读取 GPU/ANE 压力")).toBeVisible();
+
+  await page.getByRole("button", { name: "折叠 运行监控" }).click();
+  await expect(page.getByTestId("panel-runtimeMonitor")).toHaveClass(/minimized/);
+  await page.getByTestId("transport-controls").getByRole("button", { name: "运行监控" }).click();
+  await expect(page.getByTestId("panel-runtimeMonitor")).not.toHaveClass(/minimized/);
+  await expect(monitor.getByText("Tick 88")).toBeVisible();
 });
 
 test("top controls adjust app background opacity without map region controls", async ({ page }) => {

@@ -1,4 +1,4 @@
-import { Contrast, LayoutPanelTop, LocateFixed, Pause, Play, SlidersHorizontal, Square } from "lucide-react";
+import { Activity, Contrast, LayoutPanelTop, LocateFixed, Pause, Play, SlidersHorizontal, Square } from "lucide-react";
 import { useState } from "react";
 
 type Props = {
@@ -9,6 +9,7 @@ type Props = {
   onStop: () => void;
   onAppBackgroundOpacity: (opacity: number) => void;
   onCenterOrigin: () => void;
+  onOpenRuntimeMonitor: () => void;
   appearanceMode: "light" | "dark";
   onToggleAppearance: () => void;
   onResetPanelLayout: () => void;
@@ -22,6 +23,7 @@ export function TransportControls({
   onStop,
   onAppBackgroundOpacity,
   onCenterOrigin,
+  onOpenRuntimeMonitor,
   appearanceMode,
   onToggleAppearance,
   onResetPanelLayout
@@ -43,6 +45,9 @@ export function TransportControls({
         </button>
         <button aria-label="回归零点" title="回归零点" onClick={onCenterOrigin}>
           <LocateFixed size={18} />
+        </button>
+        <button aria-label="运行监控" title="运行监控" onClick={onOpenRuntimeMonitor}>
+          <Activity size={18} />
         </button>
         <button
           aria-label="背景透明度"

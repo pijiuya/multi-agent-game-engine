@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, CircleDot, Image, MapPin, Package, UserRound } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleDot, Image, Layers3, MapPin, Package, UserRound } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { CanvasPoint, SelectionState, WorldSnapshot } from "../types";
 
@@ -7,7 +7,7 @@ type Props = {
   selection: SelectionState;
   canvasPoints: CanvasPoint[];
   onSelect: (selection: SelectionState) => void;
-  onObjectContext: (target: { kind: "agent" | "item"; id: string }, screen: { x: number; y: number }) => void;
+  onObjectContext: (target: { kind: "agent" | "item" | "imageLayer"; id: string }, screen: { x: number; y: number }) => void;
 };
 
 export function SceneElementsPanel({ world, selection, canvasPoints, onSelect, onObjectContext }: Props) {
@@ -72,6 +72,26 @@ export function SceneElementsPanel({ world, selection, canvasPoints, onSelect, o
           ))
         : null}
 
+      <SectionHeader count={world.map.image_layers.length} label="图层" open={openSections.layers ?? true} onToggle={() => toggle("layers")} />
+      {openSections.layers !== false
+        ? world.map.image_layers.map((layer) => (
+            <button
+              key={layer.id}
+              className={`${selection.kind === "imageLayer" && selection.id === layer.id ? "scene-list-row active" : "scene-list-row"}${layer.hidden ? " hidden-object" : ""}`}
+              onClick={() => onSelect({ kind: "imageLayer", id: layer.id })}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                onSelect({ kind: "imageLayer", id: layer.id });
+                onObjectContext({ kind: "imageLayer", id: layer.id }, { x: event.clientX, y: event.clientY });
+              }}
+            >
+              <Layers3 size={16} />
+              <span>{layer.name}</span>
+              <small>{layer.hidden ? "已隐藏" : layerKindLabel(layer.kind)}</small>
+            </button>
+          ))
+        : null}
+
       <SectionHeader count={canvasPoints.length} label="空点" open={openSections.points ?? true} onToggle={() => toggle("points")} />
       {openSections.points !== false
         ? canvasPoints.map((point) => (
@@ -118,12 +138,22 @@ function SectionHeader({ count, label, open, onToggle }: { count: number; label:
 }
 
 function loadOpenSections() {
-  const defaults = { agents: true, items: true, points: true, spawns: true };
+  const defaults = { agents: true, items: true, layers: true, points: true, spawns: true };
   try {
     return { ...defaults, ...JSON.parse(window.localStorage.getItem(SCENE_SECTION_STORAGE_KEY) ?? "{}") };
   } catch {
     return defaults;
   }
+}
+
+function layerKindLabel(kind: string) {
+  if (kind === "extension") {
+    return "边缘延展";
+  }
+  if (kind === "background") {
+    return "背景";
+  }
+  return "区域生成";
 }
 
 function displayName(name: string) {

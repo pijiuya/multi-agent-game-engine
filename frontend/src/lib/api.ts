@@ -6,6 +6,7 @@ import type {
   AgentAnimationClip,
   AgentProfile,
   MapGenerationState,
+  MapImageLayer,
   MapRegion,
   MapSegmentationState,
   ModelCapabilityId,
@@ -14,6 +15,7 @@ import type {
   ModelConfig,
   RemoteModelOption,
   RemoteModelTestResult,
+  RuntimeStatus,
   Point,
   PolygonArea,
   NarrativeConfig,
@@ -404,6 +406,52 @@ export async function regenerateMapRegion(regionId: string, prompt: string): Pro
   }
 }
 
+export async function generateMapImageLayer(payload: {
+  prompt: string;
+  selection: { type: "polygon"; points: Point[] } | { type: "rect"; x: number; y: number; width: number; height: number };
+  mode: "region" | "extension" | "repaint";
+  reference_background: boolean;
+  provider_id?: string | null;
+  target_layer_id?: string | null;
+  region_id?: string | null;
+}): Promise<{ world: WorldSnapshot; layer: MapImageLayer }> {
+  const response = await fetch(`${apiBase}/api/map/image-layers/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(String(data.detail ?? "image layer generation failed"));
+  }
+  return {
+    world: normalizeWorldSnapshot(data.world ?? data),
+    layer: normalizeImageLayer(data.layer)
+  };
+}
+
+export async function patchMapImageLayer(layerId: string, patch: Partial<Omit<MapImageLayer, "id" | "kind" | "image" | "prompt" | "region_id" | "created_at">>): Promise<WorldSnapshot | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/map/image-layers/${layerId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch)
+    });
+    return response.ok ? normalizeWorldSnapshot(await response.json()) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteMapImageLayer(layerId: string): Promise<WorldSnapshot | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/map/image-layers/${layerId}`, { method: "DELETE" });
+    return response.ok ? normalizeWorldSnapshot(await response.json()) : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function autoLabelMapRegion(regionId: string): Promise<WorldSnapshot | null> {
   try {
     const response = await fetch(`${apiBase}/api/map/regions/${regionId}/auto-label`, {
@@ -556,6 +604,23 @@ export async function tickSimulation(): Promise<WorldSnapshot | null> {
     return response.ok ? normalizeWorldSnapshot(await response.json()) : null;
   } catch {
     return null;
+  }
+}
+
+export async function getRuntimeStatus(): Promise<RuntimeStatus | null> {
+  try {
+    const response = await fetch(`${apiBase}/api/runtime/status`);
+    if (!response.ok) {
+      throw new Error(`runtime status request failed: ${response.status}`);
+    }
+    return runtimeStatusFromApi(await response.json());
+  } catch {
+    try {
+      const [world, models] = await Promise.all([getWorld(), getModels()]);
+      return runtimeStatusFromWorld(world, models);
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -819,7 +884,8 @@ function normalizeMap(input: WorldMap): WorldMap {
     obstacles: normalizeAreas(input.obstacles ?? []),
     interaction_zones: normalizeAreas(input.interaction_zones ?? []),
     regions: normalizeRegions(input.regions ?? []),
-    region_layers: normalizeRegionLayers(input.region_layers ?? [])
+    region_layers: normalizeRegionLayers(input.region_layers ?? []),
+    image_layers: normalizeImageLayers(input.image_layers ?? [])
   };
   const regions = importLegacyAreasAsRegions(map);
   return syncFunctionalRegions({
@@ -840,6 +906,29 @@ function normalizeRegions(regions: MapRegion[]) {
     holes: region.holes ?? [],
     hidden: Boolean(region.hidden)
   }));
+}
+
+function normalizeImageLayers(layers: MapImageLayer[]) {
+  return (layers ?? []).map(normalizeImageLayer).filter((layer) => layer.image);
+}
+
+function normalizeImageLayer(layer: Partial<MapImageLayer>): MapImageLayer {
+  return {
+    id: String(layer.id ?? ""),
+    name: String(layer.name ?? layer.id ?? "图像图层"),
+    kind: layer.kind === "background" || layer.kind === "extension" || layer.kind === "region" ? layer.kind : "region",
+    image: String(layer.image ?? ""),
+    x: Number(layer.x ?? 0),
+    y: Number(layer.y ?? 0),
+    width: Math.max(1, Number(layer.width ?? 1)),
+    height: Math.max(1, Number(layer.height ?? 1)),
+    prompt: String(layer.prompt ?? ""),
+    region_id: layer.region_id ?? null,
+    hidden: Boolean(layer.hidden),
+    locked: Boolean(layer.locked),
+    opacity: clampNumber(Number(layer.opacity ?? 1), 0, 1),
+    created_at: Number(layer.created_at ?? Date.now() / 1000)
+  };
 }
 
 function normalizeRegionFunction(value: string): MapRegion["function"] {
@@ -1059,6 +1148,146 @@ function modelFromApi(data: Record<string, unknown>): ModelConfig {
     enabled: Boolean(data.enabled ?? true),
     capabilities: Array.isArray(data.capabilities) ? (data.capabilities as ModelConfig["capabilities"]) : []
   };
+}
+
+function runtimeStatusFromApi(data: Record<string, unknown>): RuntimeStatus {
+  const simulation = objectValue(data.simulation);
+  const hardware = objectValue(data.hardware);
+  const platform = objectValue(hardware.platform);
+  const loadAverageRaw = hardware.load_average ?? hardware.loadAverage;
+  return {
+    timestamp: Number(data.timestamp ?? Date.now() / 1000),
+    simulation: {
+      running: Boolean(simulation.running),
+      tick: Number(simulation.tick ?? 0),
+      sceneDirectorPending: Boolean(simulation.scene_director_pending ?? simulation.sceneDirectorPending),
+      pendingModelTaskCount: Number(simulation.pending_model_task_count ?? simulation.pendingModelTaskCount ?? 0),
+      pendingModelTasks: Array.isArray(simulation.pending_model_tasks)
+        ? simulation.pending_model_tasks.map((item) => {
+            const task = objectValue(item);
+            return {
+              agentId: String(task.agent_id ?? task.agentId ?? ""),
+              provider: String(task.provider ?? ""),
+              model: String(task.model ?? ""),
+              startedTick: Number(task.started_tick ?? task.startedTick ?? 0),
+              ageTicks: Number(task.age_ticks ?? task.ageTicks ?? 0)
+            };
+          })
+        : []
+    },
+    models: Array.isArray(data.models)
+      ? data.models.map((item) => {
+          const model = objectValue(item);
+          return {
+            id: String(model.id ?? ""),
+            name: String(model.name ?? ""),
+            kind: String(model.kind ?? "local"),
+            provider: String(model.provider ?? ""),
+            model: String(model.model ?? ""),
+            capabilities: Array.isArray(model.capabilities) ? (model.capabilities as ModelConfig["capabilities"]) : [],
+            enabled: Boolean(model.enabled ?? true),
+            pendingCount: Number(model.pending_count ?? model.pendingCount ?? 0),
+            recentEventCount: Number(model.recent_event_count ?? model.recentEventCount ?? 0),
+            recentErrorCount: Number(model.recent_error_count ?? model.recentErrorCount ?? 0)
+          };
+        })
+      : [],
+    hardware: {
+      platform: {
+        system: String(platform.system ?? ""),
+        release: String(platform.release ?? ""),
+        machine: String(platform.machine ?? ""),
+        python: String(platform.python ?? "")
+      },
+      chip: String(hardware.chip ?? ""),
+      cpuCount: nullableNumber(hardware.cpu_count ?? hardware.cpuCount),
+      loadAverage: Array.isArray(loadAverageRaw) ? loadAverageRaw.map(Number).filter(Number.isFinite) : [],
+      loadPercent: nullableNumber(hardware.load_percent ?? hardware.loadPercent),
+      memoryTotalBytes: nullableNumber(hardware.memory_total_bytes ?? hardware.memoryTotalBytes),
+      memoryAvailableBytes: nullableNumber(hardware.memory_available_bytes ?? hardware.memoryAvailableBytes),
+      memoryUsedPercent: nullableNumber(hardware.memory_used_percent ?? hardware.memoryUsedPercent),
+      gpuPressureAvailable: Boolean(hardware.gpu_pressure_available ?? hardware.gpuPressureAvailable),
+      gpuPressureReason: String(hardware.gpu_pressure_reason ?? hardware.gpuPressureReason ?? "")
+    }
+  };
+}
+
+function runtimeStatusFromWorld(world: WorldSnapshot, models: ModelConfig[]): RuntimeStatus {
+  const modelTasks = Object.entries(world.model_tasks ?? {})
+    .filter(([, task]) => !task.done)
+    .map(([agentId, task]) => ({
+      agentId,
+      provider: String(task.provider ?? ""),
+      model: String(task.model ?? ""),
+      startedTick: Number(task.started_tick ?? 0),
+      ageTicks: Number(task.age_ticks ?? 0)
+    }));
+  const recentEvents = world.decision_events.slice(-80);
+  return {
+    timestamp: Date.now() / 1000,
+    simulation: {
+      running: Boolean(world.running),
+      tick: Number(world.tick ?? 0),
+      sceneDirectorPending: Boolean(world.scene_director?.pending),
+      pendingModelTaskCount: modelTasks.length,
+      pendingModelTasks: modelTasks
+    },
+    models: models.map((model) => {
+      const matchingEvents = recentEvents.filter(
+        (event) => event.provider === model.provider && (!model.model || event.model === model.model)
+      );
+      return {
+        id: model.id,
+        name: model.name,
+        kind: model.kind,
+        provider: model.provider,
+        model: model.model,
+        capabilities: model.capabilities,
+        enabled: model.enabled,
+        pendingCount: modelTasks.filter(
+          (task) => task.provider === model.provider && (!model.model || task.model === model.model)
+        ).length,
+        recentEventCount: matchingEvents.length,
+        recentErrorCount: matchingEvents.filter((event) =>
+          event.results.some((result) => result.ok === false)
+        ).length
+      };
+    }),
+    hardware: browserHardwareStatus()
+  };
+}
+
+function browserHardwareStatus(): RuntimeStatus["hardware"] {
+  const navigatorInfo = typeof navigator === "undefined" ? null : navigator;
+  return {
+    platform: {
+      system: navigatorInfo?.platform ?? "",
+      release: "",
+      machine: "",
+      python: ""
+    },
+    chip: navigatorInfo?.platform ?? "浏览器兼容模式",
+    cpuCount: navigatorInfo?.hardwareConcurrency ?? null,
+    loadAverage: [],
+    loadPercent: null,
+    memoryTotalBytes: null,
+    memoryAvailableBytes: null,
+    memoryUsedPercent: null,
+    gpuPressureAvailable: false,
+    gpuPressureReason: "当前后端未提供运行监控接口，先使用浏览器兼容数据；重启后端后可显示更完整的 CPU/内存采样。"
+  };
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function nullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : null;
 }
 
 function defaultCapabilityStatus(): ModelCapabilityStatus[] {

@@ -43,6 +43,9 @@ button:disabled {
 
 button,
 input,
+textarea,
+select,
+[contenteditable="true"],
 .floating-panel {
   -webkit-app-region: no-drag;
 }
@@ -304,6 +307,20 @@ input,
   pointer-events: auto;
   user-select: none;
   filter: saturate(0.98) contrast(1.01);
+}
+
+.world-image-layer {
+  position: absolute;
+  z-index: 1;
+  display: block;
+  object-fit: fill;
+  pointer-events: auto;
+  user-select: none;
+}
+
+.world-image-layer.active {
+  outline: 2px solid rgba(14, 165, 233, 0.9);
+  outline-offset: 2px;
 }
 
 .world-map-frame {
@@ -2023,6 +2040,254 @@ textarea:focus {
 .model-advanced-panel input {
   width: 100%;
   height: 32px;
+}
+
+.runtime-monitor-panel {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.runtime-monitor-header,
+.runtime-section-title,
+.runtime-warning,
+.runtime-model-stats,
+.runtime-model-badges {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.runtime-monitor-header {
+  justify-content: space-between;
+}
+
+.runtime-monitor-header > div {
+  display: grid;
+  min-width: 0;
+}
+
+.runtime-monitor-header strong,
+.runtime-device-card strong,
+.runtime-model-row strong {
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-monitor-header small,
+.runtime-device-card small,
+.runtime-model-row small,
+.runtime-metric-card small {
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--soft-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-monitor-header .panel-action-button {
+  min-width: 76px;
+}
+
+.runtime-warning {
+  padding: 8px;
+  color: var(--ink);
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.34);
+  border-radius: 8px;
+}
+
+.runtime-warning span {
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.runtime-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.runtime-metric-card,
+.runtime-section,
+.runtime-profiler,
+.runtime-device-card,
+.runtime-empty,
+.runtime-model-row {
+  min-width: 0;
+  padding: 9px;
+  background: rgba(var(--material-rgb), 0.54);
+  border: 1px solid rgba(var(--grid-rgb), 0.2);
+  border-radius: 8px;
+}
+
+.runtime-metric-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 3px 6px;
+  align-items: center;
+}
+
+.runtime-metric-card strong {
+  grid-column: 1 / -1;
+  font-size: 17px;
+  line-height: 1.1;
+}
+
+.runtime-metric-card small {
+  grid-column: 1 / -1;
+}
+
+.runtime-metric-card span,
+.runtime-section-title span {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--label);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-section {
+  display: grid;
+  gap: 8px;
+}
+
+.runtime-profiler {
+  display: grid;
+  gap: 8px;
+}
+
+.runtime-wave-graph {
+  display: block;
+  width: 100%;
+  height: 118px;
+  color: var(--ink);
+  background:
+    linear-gradient(90deg, rgba(var(--grid-rgb), 0.16) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(var(--grid-rgb), 0.13) 1px, transparent 1px),
+    rgba(var(--panel-rgb), 0.5);
+  background-size: 20px 20px;
+  border: 1px solid rgba(var(--grid-rgb), 0.24);
+  border-radius: 8px;
+}
+
+.runtime-wave-grid {
+  stroke: rgba(var(--grid-rgb), 0.24);
+  stroke-width: 1;
+}
+
+.runtime-wave-label {
+  fill: var(--soft-muted);
+  font-size: 8px;
+}
+
+.runtime-wave-line {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.4;
+  filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.18));
+}
+
+.runtime-wave-line.cpu {
+  stroke: #22c55e;
+}
+
+.runtime-wave-line.memory {
+  stroke: #38bdf8;
+}
+
+.runtime-wave-line.model {
+  stroke: #f97316;
+}
+
+.runtime-profiler-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.runtime-profiler-legend span {
+  min-height: 22px;
+  padding: 3px 7px;
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--ink);
+  background: rgba(var(--panel-rgb), 0.46);
+  border: 1px solid rgba(var(--grid-rgb), 0.18);
+  border-radius: 999px;
+}
+
+.runtime-profiler-legend .cpu {
+  border-color: rgba(34, 197, 94, 0.52);
+}
+
+.runtime-profiler-legend .memory {
+  border-color: rgba(56, 189, 248, 0.52);
+}
+
+.runtime-profiler-legend .model {
+  border-color: rgba(249, 115, 22, 0.52);
+}
+
+.runtime-section-title {
+  min-width: 0;
+}
+
+.runtime-model-list {
+  display: grid;
+  gap: 7px;
+}
+
+.runtime-model-row {
+  display: grid;
+  gap: 7px;
+}
+
+.runtime-model-row.disabled {
+  opacity: 0.66;
+}
+
+.runtime-model-badges,
+.runtime-model-stats {
+  flex-wrap: wrap;
+}
+
+.runtime-model-badges span,
+.runtime-model-stats span,
+.runtime-model-stats strong {
+  min-height: 22px;
+  padding: 3px 7px;
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--ink);
+  background: rgba(var(--panel-rgb), 0.46);
+  border: 1px solid rgba(var(--grid-rgb), 0.18);
+  border-radius: 999px;
+}
+
+.runtime-model-stats strong {
+  color: var(--active-ink);
+  background: var(--active-bg);
+  border-color: var(--active-bg);
+}
+
+.runtime-device-card {
+  display: grid;
+  gap: 3px;
+}
+
+.runtime-device-card span,
+.runtime-empty {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--soft-muted);
 }
 
 .model-config-list {

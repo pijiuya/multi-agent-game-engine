@@ -144,6 +144,61 @@ class MapRegion:
 
 
 @dataclass(slots=True)
+class MapImageLayer:
+    id: str
+    name: str
+    kind: str
+    image: str
+    x: float
+    y: float
+    width: float
+    height: float
+    prompt: str = ""
+    region_id: str | None = None
+    hidden: bool = False
+    locked: bool = False
+    opacity: float = 1.0
+    created_at: float = field(default_factory=time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "kind": self.kind,
+            "image": self.image,
+            "x": self.x,
+            "y": self.y,
+            "width": self.width,
+            "height": self.height,
+            "prompt": self.prompt,
+            "region_id": self.region_id,
+            "hidden": self.hidden,
+            "locked": self.locked,
+            "opacity": self.opacity,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "MapImageLayer":
+        return cls(
+            id=str(data["id"]),
+            name=str(data.get("name") or data["id"]),
+            kind=str(data.get("kind") or "region"),
+            image=str(data.get("image") or ""),
+            x=float(data.get("x", 0)),
+            y=float(data.get("y", 0)),
+            width=float(data.get("width", 1)),
+            height=float(data.get("height", 1)),
+            prompt=str(data.get("prompt") or ""),
+            region_id=data.get("region_id"),
+            hidden=bool(data.get("hidden", False)),
+            locked=bool(data.get("locked", False)),
+            opacity=max(0.0, min(1.0, float(data.get("opacity", 1.0)))),
+            created_at=float(data.get("created_at", time())),
+        )
+
+
+@dataclass(slots=True)
 class WorldItem:
     id: str
     name: str
@@ -206,6 +261,7 @@ class WorldMap:
     triggers: list[PolygonArea] = field(default_factory=list)
     spawn_points: list[Point] = field(default_factory=list)
     regions: list[MapRegion] = field(default_factory=list)
+    image_layers: list[MapImageLayer] = field(default_factory=list)
 
     def is_inside_bounds(self, point: Point) -> bool:
         return 0 <= point.x <= self.width and 0 <= point.y <= self.height
@@ -290,6 +346,7 @@ class WorldMap:
             "spawn_points": [point.to_dict() for point in self.spawn_points],
             "regions": [region.to_dict() for region in self.regions],
             "region_layers": self.region_layers(),
+            "image_layers": [layer.to_dict() for layer in self.image_layers],
         }
 
     def region_layers(self) -> list[dict[str, Any]]:
@@ -347,6 +404,11 @@ class WorldMap:
             triggers=[PolygonArea.from_dict(area) for area in data.get("triggers", [])],
             spawn_points=[Point.from_dict(point) for point in data.get("spawn_points", [])],
             regions=[MapRegion.from_dict(region) for region in data.get("regions", [])],
+            image_layers=[
+                MapImageLayer.from_dict(layer)
+                for layer in data.get("image_layers", [])
+                if isinstance(layer, dict) and layer.get("image")
+            ],
         )
         world_map.sync_functional_regions()
         return world_map

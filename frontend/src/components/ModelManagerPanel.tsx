@@ -318,7 +318,13 @@ function CapabilityDetail({
         <div className="model-advanced-panel" data-testid={`model-advanced-${capability}`}>
           <label>
             <span>服务地址</span>
-            <input aria-label={`${meta.title} 服务地址`} onChange={(event) => onUpdateDraft({ baseUrl: event.currentTarget.value })} value={draft.baseUrl} />
+            <input
+              aria-label={`${meta.title} 服务地址`}
+              onChange={(event) => onUpdateDraft({ baseUrl: event.currentTarget.value })}
+              placeholder={capability === "image_generation" || capability === "llm" ? "https://host 或 https://host/v1" : ""}
+              value={draft.baseUrl}
+            />
+            {(capability === "image_generation" || capability === "llm") ? <small>兼容多数 OpenAI 格式中转站；填根域名时会自动尝试 /v1。</small> : null}
           </label>
           <label>
             <span>API Key</span>

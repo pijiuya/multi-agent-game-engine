@@ -41,6 +41,23 @@ export type RegionLayer = {
   polygons: RegionLayerPolygon[];
 };
 
+export type MapImageLayer = {
+  id: string;
+  name: string;
+  kind: "background" | "region" | "extension";
+  image: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  prompt: string;
+  region_id: string | null;
+  hidden: boolean;
+  locked: boolean;
+  opacity: number;
+  created_at: number;
+};
+
 export type WorldItem = {
   id: string;
   name: string;
@@ -70,6 +87,7 @@ export type WorldMap = {
   spawn_points: Point[];
   regions: MapRegion[];
   region_layers: RegionLayer[];
+  image_layers: MapImageLayer[];
 };
 
 export type AgentAnimationClip = {
@@ -203,7 +221,7 @@ export type WorldSnapshot = {
   narrative: NarrativeConfig;
   tick: number;
   running: boolean;
-  model_tasks?: Record<string, { done: boolean }>;
+  model_tasks?: Record<string, { done: boolean; provider?: string; model?: string; started_tick?: number; age_ticks?: number }>;
   scene_director?: {
     pending: boolean;
     last_tick: number;
@@ -212,12 +230,22 @@ export type WorldSnapshot = {
 
 export type ViewMode = "2d" | "3d";
 
-export type EditTool = "select" | "region" | "item" | "spawn" | "move" | "anchor";
+export type EditTool = "select" | "region" | "imageGenerate" | "edgeExtend" | "item" | "spawn" | "move" | "anchor";
 
 export type RegionDrawOperation = "add" | "subtract";
 
 export type PanelState = {
-  id: "tools" | "scene" | "agents" | "properties" | "models" | "mapStudio" | "regions" | "regionDraw" | "narrative";
+  id:
+    | "tools"
+    | "scene"
+    | "agents"
+    | "properties"
+    | "models"
+    | "runtimeMonitor"
+    | "mapStudio"
+    | "regions"
+    | "regionDraw"
+    | "narrative";
   title: string;
   x: number;
   y: number;
@@ -232,6 +260,7 @@ export type SelectionState =
   | { kind: "map"; id: string }
   | { kind: "agent"; id: string }
   | { kind: "item"; id: string }
+  | { kind: "imageLayer"; id: string }
   | { kind: "region"; id: string }
   | { kind: "regionLayer"; id: MapRegionFunction }
   | { kind: "regions"; id: "all" }
@@ -303,6 +332,58 @@ export type RemoteModelTestResult = {
   model: string;
   message: string;
   sample: string;
+};
+
+export type RuntimePendingModelTask = {
+  agentId: string;
+  provider: string;
+  model: string;
+  startedTick: number;
+  ageTicks: number;
+};
+
+export type RuntimeModelStatus = {
+  id: string;
+  name: string;
+  kind: string;
+  provider: string;
+  model: string;
+  capabilities: ModelCapability[];
+  enabled: boolean;
+  pendingCount: number;
+  recentEventCount: number;
+  recentErrorCount: number;
+};
+
+export type RuntimeHardwareStatus = {
+  platform: {
+    system: string;
+    release: string;
+    machine: string;
+    python: string;
+  };
+  chip: string;
+  cpuCount: number | null;
+  loadAverage: number[];
+  loadPercent: number | null;
+  memoryTotalBytes: number | null;
+  memoryAvailableBytes: number | null;
+  memoryUsedPercent: number | null;
+  gpuPressureAvailable: boolean;
+  gpuPressureReason: string;
+};
+
+export type RuntimeStatus = {
+  timestamp: number;
+  simulation: {
+    running: boolean;
+    tick: number;
+    sceneDirectorPending: boolean;
+    pendingModelTaskCount: number;
+    pendingModelTasks: RuntimePendingModelTask[];
+  };
+  models: RuntimeModelStatus[];
+  hardware: RuntimeHardwareStatus;
 };
 
 export type GeneratedImageCandidate = {

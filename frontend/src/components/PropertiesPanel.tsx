@@ -3,6 +3,7 @@ import type {
   AgentProfile,
   CanvasPoint,
   MapGenerationState,
+  MapImageLayer,
   MapRegion,
   MapRegionFunction,
   MapSegmentationState,
@@ -22,6 +23,7 @@ type Props = {
   onUpdateMap: (patch: Partial<Pick<WorldMap, "name" | "width" | "height" | "background_image">>) => void;
   onUpdateAgent: (agentId: string, patch: Partial<Omit<AgentProfile, "id">>) => void;
   onUpdateItem: (itemId: string, patch: Partial<Omit<WorldItem, "id">>) => void;
+  onUpdateImageLayer: (layerId: string, patch: Partial<Omit<MapImageLayer, "id" | "kind" | "image" | "prompt" | "region_id" | "created_at">>) => void;
   onUploadItemImage: (itemId: string, file: File) => void;
   onUpdateRegion: (regionId: string, patch: Partial<Omit<MapRegion, "id" | "points" | "source">>) => void;
   onRegenerateRegion: (regionId: string, prompt: string) => void;
@@ -36,6 +38,7 @@ export function PropertiesPanel({
   onUpdateMap,
   onUpdateAgent,
   onUpdateItem,
+  onUpdateImageLayer,
   onUploadItemImage,
   onUpdateRegion,
   onRegenerateRegion
@@ -55,6 +58,7 @@ export function PropertiesPanel({
         onUpdateMap,
         onUpdateAgent,
         onUpdateItem,
+        onUpdateImageLayer,
         onUploadItemImage,
         onUpdateRegion,
         onRegenerateRegion
@@ -73,6 +77,7 @@ function renderEditor(props: Props) {
     onUpdateMap,
     onUpdateAgent,
     onUpdateItem,
+    onUpdateImageLayer,
     onUploadItemImage,
     onUpdateRegion,
     onRegenerateRegion
@@ -156,6 +161,31 @@ function renderEditor(props: Props) {
             onRegenerateRegion(region.id, image_prompt);
           }}
         />
+      </div>
+    );
+  }
+
+  if (selection.kind === "imageLayer") {
+    const layer = world.map.image_layers.find((candidate) => candidate.id === selection.id);
+    if (!layer) {
+      return <Missing label="没有找到图层" />;
+    }
+    return (
+      <div className="property-grid">
+        <Editable label="名称" value={layer.name} onCommit={(name) => onUpdateImageLayer(layer.id, { name })} />
+        <Readonly label="类型" value={layer.kind === "extension" ? "边缘延展" : layer.kind === "background" ? "背景" : "区域生成"} />
+        <Readonly label="图片" value={layer.image} />
+        <EditableNumber label="X" value={layer.x} onCommit={(x) => onUpdateImageLayer(layer.id, { x })} />
+        <EditableNumber label="Y" value={layer.y} onCommit={(y) => onUpdateImageLayer(layer.id, { y })} />
+        <EditableNumber label="宽度" value={layer.width} onCommit={(width) => onUpdateImageLayer(layer.id, { width })} />
+        <EditableNumber label="高度" value={layer.height} onCommit={(height) => onUpdateImageLayer(layer.id, { height })} />
+        <EditableNumber label="透明度" value={layer.opacity} step={0.05} onCommit={(opacity) => onUpdateImageLayer(layer.id, { opacity })} />
+        <label className="property-toggle-row">
+          <span>锁定</span>
+          <input type="checkbox" checked={layer.locked} onChange={(event) => onUpdateImageLayer(layer.id, { locked: event.currentTarget.checked })} />
+          <small>{layer.locked ? "已锁定" : "可编辑"}</small>
+        </label>
+        <Readonly label="提示" value={layer.prompt || "无"} />
       </div>
     );
   }
@@ -305,6 +335,7 @@ function selectionKindLabel(kind: SelectionState["kind"]) {
     map: "地图",
     agent: "Agent",
     item: "元素",
+    imageLayer: "图像图层",
     region: "区域",
     regionLayer: "区域层",
     regions: "区域集合",

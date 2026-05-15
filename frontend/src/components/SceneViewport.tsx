@@ -33,7 +33,7 @@ type Props = {
   onWorldPoint: (point: Point) => void;
   onSelect: (selection: SelectionState) => void;
   onAnchorContext: (screen: Point, world: Point) => void;
-  onObjectContext: (target: { kind: "agent" | "item" | "region"; id: string }, screen: Point) => void;
+  onObjectContext: (target: { kind: "agent" | "item" | "region" | "imageLayer"; id: string }, screen: Point) => void;
   onRenameAgent: (agentId: string, name: string) => void;
   onPreviewItem: (itemId: string, patch: Partial<Omit<WorldItem, "id">>) => void;
   onCommitItem: (itemId: string, patch: Partial<Omit<WorldItem, "id">>) => void;
@@ -228,7 +228,7 @@ export function SceneViewport({
     onAnchorContext({ x: event.clientX, y: event.clientY }, point);
   }
 
-  function openObjectMenu(event: MouseEvent<Element>, target: { kind: "agent" | "item" | "region"; id: string }) {
+  function openObjectMenu(event: MouseEvent<Element>, target: { kind: "agent" | "item" | "region" | "imageLayer"; id: string }) {
     event.preventDefault();
     event.stopPropagation();
     onObjectContext(target, { x: event.clientX, y: event.clientY });
@@ -402,6 +402,28 @@ export function SceneViewport({
               <span>{world.map.width} x {world.map.height}</span>
             </button>
           )}
+          {world.map.image_layers.filter((layer) => !layer.hidden).map((layer) => (
+            <img
+              alt={layer.name}
+              className={`world-image-layer${selection.kind === "imageLayer" && selection.id === layer.id ? " active" : ""}`}
+              data-testid={`world-image-layer-${layer.id}`}
+              draggable={false}
+              key={layer.id}
+              onClick={(event) => {
+                event.stopPropagation();
+                onSelect({ kind: "imageLayer", id: layer.id });
+              }}
+              onContextMenu={(event) => openObjectMenu(event, { kind: "imageLayer", id: layer.id })}
+              src={assetUrl(layer.image) ?? layer.image}
+              style={{
+                left: layer.x,
+                top: layer.y,
+                width: layer.width,
+                height: layer.height,
+                opacity: layer.opacity
+              }}
+            />
+          ))}
           <svg
             className="world-vector-layer"
             data-testid="world-vector-layer"
@@ -902,6 +924,8 @@ function toolLabel(tool: EditTool) {
   const labels: Record<EditTool, string> = {
     select: "选择",
     region: "区域绘制",
+    imageGenerate: "区域生成",
+    edgeExtend: "边缘延展",
     item: "元素",
     spawn: "出生点",
     move: "移动",

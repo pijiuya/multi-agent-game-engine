@@ -63,6 +63,7 @@ export const fallbackWorld: WorldSnapshot = {
       { function: "custom", label: "自定义", region_ids: [], polygons: [] },
       { function: "unassigned", label: "未设定", region_ids: [], polygons: [] }
     ],
+    image_layers: [],
     items: [
       {
         id: "item_lamp",
