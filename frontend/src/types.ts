@@ -83,6 +83,7 @@ export type WorldItemAffordance = {
   required_item_state?: Record<string, unknown>;
   set_item_state?: Record<string, unknown>;
   event_message?: string;
+  event_messages?: string[];
   status?: string;
 };
 
@@ -234,10 +235,26 @@ export type WorldSnapshot = {
   narrative: NarrativeConfig;
   tick: number;
   running: boolean;
-  model_tasks?: Record<string, { done: boolean; provider?: string; model?: string; started_tick?: number; age_ticks?: number }>;
+  model_tasks?: Record<
+    string,
+    {
+      done: boolean;
+      provider?: string;
+      model?: string;
+      started_tick?: number;
+      age_ticks?: number;
+      watchdog_age_ticks?: number;
+    }
+  >;
   scene_director?: {
     pending: boolean;
     last_tick: number;
+    started_tick?: number;
+    age_ticks?: number;
+    watchdog_age_ticks?: number;
+  };
+  recovery?: {
+    provider_recovery?: Record<string, { until_tick?: number; remaining_ticks?: number }>;
   };
 };
 
@@ -389,6 +406,7 @@ export type RuntimePendingModelTask = {
   model: string;
   startedTick: number;
   ageTicks: number;
+  watchdogAgeTicks?: number;
   ageSeconds?: number | null;
   elapsedMs?: number | null;
   operation?: string;
@@ -442,6 +460,7 @@ export type RuntimeStatus = {
     pendingModelTasks: RuntimePendingModelTask[];
     pendingImageGenerationTasks?: RuntimePendingModelTask[];
     recentImageGenerationTasks?: RuntimePendingModelTask[];
+    providerRecovery?: Record<string, { untilTick: number; remainingTicks: number }>;
   };
   models: RuntimeModelStatus[];
   hardware: RuntimeHardwareStatus;

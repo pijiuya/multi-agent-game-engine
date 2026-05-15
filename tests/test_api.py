@@ -59,6 +59,26 @@ def test_api_patch_narrative_updates_saved_snapshot():
     assert client.get("/api/world").json()["narrative"] == narrative
 
 
+def test_create_agent_defaults_to_runtime_provider():
+    client = TestClient(app)
+    old_provider = api_main.runtime.default_provider_id
+    api_main.runtime.world = api_main.GameWorld.default()
+    api_main.runtime.default_provider_id = "model_local_llm"
+    try:
+        response = client.post(
+            "/api/agents",
+            json={"name": "Local First", "role": "test", "position": {"x": 240, "y": 220}},
+        )
+    finally:
+        api_main.runtime.default_provider_id = old_provider
+
+    assert response.status_code == 200
+    profile = next(
+        profile for profile in response.json()["agent_profiles"].values() if profile["name"] == "Local First"
+    )
+    assert profile["model_provider"] == "model_local_llm"
+
+
 def test_api_runtime_status_is_read_only(monkeypatch):
     client = TestClient(app)
     api_main.runtime.world = api_main.GameWorld.default()
@@ -564,6 +584,7 @@ def test_api_records_decision_events_from_model_actions():
     api_main.runtime.world = api_main.GameWorld.default()
     api_main.runtime.providers = {"mock": api_main.MockProvider()}
     api_main.runtime.default_provider_id = "mock"
+    api_main.runtime.action_prefilter_enabled = False
     api_main.runtime.world.running = True
     api_main.runtime.world.tick = 7
 
@@ -577,6 +598,7 @@ def test_api_records_decision_events_from_model_actions():
     decision = payload["decision_events"][-1]
     assert decision["agent_id"] in payload["agent_profiles"]
     assert decision["provider"] == "mock"
+    api_main.runtime.action_prefilter_enabled = True
     assert decision["results"]
     assert any(event["id"] == decision["results"][0]["event_id"] for event in payload["events"])
 

@@ -100,7 +100,7 @@ export const fallbackWorld: WorldSnapshot = {
       action_space: ["move_to", "say", "interact", "use", "observe", "wait", "stop", "social", "pick_up", "drop_item", "move_item"],
       hidden: false,
       animation: null,
-      dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 20, language: "auto" }
+      dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 10, language: "auto" }
     },
     agent_tao: {
       id: "agent_tao",
@@ -112,7 +112,7 @@ export const fallbackWorld: WorldSnapshot = {
       action_space: ["move_to", "say", "interact", "use", "observe", "wait", "stop", "social", "pick_up", "drop_item", "move_item"],
       hidden: false,
       animation: null,
-      dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 20, language: "auto" }
+      dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 10, language: "auto" }
     },
     agent_ren: {
       id: "agent_ren",
@@ -124,7 +124,7 @@ export const fallbackWorld: WorldSnapshot = {
       action_space: ["move_to", "say", "interact", "use", "observe", "wait", "stop", "social", "pick_up", "drop_item", "move_item"],
       hidden: false,
       animation: null,
-      dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 20, language: "auto" }
+      dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 10, language: "auto" }
     }
   },
   agent_states: {

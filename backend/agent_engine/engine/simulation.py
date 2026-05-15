@@ -86,11 +86,25 @@ class SimulationRuntime:
         self.action_prefilter_enabled = _env_bool("AGENT_ENGINE_ACTION_PREFILTER", True)
         self.agent_decision_interval_ticks = max(
             1,
-            int(ceil(_env_float("AGENT_ENGINE_AGENT_DECISION_SECONDS", 6.0) * self.tick_rate)),
+            int(ceil(_env_float("AGENT_ENGINE_AGENT_DECISION_SECONDS", 3.0) * self.tick_rate)),
+        )
+        self.model_watchdog_ticks = max(
+            1,
+            int(ceil(_env_float("AGENT_ENGINE_MODEL_WATCHDOG_SECONDS", 18.0) * self.tick_rate)),
+        )
+        self.scene_director_watchdog_ticks = max(
+            1,
+            int(ceil(_env_float("AGENT_ENGINE_SCENE_WATCHDOG_SECONDS", 20.0) * self.tick_rate)),
+        )
+        self.provider_recovery_ticks = max(
+            1,
+            int(ceil(_env_float("AGENT_ENGINE_PROVIDER_RECOVERY_SECONDS", 30.0) * self.tick_rate)),
         )
         self.rule_engine = RuleEngine()
         self._model_tasks: dict[str, PendingModelTask] = {}
         self._director_task: asyncio.Task | None = None
+        self._director_started_tick = -999
+        self._provider_recovery_until: dict[str, int] = {}
         self._loop_task: asyncio.Task | None = None
         self._last_time = perf_counter()
 
@@ -130,6 +144,7 @@ class SimulationRuntime:
 
     async def tick(self, dt: float | None = None) -> dict[str, Any]:
         dt = dt if dt is not None else 1 / self.tick_rate
+        self._recover_stalled_tasks()
         self._harvest_director_task()
         self._harvest_model_tasks()
         if self.world.running:
@@ -155,12 +170,28 @@ class SimulationRuntime:
                 "model": record.model_name,
                 "started_tick": record.started_tick,
                 "age_ticks": max(0, self.world.tick - record.started_tick),
+                "watchdog_age_ticks": self.model_watchdog_ticks,
             }
             for agent_id, record in self._model_tasks.items()
         }
         payload["scene_director"] = {
             "pending": bool(self._director_task and not self._director_task.done()),
             "last_tick": self.world.narrative.get("last_tick", -999),
+            "started_tick": self._director_started_tick,
+            "age_ticks": max(0, self.world.tick - self._director_started_tick)
+            if self._director_task and not self._director_task.done()
+            else 0,
+            "watchdog_age_ticks": self.scene_director_watchdog_ticks,
+        }
+        payload["recovery"] = {
+            "provider_recovery": {
+                provider: {
+                    "until_tick": until_tick,
+                    "remaining_ticks": max(0, until_tick - self.world.tick),
+                }
+                for provider, until_tick in self._provider_recovery_until.items()
+                if until_tick > self.world.tick
+            }
         }
         return payload
 
@@ -204,6 +235,7 @@ class SimulationRuntime:
                 state.status = "idle"
                 name = profile.name
                 self.world.add_event("movement", f"{name} arrived.", agent_id=agent_id)
+                self.rule_engine.drop_held_item_at_agent(self.world, agent_id, reason="arrived")
             else:
                 proposed = Point.from_dict(lerp_point(current, target, step / remaining))
                 state.position = self.rule_engine.collision_free_agent_point(
@@ -273,32 +305,25 @@ class SimulationRuntime:
             observation = self.context_compressor.compact_observation(self._observation_for(agent_id))
             cheap_action = self._prefilter_action(agent_id, action_space, observation, provider_name)
             if cheap_action is not None:
-                result = self.submit_action(
-                    AgentAction(
-                        agent_id=agent_id,
-                        type=str(cheap_action.get("type", "wait")),
-                        payload=dict(cheap_action.get("payload", {})),
-                    )
-                )
-                event = result.get("event") if isinstance(result.get("event"), dict) else None
-                input_chars = self._json_chars(observation)
-                self.world.add_decision_event(
+                self._apply_local_action_decision(
                     agent_id=agent_id,
                     provider="rule-prefilter",
                     model="context-budget-v1",
                     observation=observation,
                     text="local low-cost action",
-                    actions=[cheap_action],
-                    results=[
-                        {
-                            "ok": bool(result.get("ok")),
-                            "message": str(result.get("message", "")),
-                            "event_id": event.get("id") if event else None,
-                            "action_type": cheap_action.get("type"),
-                            "elapsed_ms": 0,
-                            "input_chars": input_chars,
-                        }
-                    ],
+                    action=cheap_action,
+                )
+                state.last_model_tick = self.world.tick
+                continue
+            if self._provider_recovery_active(provider_name):
+                recovery_action = self._recovery_fallback_action(agent_id, action_space, observation, provider_name)
+                self._apply_local_action_decision(
+                    agent_id=agent_id,
+                    provider="recovery-prefilter",
+                    model=f"{provider_name}-cooldown",
+                    observation=observation,
+                    text="local recovery action while model provider is congested",
+                    action=recovery_action,
                 )
                 state.last_model_tick = self.world.tick
                 continue
@@ -337,6 +362,162 @@ class SimulationRuntime:
             if state.pending_model and agent_id not in self._model_tasks:
                 state.pending_model = False
 
+    def _recover_stalled_tasks(self) -> None:
+        self._recover_stalled_model_tasks()
+        self._recover_stalled_scene_director()
+
+    def _recover_stalled_model_tasks(self) -> None:
+        stalled = [
+            (agent_id, record)
+            for agent_id, record in self._model_tasks.items()
+            if not record.task.done() and self.world.tick - record.started_tick >= self.model_watchdog_ticks
+        ]
+        for agent_id, record in stalled:
+            self._model_tasks.pop(agent_id, None)
+            state = self.world.agent_states.get(agent_id)
+            if state is not None:
+                state.pending_model = False
+            elapsed_ms = round((perf_counter() - record.started_at) * 1000, 2)
+            age_ticks = max(0, self.world.tick - record.started_tick)
+            message = (
+                f"Model task watchdog recovered after {round(elapsed_ms / 1000, 1)}s; "
+                "using local rules temporarily."
+            )
+            event = self.world.add_event(
+                "model_recovery",
+                message,
+                agent_id=agent_id,
+                payload={
+                    "provider": record.provider_name,
+                    "model": record.model_name,
+                    "age_ticks": age_ticks,
+                    "watchdog_age_ticks": self.model_watchdog_ticks,
+                },
+            )
+            self.world.add_decision_event(
+                agent_id=agent_id,
+                provider=record.provider_name,
+                model=record.model_name,
+                observation=record.request.observation,
+                text="",
+                actions=[],
+                results=[
+                    {
+                        "ok": False,
+                        "message": message,
+                        "event_id": event.id,
+                        "elapsed_ms": elapsed_ms,
+                        "input_chars": record.input_chars,
+                        "recovery": "watchdog",
+                    }
+                ],
+            )
+            self._trip_provider_recovery(record.provider_name)
+            self._cancel_background_task(record.task)
+
+    def _recover_stalled_scene_director(self) -> None:
+        if not self._director_task or self._director_task.done():
+            return
+        age_ticks = max(0, self.world.tick - self._director_started_tick)
+        if age_ticks < self.scene_director_watchdog_ticks:
+            return
+        self._cancel_background_task(self._director_task)
+        self._director_task = None
+        self._director_started_tick = -999
+        self.world.narrative["last_tick"] = self.world.tick
+        self.world.add_event(
+            "scene_director_recovery",
+            "Scene director watchdog recovered a stalled narration task.",
+            payload={
+                "age_ticks": age_ticks,
+                "watchdog_age_ticks": self.scene_director_watchdog_ticks,
+            },
+        )
+
+    def _cancel_background_task(self, task: asyncio.Task) -> None:
+        task.cancel()
+
+        def consume_cancelled_result(done: asyncio.Task) -> None:
+            try:
+                done.exception()
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        task.add_done_callback(consume_cancelled_result)
+
+    def _provider_recovery_active(self, provider_name: str) -> bool:
+        if provider_name == "mock":
+            return False
+        return self._provider_recovery_until.get(provider_name, 0) > self.world.tick
+
+    def _trip_provider_recovery(self, provider_name: str) -> None:
+        if provider_name == "mock":
+            return
+        self._provider_recovery_until[provider_name] = max(
+            self._provider_recovery_until.get(provider_name, 0),
+            self.world.tick + self.provider_recovery_ticks,
+        )
+
+    def _apply_local_action_decision(
+        self,
+        agent_id: str,
+        provider: str,
+        model: str,
+        observation: dict[str, Any],
+        text: str,
+        action: dict[str, Any],
+    ) -> dict[str, Any]:
+        result = self.submit_action(
+            AgentAction(
+                agent_id=agent_id,
+                type=str(action.get("type", "wait")),
+                payload=dict(action.get("payload", {})),
+            )
+        )
+        self._mark_item_dialogue_reference_if_needed(agent_id, action, observation)
+        event = result.get("event") if isinstance(result.get("event"), dict) else None
+        input_chars = self._json_chars(observation)
+        self.world.add_decision_event(
+            agent_id=agent_id,
+            provider=provider,
+            model=model,
+            observation=observation,
+            text=text,
+            actions=[action],
+            results=[
+                {
+                    "ok": bool(result.get("ok")),
+                    "message": str(result.get("message", "")),
+                    "event_id": event.get("id") if event else None,
+                    "action_type": action.get("type"),
+                    "elapsed_ms": 0,
+                    "input_chars": input_chars,
+                }
+            ],
+        )
+        return result
+
+    def _recovery_fallback_action(
+        self,
+        agent_id: str,
+        action_space: list[str],
+        observation: dict[str, Any],
+        provider_name: str,
+    ) -> dict[str, Any]:
+        allowed = set(action_space)
+        action = self._prefilter_action(agent_id, action_space, observation, provider_name)
+        if action is not None:
+            return action
+        if observation.get("movement_intent") and "move_to" in allowed:
+            target = self._first_movement_target(observation)
+            if target:
+                return {"type": "move_to", "payload": {"target": target}}
+        if "observe" in allowed:
+            return {"type": "observe", "payload": {}}
+        if "wait" in allowed:
+            return {"type": "wait", "payload": {"duration": 1}}
+        return {"type": "wait", "payload": {"duration": 1}}
+
     def _schedule_scene_director(self) -> None:
         if self._director_task and not self._director_task.done():
             return
@@ -368,6 +549,7 @@ class SimulationRuntime:
                 for event in self.world.events
                 if event.type not in {"model_error"}
             ][-12:],
+            items=self._director_item_summaries(),
             narrative=dict(self.world.narrative),
             scene_memories=[memory.to_dict() for memory in self.world.memories if memory.agent_id == "__scene__"][-8:],
             narrative_cues=[
@@ -377,6 +559,7 @@ class SimulationRuntime:
             ][-8:],
         )
         self._director_task = asyncio.create_task(self.scene_director.generate(request))
+        self._director_started_tick = self.world.tick
         self.world.narrative["last_tick"] = self.world.tick
 
     def _harvest_director_task(self) -> None:
@@ -384,18 +567,20 @@ class SimulationRuntime:
             return
         task = self._director_task
         self._director_task = None
+        self._director_started_tick = -999
         try:
             response = task.result()
         except Exception as exc:  # pragma: no cover - defensive API runtime path
             self.world.add_event("scene_director_error", str(exc))
             return
         review = self.environment_arbiter.apply_proposal(self.world, response.proposal)
-        if response.text:
-            self.world.narrative["recent_summary"] = response.text[:500]
-        if response.text:
+        director_text = self._item_grounded_scene_text(response.text)
+        if director_text:
+            self.world.narrative["recent_summary"] = director_text[:500]
+        if director_text:
             self.world.add_event(
                 "system",
-                response.text,
+                director_text,
                 payload={
                     "source": "scene_director",
                     "accepted": len(review.accepted),
@@ -415,6 +600,7 @@ class SimulationRuntime:
             except Exception as exc:  # pragma: no cover - defensive API runtime path
                 elapsed_ms = round((perf_counter() - record.started_at) * 1000, 2)
                 self.world.add_event("model_error", str(exc), agent_id=agent_id)
+                self._trip_provider_recovery(record.provider_name)
                 self.world.add_decision_event(
                     agent_id=agent_id,
                     provider=record.provider_name,
@@ -450,6 +636,7 @@ class SimulationRuntime:
                 action_type = str(action.get("type", "wait"))
                 payload = dict(action.get("payload", {}))
                 result = self.submit_action(AgentAction(agent_id=agent_id, type=action_type, payload=payload))
+                self._mark_item_dialogue_reference_if_needed(agent_id, action, record.request.observation)
                 event = result.get("event") if isinstance(result.get("event"), dict) else None
                 results.append(
                     {
@@ -478,15 +665,36 @@ class SimulationRuntime:
         observation: dict[str, Any],
         provider_name: str,
     ) -> dict[str, Any] | None:
-        if not self.action_prefilter_enabled or provider_name == "mock":
+        if not self.action_prefilter_enabled:
             return None
         allowed = set(action_space)
-        if self._needs_llm_decision(observation, allowed):
-            return None
+        if provider_name == "mock":
+            if observation.get("movement_intent") and "move_to" in allowed:
+                target = self._first_movement_target(observation)
+                if target:
+                    return {"type": "move_to", "payload": {"target": target}}
+            return self._local_item_opportunity_action(agent_id, observation, allowed)
+        if observation.get("held_item_id") and "move_to" in allowed:
+            target = self._first_movement_target(observation)
+            if target:
+                return {"type": "move_to", "payload": {"target": target}}
         if observation.get("movement_intent") and "move_to" in allowed:
             target = self._first_movement_target(observation)
             if target:
                 return {"type": "move_to", "payload": {"target": target}}
+        local_social_action = self._local_social_opportunity_action(agent_id, observation, allowed)
+        if local_social_action is not None:
+            return local_social_action
+        local_item_action = self._local_item_opportunity_action(agent_id, observation, allowed)
+        if local_item_action is not None:
+            return local_item_action
+        if self._item_interaction_cooldown_active(agent_id) and not observation.get("held_item_id"):
+            if "observe" in allowed:
+                return {"type": "observe", "payload": {}}
+            if "wait" in allowed:
+                return {"type": "wait", "payload": {"duration": 1}}
+        if self._needs_llm_decision(observation, allowed):
+            return None
         if "observe" in allowed:
             return {"type": "observe", "payload": {}}
         if "wait" in allowed:
@@ -517,6 +725,123 @@ class SimulationRuntime:
             return True
         return False
 
+    def _local_social_opportunity_action(
+        self,
+        agent_id: str,
+        observation: dict[str, Any],
+        allowed: set[str],
+    ) -> dict[str, Any] | None:
+        target = self._first_dialogue_candidate(observation)
+        if target and "social" in allowed:
+            target_id = str(target.get("id") or "")
+            if target_id:
+                return {
+                    "type": "social",
+                    "payload": {
+                        "target_agent_id": target_id,
+                        "text": self._local_social_text(agent_id, observation, target),
+                    },
+                }
+        item_name = self._preferred_observation_item_name(observation)
+        if item_name and "say" in allowed and self._should_reference_item_in_dialogue(agent_id, observation):
+            return {
+                "type": "say",
+                "payload": {
+                    "text": (
+                        f"我刚才注意到{item_name}。"
+                        if self._observation_language(observation) == "zh-CN"
+                        else f"I just noticed {item_name}."
+                    )
+                },
+            }
+        return None
+
+    def _first_dialogue_candidate(self, observation: dict[str, Any]) -> dict[str, Any] | None:
+        candidates = observation.get("dialogue_candidates")
+        if not isinstance(candidates, list):
+            return None
+        for candidate in candidates:
+            if isinstance(candidate, dict) and candidate.get("id"):
+                return candidate
+        return None
+
+    def _local_social_text(self, agent_id: str, observation: dict[str, Any], target: dict[str, Any]) -> str:
+        zh = self._observation_language(observation) == "zh-CN"
+        target_name = str(target.get("name") or target.get("id") or "there")
+        item_name = (
+            self._preferred_observation_item_name(observation)
+            if self._should_reference_item_in_dialogue(agent_id, observation)
+            else ""
+        )
+        if item_name:
+            return (
+                f"{target_name}，你也注意到{item_name}了吗？"
+                if zh
+                else f"{target_name}, did you notice {item_name} too?"
+            )
+        return (
+            f"{target_name}，你刚才那一步让我想再确认一下。"
+            if zh
+            else f"{target_name}, your last move made me want to check something."
+        )
+
+    def _observation_language(self, observation: dict[str, Any]) -> str:
+        return str(observation.get("effective_dialogue_language") or observation.get("dialogue_language") or "auto")
+
+    def _item_interaction_cooldown_active(self, agent_id: str) -> bool:
+        state = self.world.agent_states.get(agent_id)
+        return state is not None and self.world.tick < float(state.cooldowns.get("item_interaction_until", 0))
+
+    def _local_item_opportunity_action(
+        self,
+        agent_id: str,
+        observation: dict[str, Any],
+        allowed: set[str],
+    ) -> dict[str, Any] | None:
+        if self._item_interaction_cooldown_active(agent_id):
+            return None
+        if "use" in allowed:
+            item_id = self._first_affordance_item_id(observation, "use")
+            if item_id and not self._recent_item_action(observation, item_id, {"use", "interact"}):
+                return {"type": "use", "payload": {"target_id": item_id}}
+        if "interact" in allowed:
+            item_id = self._first_affordance_item_id(observation, "interact")
+            if item_id and not self._recent_item_action(observation, item_id, {"use", "interact"}):
+                return {"type": "interact", "payload": {"target_id": item_id}}
+            item_id = self._first_interactable_item_id(observation, "interact")
+            if item_id and not self._recent_item_action(observation, item_id, {"use", "interact"}):
+                return {"type": "interact", "payload": {"target_id": item_id}}
+        if observation.get("movement_intent") and "move_to" in allowed:
+            target = self._first_item_approach_target(observation)
+            if target is not None:
+                return {"type": "move_to", "payload": {"target": target}}
+        if (
+            observation.get("movement_intent")
+            and not observation.get("held_item_id")
+            and "pick_up" in allowed
+        ):
+            item_id = self._first_movable_item_id(observation)
+            if item_id and not self._recent_item_action(observation, item_id, {"pick_up", "drop_item"}):
+                return {"type": "pick_up", "payload": {"item_id": item_id}}
+        return None
+
+    def _recent_item_action(self, observation: dict[str, Any], item_id: str, action_types: set[str]) -> bool:
+        events = observation.get("agent_recent_events")
+        if not item_id or not isinstance(events, list):
+            return False
+        for event in events[-4:]:
+            if not isinstance(event, dict):
+                continue
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            event_item_id = str(payload.get("item_id") or payload.get("target_id") or "")
+            action = payload.get("action")
+            action_type = str(action.get("type") or "") if isinstance(action, dict) else ""
+            if event_item_id == item_id and (not action_types or action_type in action_types):
+                return True
+        return False
+
     def _coerce_model_action(self, raw_action: dict[str, Any], response_text: str, request: ModelRequest) -> dict[str, Any]:
         allowed = set(request.action_space)
         action_type = str(raw_action.get("type") or "wait")
@@ -534,6 +859,7 @@ class SimulationRuntime:
             text = self._clean_utterance_text(payload.get("text") or response_text, request)
             if not text:
                 return self._fallback_action("", allowed, request)
+            text = self._item_grounded_utterance_text(text, request)
             return {"type": "say", "payload": {"text": text}}
 
         if action_type == "social":
@@ -545,6 +871,7 @@ class SimulationRuntime:
             text = self._clean_utterance_text(payload.get("text") or response_text, request, target_agent_id=target_id)
             if not text:
                 return self._fallback_action("", allowed, request)
+            text = self._item_grounded_utterance_text(text, request)
             return {"type": "social", "payload": {"target_agent_id": target_id, "text": text}}
 
         if action_type == "move_to":
@@ -589,7 +916,7 @@ class SimulationRuntime:
             if not target_id:
                 target_id = self._first_affordance_item_id(observation, action_type)
             if not target_id:
-                target_id = self._first_interactable_item_id(observation)
+                target_id = self._first_interactable_item_id(observation, action_type)
             if not target_id:
                 return self._fallback_action(response_text, allowed, request)
             return {"type": action_type, "payload": {"target_id": target_id}}
@@ -634,7 +961,105 @@ class SimulationRuntime:
         return "wait"
 
     def _fallback_text(self, request: ModelRequest) -> str:
+        item_name = self._preferred_observation_item_name(request.observation)
+        if item_name:
+            return f"我先看看{item_name}。" if request.language == "zh-CN" else f"I will take a closer look at {item_name}."
         return "我先观察一下。" if request.language == "zh-CN" else "I am thinking."
+
+    def _first_observation_item_name(self, observation: dict[str, Any]) -> str:
+        return self._preferred_observation_item_name(observation)
+
+    def _preferred_observation_item_name(self, observation: dict[str, Any]) -> str:
+        names = self._observation_item_names(observation)
+        if not names:
+            return ""
+        for name in names:
+            if name.strip().lower() not in {"item", "object"}:
+                return name
+        return names[0]
+
+    def _observation_item_names(self, observation: dict[str, Any]) -> list[str]:
+        item_context = observation.get("item_context")
+        candidates = item_context.get("nearby_named_items") if isinstance(item_context, dict) else observation.get("nearby_items")
+        if not isinstance(candidates, list):
+            return []
+        names: list[str] = []
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    def _item_grounded_utterance_text(self, text: str, request: ModelRequest) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+        names = self._observation_item_names(request.observation)
+        if not names or any(name and name in cleaned for name in names):
+            return cleaned
+        if not self._should_reference_item_in_dialogue(request.agent_id, request.observation):
+            return cleaned
+        item_name = self._preferred_observation_item_name(request.observation)
+        if not item_name:
+            return cleaned
+        if self._contains_cjk(cleaned) or request.language == "zh-CN":
+            return f"{cleaned} 我刚才注意到{item_name}。"
+        return f"{cleaned} I just noticed {item_name}."
+
+    def _item_grounded_scene_text(self, text: str) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+        names = self._visible_item_names_for_language()
+        if not names or any(name and name in cleaned for name in names):
+            return cleaned
+        item_clause = "、".join(names[:2])
+        if self._contains_cjk(cleaned):
+            return f"{cleaned} 可见物体如{item_clause}正在成为行动和对话的线索。"
+        return f"{cleaned} Visible items such as {', '.join(names[:2])} are becoming anchors for action and dialogue."
+
+    def _should_reference_item_in_dialogue(self, agent_id: str, observation: dict[str, Any]) -> bool:
+        names = self._observation_item_names(observation)
+        if not names:
+            return False
+        state = self.world.agent_states.get(agent_id)
+        if state is not None and self.world.tick < float(state.cooldowns.get("item_dialogue_reference_until", 0)):
+            return False
+        visible_dialogue = [event for event in self.world.events if event.type in {"speech", "dialogue"}]
+        if len(visible_dialogue) < 9:
+            return False
+        return not any(self._text_mentions_any_item(event.message, names) for event in visible_dialogue[-9:])
+
+    def _mark_item_dialogue_reference_if_needed(
+        self,
+        agent_id: str,
+        action: dict[str, Any],
+        observation: dict[str, Any],
+    ) -> None:
+        if str(action.get("type") or "") not in {"say", "social"}:
+            return
+        payload = action.get("payload")
+        text = str(payload.get("text") or "") if isinstance(payload, dict) else ""
+        if not text or not self._text_mentions_any_item(text, self._observation_item_names(observation)):
+            return
+        state = self.world.agent_states.get(agent_id)
+        if state is not None:
+            state.cooldowns["item_dialogue_reference_until"] = self.world.tick + 90
+
+    def _text_mentions_any_item(self, text: str, names: list[str]) -> bool:
+        return any(name and name in text for name in names)
+
+    def _visible_item_names_for_language(self) -> list[str]:
+        names: list[str] = []
+        for item in self.world.map.items:
+            if item.hidden:
+                continue
+            name = str(item.name or item.id).strip()
+            if name and name not in names:
+                names.append(name)
+        return sorted(names, key=lambda name: (name.lower() in {"item", "object"}, name))
 
     def _clean_utterance_text(
         self,
@@ -642,6 +1067,8 @@ class SimulationRuntime:
         request: ModelRequest,
         target_agent_id: str | None = None,
     ) -> str:
+        if isinstance(value, dict):
+            value = value.get("text") or value.get("utterance") or value.get("message") or ""
         text = str(value or "").strip()
         if not text:
             return ""
@@ -783,18 +1210,39 @@ class SimulationRuntime:
         if not isinstance(items, list):
             return ""
         for item in items:
-            if isinstance(item, dict) and item.get("id") and item.get("movable"):
+            if (
+                isinstance(item, dict)
+                and item.get("id")
+                and item.get("movable")
+                and self._item_within_interaction_range(item)
+            ):
                 return str(item["id"])
         return ""
 
-    def _first_interactable_item_id(self, observation: dict[str, Any]) -> str:
+    def _first_interactable_item_id(self, observation: dict[str, Any], action_type: str = "interact") -> str:
         items = observation.get("nearby_items")
         if not isinstance(items, list):
             return ""
         for item in items:
-            if isinstance(item, dict) and item.get("id") and item.get("interactable", True):
-                return str(item["id"])
+            if not isinstance(item, dict) or not item.get("id") or not item.get("interactable", True):
+                continue
+            if not self._item_within_interaction_range(item):
+                continue
+            configured_actions = {
+                str(affordance.get("action") or "")
+                for affordance in item.get("configured_affordances") or []
+                if isinstance(affordance, dict)
+            }
+            if action_type in configured_actions and not item.get("available_affordances"):
+                continue
+            return str(item["id"])
         return ""
+
+    def _item_within_interaction_range(self, item: dict[str, Any]) -> bool:
+        raw_distance = item.get("distance")
+        if not isinstance(raw_distance, (int, float)):
+            return True
+        return float(raw_distance) <= self.rule_engine.interaction_range
 
     def _first_affordance_item_id(self, observation: dict[str, Any], action_type: str) -> str:
         items = observation.get("nearby_items")
@@ -809,6 +1257,22 @@ class SimulationRuntime:
             if any(isinstance(affordance, dict) and affordance.get("action") == action_type for affordance in affordances):
                 return str(item["id"])
         return ""
+
+    def _first_item_approach_target(self, observation: dict[str, Any]) -> dict[str, Any] | None:
+        items = observation.get("nearby_items")
+        if not isinstance(items, list):
+            return None
+        for item in items:
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            if self._item_within_interaction_range(item):
+                continue
+            if not (item.get("interactable", True) or item.get("movable")):
+                continue
+            point = item.get("approach_point")
+            if self._valid_point_dict(point):
+                return {"x": float(point["x"]), "y": float(point["y"])}
+        return None
 
     def _first_movement_target(self, observation: dict[str, Any]) -> dict[str, Any] | None:
         targets = observation.get("movement_targets")
@@ -884,6 +1348,7 @@ class SimulationRuntime:
         relationships = self._relationship_context_for(agent_id, nearby_agents)
         recent_utterances = self._recent_utterances_for(agent_id)
         conversation_focus = self._conversation_focus_for(nearby_agents, nearby_items, relationships, recent_utterances)
+        item_context = self._item_context_for(agent_id, nearby_items)
         return {
             "tick": self.world.tick,
             "agent_name": profile.name,
@@ -918,6 +1383,7 @@ class SimulationRuntime:
             "relationships": relationships,
             "recent_utterances": recent_utterances,
             "conversation_focus": conversation_focus,
+            "item_context": item_context,
             "scene_context": scene_context,
             "effective_dialogue_language": effective_language,
             "dialogue_language": effective_language,
@@ -965,6 +1431,53 @@ class SimulationRuntime:
             "agent_narrative_state": dict(self.world.agent_states[agent_id].narrative_state),
             "memories": [memory.to_dict() for memory in self.world.memories if memory.agent_id == "__scene__"][-5:],
             "cues": cues,
+        }
+
+    def _item_context_for(self, agent_id: str, nearby_items: list[dict[str, Any]]) -> dict[str, Any]:
+        recent_item_events: list[dict[str, Any]] = []
+        for event in self.world.events[-24:]:
+            event_dict = event.to_dict()
+            if event.type not in {"interaction", "rejected_action", "observation"}:
+                continue
+            payload = event_dict.get("payload")
+            item_id = ""
+            if isinstance(payload, dict):
+                nested_payload = payload.get("payload")
+                nested_target_id = nested_payload.get("target_id") if isinstance(nested_payload, dict) else ""
+                item_id = str(payload.get("item_id") or payload.get("target_id") or nested_target_id or "")
+            if item_id or event.type == "interaction":
+                recent_item_events.append(
+                    {
+                        "tick": event.tick,
+                        "type": event.type,
+                        "agent_id": event.agent_id,
+                        "item_id": item_id,
+                        "message": event.message,
+                    }
+                )
+        nearby_named_items = [
+            {
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "distance": item.get("distance"),
+                "within_interaction_range": item.get("within_interaction_range"),
+                "approach_point": item.get("approach_point"),
+                "movable": item.get("movable"),
+                "interactable": item.get("interactable"),
+                "available_affordances": item.get("available_affordances") or [],
+                "configured_affordances": item.get("configured_affordances") or [],
+                "state": item.get("state") or {},
+            }
+            for item in nearby_items[:5]
+        ]
+        return {
+            "instruction": (
+                "Treat nearby_named_items as optional scene anchors. "
+                "Mention a relevant item by name only occasionally, about one in ten visible utterances, when it fits the moment."
+            ),
+            "agent_id": agent_id,
+            "nearby_named_items": nearby_named_items,
+            "recent_item_events": recent_item_events[-6:],
         }
 
     def _relationship_context_for(self, agent_id: str, nearby_agents: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1057,6 +1570,10 @@ class SimulationRuntime:
                     "id": item.get("id"),
                     "name": item.get("name"),
                     "movable": item.get("movable"),
+                    "interactable": item.get("interactable"),
+                    "within_interaction_range": item.get("within_interaction_range"),
+                    "configured_affordances": item.get("configured_affordances") or [],
+                    "available_affordances": item.get("available_affordances") or [],
                     "distance": item.get("distance"),
                 }
                 for item in nearby_items[:4]
@@ -1091,6 +1608,25 @@ class SimulationRuntime:
                 }
             )
         return agents
+
+    def _director_item_summaries(self) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for item in self.world.map.items:
+            if item.hidden:
+                continue
+            items.append(
+                {
+                    "id": item.id,
+                    "name": item.name,
+                    "position": item.position.to_dict(),
+                    "movable": item.movable,
+                    "interactable": item.interactable,
+                    "state": dict(item.state),
+                    "tags": list(item.tags),
+                    "configured_affordances": self._configured_item_affordance_summaries(item),
+                }
+            )
+        return items[:12]
 
     def _effective_action_space(self, action_space: list[str]) -> list[str]:
         merged = list(action_space)
@@ -1156,6 +1692,10 @@ class SimulationRuntime:
             current_distance = distance(state.position.to_dict(), item.position.to_dict())
             if current_distance > radius:
                 continue
+            approach_point = None
+            if self.world.map.is_walkable(item.position):
+                candidate = self.rule_engine.collision_free_agent_point(self.world, agent_id, item.position) or item.position
+                approach_point = candidate.to_dict()
             nearby.append(
                 {
                     "id": item.id,
@@ -1164,6 +1704,9 @@ class SimulationRuntime:
                     "distance": round(current_distance, 2),
                     "movable": item.movable,
                     "interactable": item.interactable,
+                    "within_interaction_range": current_distance <= self.rule_engine.interaction_range,
+                    "approach_point": approach_point,
+                    "configured_affordances": self._configured_item_affordance_summaries(item),
                     "available_affordances": self.rule_engine.available_item_affordances(
                         self.world,
                         state.position,
@@ -1174,6 +1717,25 @@ class SimulationRuntime:
                 }
             )
         return sorted(nearby, key=lambda item: item["distance"])
+
+    def _configured_item_affordance_summaries(self, item: Any) -> list[dict[str, Any]]:
+        summaries: list[dict[str, Any]] = []
+        for affordance in getattr(item, "affordances", []) or []:
+            if not isinstance(affordance, dict):
+                continue
+            action = str(affordance.get("action") or "").strip()
+            if action not in {"interact", "use"}:
+                continue
+            summaries.append(
+                {
+                    "action": action,
+                    "label": affordance.get("label"),
+                    "range": affordance.get("range"),
+                    "enabled": bool(affordance.get("enabled", True)),
+                    "status": affordance.get("status"),
+                }
+            )
+        return summaries
 
     def _movement_targets_for(self, agent_id: str) -> list[dict[str, Any]]:
         state = self.world.agent_states[agent_id]

@@ -150,6 +150,7 @@ export default function App() {
   const [modelCapabilityTasks, setModelCapabilityTasks] = useState<Partial<Record<ModelCapabilityId, ModelCapabilityTask>>>({});
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [runtimeStatusStale, setRuntimeStatusStale] = useState(false);
+  const [wsReconnectAttempt, setWsReconnectAttempt] = useState(0);
   const [generation, setGeneration] = useState<MapGenerationState | null>(null);
   const [segmentation, setSegmentation] = useState<MapSegmentationState>(() => idleSegmentation());
   const [panels, setPanels] = useState<PanelState[]>(() => loadPanelLayout(createInitialPanels()));
@@ -239,10 +240,39 @@ export default function App() {
     if (!world) {
       return;
     }
+    let cancelled = false;
+    const refresh = async () => {
+      if (document.visibilityState === "hidden") {
+        return;
+      }
+      const snapshot = await getWorld();
+      if (cancelled) {
+        return;
+      }
+      setWorld(mergeSnapshotWithLocalState(snapshot, {
+        mapPatch: pendingMapPatchRef.current,
+        agentPatches: pendingAgentPatchesRef.current,
+        itemPatches: pendingItemPatchesRef.current,
+        localItems: pendingLocalItemsRef.current
+      }));
+    };
+    const timer = window.setInterval(refresh, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [Boolean(world)]);
+
+  useEffect(() => {
+    if (!world) {
+      return;
+    }
     if (typeof window !== "undefined" && window.localStorage.getItem("agent-workstation.disable-ws") === "1") {
       return;
     }
     let socket: WebSocket | null = null;
+    let reconnectTimer = 0;
+    let closedByEffect = false;
     try {
       socket = new WebSocket(wsUrl());
       socket.onopen = () => setStatus("后端已连接");
@@ -258,13 +288,28 @@ export default function App() {
           localItems: pendingLocalItemsRef.current
         }));
       };
-      socket.onerror = () => setStatus("本地预览");
-      socket.onclose = () => setStatus((current) => (current === "后端已连接" ? "本地预览" : current));
+      socket.onerror = () => {
+        setStatus("本地预览");
+        socket?.close();
+      };
+      socket.onclose = () => {
+        setStatus((current) => (current === "后端已连接" ? "本地预览" : current));
+        if (!closedByEffect) {
+          reconnectTimer = window.setTimeout(() => setWsReconnectAttempt((attempt) => attempt + 1), 1000);
+        }
+      };
     } catch {
       setStatus("本地预览");
+      reconnectTimer = window.setTimeout(() => setWsReconnectAttempt((attempt) => attempt + 1), 1000);
     }
-    return () => socket?.close();
-  }, [Boolean(world)]);
+    return () => {
+      closedByEffect = true;
+      if (reconnectTimer) {
+        window.clearTimeout(reconnectTimer);
+      }
+      socket?.close();
+    };
+  }, [Boolean(world), wsReconnectAttempt]);
 
   useEffect(() => {
     if (!world) {

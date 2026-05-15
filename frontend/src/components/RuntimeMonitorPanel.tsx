@@ -14,6 +14,8 @@ export function RuntimeMonitorPanel({ status, stale, onRefresh }: Props) {
   const remoteModels = status?.models.filter((model) => model.kind === "remote") ?? [];
   const imageTasks = status?.simulation.recentImageGenerationTasks ?? [];
   const runningImageTasks = imageTasks.filter((task) => task.status === "running");
+  const recoveryEntries = Object.entries(status?.simulation.providerRecovery ?? {}).filter(([, entry]) => entry.remainingTicks > 0);
+  const agentDecisionTasks = status?.simulation.pendingModelTasks.filter((task) => task.operation === "agent_decision" || task.taskKind === "agent_decision") ?? [];
 
   useEffect(() => {
     if (!status) {
@@ -39,6 +41,19 @@ export function RuntimeMonitorPanel({ status, stale, onRefresh }: Props) {
         <div className="runtime-warning" data-testid="runtime-monitor-stale">
           <AlertTriangle size={15} />
           <span>连接中断，正在保留上一次监控数据。</span>
+        </div>
+      ) : null}
+
+      {recoveryEntries.length ? (
+        <div className="runtime-warning" data-testid="runtime-monitor-recovery">
+          <AlertTriangle size={15} />
+          <span>
+            模型拥堵自愈中：
+            {recoveryEntries
+              .map(([provider, entry]) => `${provider} 约 ${Math.ceil(entry.remainingTicks / 10)}s`)
+              .join(" / ")}
+            ，agent 暂用本地轻量规则继续行动。
+          </span>
         </div>
       ) : null}
 
@@ -88,6 +103,14 @@ export function RuntimeMonitorPanel({ status, stale, onRefresh }: Props) {
           <span>图片生成</span>
         </div>
         <ImageTaskList tasks={imageTasks} />
+      </section>
+
+      <section className="runtime-section">
+        <div className="runtime-section-title">
+          <Cpu size={15} />
+          <span>Agent 决策</span>
+        </div>
+        <AgentDecisionTaskList tasks={agentDecisionTasks} />
       </section>
 
       <section className="runtime-section">
@@ -254,6 +277,32 @@ function ImageTaskList({ tasks }: { tasks: RuntimePendingModelTask[] }) {
             <span>{imageTaskStatusLabel(task)}</span>
             {task.elapsedMs != null ? <span>{Math.round(task.elapsedMs / 1000)}s</span> : task.ageSeconds != null ? <span>{task.ageSeconds}s</span> : null}
             {task.error ? <span>错误</span> : task.layerId ? <span>已写入图层</span> : null}
+          </div>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function AgentDecisionTaskList({ tasks }: { tasks: RuntimePendingModelTask[] }) {
+  if (!tasks.length) {
+    return <div className="runtime-empty">无阻塞中的 agent 决策</div>;
+  }
+  return (
+    <div className="runtime-model-list" data-testid="runtime-agent-task-list">
+      {tasks.slice(0, 6).map((task) => (
+        <article className="runtime-model-row" key={task.agentId || `${task.provider}-${task.startedTick}`}>
+          <div>
+            <strong>{task.agentId || "agent"}</strong>
+            <small>{task.provider || "provider"} / {task.model || "model"}</small>
+          </div>
+          <div className="runtime-model-badges">
+            <span>决策中</span>
+            {task.watchdogAgeTicks ? <span>watchdog {task.watchdogAgeTicks} tick</span> : null}
+          </div>
+          <div className="runtime-model-stats">
+            <span>{task.ageTicks} tick</span>
+            {task.watchdogAgeTicks ? <span>{Math.max(0, task.watchdogAgeTicks - task.ageTicks)} tick 后自愈</span> : null}
           </div>
         </article>
       ))}

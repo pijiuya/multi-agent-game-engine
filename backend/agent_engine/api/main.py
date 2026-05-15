@@ -74,7 +74,7 @@ class AgentCreate(BaseModel):
     role: str = "resident"
     identity: str = "A resident in the scene."
     color: str = "#3b82f6"
-    model_provider: str = "mock"
+    model_provider: str | None = None
     position: dict[str, float] | None = None
     action_space: list[str] | None = None
 
@@ -554,6 +554,7 @@ def runtime_status() -> dict[str, Any]:
             "model": str(task.get("model") or ""),
             "started_tick": int(task.get("started_tick") or 0),
             "age_ticks": int(task.get("age_ticks") or 0),
+            "watchdog_age_ticks": int(task.get("watchdog_age_ticks") or 0),
             "age_seconds": None,
             "operation": "agent_decision",
             "prompt": "",
@@ -574,6 +575,7 @@ def runtime_status() -> dict[str, Any]:
             "pending_model_tasks": pending_tasks,
             "pending_image_generation_tasks": pending_image_tasks,
             "recent_image_generation_tasks": image_tasks[:12],
+            "provider_recovery": snapshot.get("recovery", {}).get("provider_recovery", {}),
         },
         "models": _runtime_model_statuses(pending_tasks),
         "hardware": _hardware_pressure_summary(),
@@ -1094,13 +1096,14 @@ def delete_action_extension(extension_id: str) -> dict[str, Any]:
 @app.post("/api/agents")
 def create_agent(payload: AgentCreate) -> dict[str, Any]:
     agent_id = new_id("agent")
+    model_provider = str(payload.model_provider or runtime.default_provider_id or "mock")
     profile = AgentProfile(
         id=agent_id,
         name=payload.name,
         role=payload.role,
         identity=payload.identity,
         color=payload.color,
-        model_provider=payload.model_provider,
+        model_provider=model_provider,
         action_space=normalize_action_space(payload.action_space),
     )
     position = Point.from_dict(payload.position) if payload.position else runtime.world.map.nearest_spawn()

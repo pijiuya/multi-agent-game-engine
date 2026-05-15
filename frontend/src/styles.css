@@ -669,6 +669,24 @@ select,
   -webkit-backdrop-filter: blur(8px);
 }
 
+.world-item-feedback-bubble {
+  position: absolute;
+  max-width: 200px;
+  padding: 7px 9px;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--ink);
+  pointer-events: none;
+  background: rgba(var(--panel-rgb), 0.92);
+  border: 1px solid rgba(var(--grid-rgb), 0.42);
+  border-radius: 8px;
+  box-shadow: 0 8px 22px var(--soft-shadow);
+  transform: translate(-50%, calc(-100% - 34px));
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
 .world-agent-label.active,
 .world-item-label.active {
   color: var(--active-ink);

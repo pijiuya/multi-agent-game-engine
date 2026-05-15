@@ -157,6 +157,8 @@ ollama pull qwen2.5vl:3b
 
 后端会从模型配置中同步 runtime provider。agent 默认 `model_provider = "mock"` 时，如果存在启用的真实 LLM，会优先使用当前默认 LLM provider。
 
+运行时带有模型拥堵自愈：单个 agent 决策任务超过 `AGENT_ENGINE_MODEL_WATCHDOG_SECONDS` 后会被释放，相关 provider 会进入短暂恢复窗口，agent 暂用本地轻量规则继续移动、对话或观察；叙事导演任务也有 `AGENT_ENGINE_SCENE_WATCHDOG_SECONDS` 保护。运行监控面板会显示自愈状态，避免用户只看到 CPU/内存持续占用但场景停住。
+
 ## 项目数据和迁移
 
 默认运行数据目录是 `runtime_project/`，它被 `.gitignore` 排除，不会提交到 Git。

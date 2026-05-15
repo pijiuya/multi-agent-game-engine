@@ -124,6 +124,7 @@ class MockProvider(ModelProvider):
         nearby_items = request.observation.get("nearby_items") or []
         movement_targets = request.observation.get("movement_targets") or []
         held_item_id = request.observation.get("held_item_id")
+        item_name = _mock_item_name(request.observation) if _mock_should_reference_item(request.observation, request.agent_id) else ""
         if "move_to" in request.action_space and movement_targets and tick % 15 == 0:
             target = movement_targets[0]
             return ModelResponse(
@@ -134,7 +135,7 @@ class MockProvider(ModelProvider):
             target = dialogue_candidates[0]
             target_name = target.get("name", target.get("id", "there"))
             text = f"{agent_name} 注意到 {target_name} 就在附近。" if zh else f"{agent_name} notices {target_name} nearby."
-            speech = _mock_utterance(str(agent_name), request.role, zh, str(target_name))
+            speech = _mock_utterance(str(agent_name), request.role, zh, str(target_name), item_name)
             return ModelResponse(
                 text=text,
                 actions=[
@@ -176,7 +177,7 @@ class MockProvider(ModelProvider):
                     {
                         "type": "say",
                         "payload": {
-                            "text": _mock_utterance(str(agent_name), request.role, zh)
+                            "text": _mock_utterance(str(agent_name), request.role, zh, item_name=item_name)
                         },
                     }
                 ],
@@ -187,7 +188,49 @@ class MockProvider(ModelProvider):
         )
 
 
-def _mock_utterance(agent_name: str, role: str, zh: bool, target_name: str | None = None) -> str:
+def _mock_item_name(observation: dict[str, Any]) -> str:
+    item_context = observation.get("item_context")
+    candidates = item_context.get("nearby_named_items") if isinstance(item_context, dict) else observation.get("nearby_items")
+    if not isinstance(candidates, list):
+        return ""
+    names: list[str] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    for name in names:
+        if name.lower() not in {"item", "object"}:
+            return name
+    return names[0] if names else ""
+
+
+def _mock_should_reference_item(observation: dict[str, Any], agent_id: str) -> bool:
+    if not _mock_item_name(observation):
+        return False
+    tick = int(observation.get("tick", 0) or 0)
+    bucket = tick // 8
+    offset = sum(ord(char) for char in str(agent_id or "agent")) % 10
+    return (bucket + offset) % 10 == 0
+
+
+def _mock_utterance(
+    agent_name: str,
+    role: str,
+    zh: bool,
+    target_name: str | None = None,
+    item_name: str | None = None,
+) -> str:
+    item_name = str(item_name or "").strip()
+    if item_name:
+        if target_name:
+            return (
+                f"{target_name}，你也注意到{item_name}了吗？"
+                if zh
+                else f"{target_name}, did you notice {item_name} too?"
+            )
+        return f"我刚才注意到{item_name}。" if zh else f"I just noticed {item_name}."
     role_key = str(role or "").lower()
     if role_key == "mediator" or agent_name.lower() == "mira":
         return (
@@ -319,7 +362,7 @@ def _request_to_prompt(request: ModelRequest) -> str:
         "- pick_up: {\"item_id\": string} only for nearby_items where movable=true.\n"
         "- drop_item: {\"position\":{\"x\":number,\"y\":number}} when holding an item.\n"
         "- move_item: {\"item_id\": string, \"target\":{\"x\":number,\"y\":number}, \"rotation\":number, \"scale\":number} only for movable nearby items.\n"
-        "- interact/use: {\"target_id\": string} only for visible nearby targets.\n"
+        "- interact/use: {\"target_id\": string} for nearby_items where interactable=true; prefer items with available_affordances.\n"
         "- say: {\"text\": string}.\n"
         "- wait: {\"duration\": number}.\n"
         f"{extension_lines}"
@@ -330,6 +373,8 @@ def _request_to_prompt(request: ModelRequest) -> str:
         "- Never put identity summaries, JSON explanations, action plans, or third-person agent descriptions in visible speech.\n"
         "Role speech rules:\n"
         "- Make speech specific to identity, relationships, agent_recent_events, recent_utterances, conversation_focus, and nearby_items.\n"
+        "- Nearby items are scene context, not the only topic. Mention a specific item name only when it genuinely fits the moment, "
+        "roughly one out of ten visible utterances; otherwise talk from identity, relationships, movement, or recent events.\n"
         "- Do not repeat identity/role text. Do not say generic greetings like \"How is your day going?\" or weather filler.\n"
         "- For social, address the selected target and react to a recent event, relationship, object, or spatial situation.\n"
         "- If there is no concrete thing to say, choose observe, wait, move_to, or interact instead of weak chatter.\n"
@@ -339,11 +384,13 @@ def _request_to_prompt(request: ModelRequest) -> str:
         "agent centers should keep the listed minimum distance from other agents, and the rules engine may adjust "
         "a move target that would collide.\n"
         "Base speech and social choices primarily on identity, observation.relationships, nearby agents/items, "
+        "observation.item_context, "
         "and observation.agent_recent_events. observation.scene_context is weak background mood only; "
         "do not quote narration as the agent's own speech.\n"
         "Use observation.region_context: road/walkable targets have higher movement priority than action areas; "
         "social regions favor social/say actions; residential regions favor calm local routines.\n"
         "Do not invent ids. For social use only observation.dialogue_candidates ids; for interact/use/pick_up use visible nearby item ids. "
+        "When available_affordances exists, treat it as the clearest lightweight scene interaction opportunity. "
         "Avoid repeating the same action if agent_recent_events show it just happened.\n"
         f"Agent: {request.agent_id}\n"
         f"Role: {request.role}\n"

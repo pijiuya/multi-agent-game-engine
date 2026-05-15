@@ -13,6 +13,7 @@ class SceneDirectorRequest:
     map: dict[str, Any]
     agents: list[dict[str, Any]]
     recent_events: list[dict[str, Any]]
+    items: list[dict[str, Any]] = field(default_factory=list)
     narrative: dict[str, Any] = field(default_factory=dict)
     scene_memories: list[dict[str, Any]] = field(default_factory=list)
     narrative_cues: list[dict[str, Any]] = field(default_factory=list)
@@ -22,6 +23,7 @@ class SceneDirectorRequest:
             "tick": self.tick,
             "map": self.map,
             "agents": self.agents,
+            "items": self.items,
             "recent_events": self.recent_events,
             "narrative": self.narrative,
             "scene_memories": self.scene_memories,
@@ -48,8 +50,11 @@ class MockSceneDirector:
 
     async def generate(self, request: SceneDirectorRequest) -> SceneDirectorResponse:
         active_agents = [agent for agent in request.agents if agent.get("status") != "hidden"]
+        visible_items = [item for item in request.items if not item.get("hidden")]
         premise = str(request.narrative.get("premise") or "The scene keeps changing in small ways.")
-        cue = f"{premise} {len(active_agents)} visible agent(s) are present."
+        item_names = ", ".join(str(item.get("name") or item.get("id")) for item in visible_items[:3])
+        item_clause = f" Nearby scene items: {item_names}." if item_names else ""
+        cue = f"{premise} {len(active_agents)} visible agent(s) are present.{item_clause}"
         return SceneDirectorResponse(
             text="Scene director updated the shared narrative context.",
             proposal={
@@ -92,7 +97,8 @@ class LLMSceneDirector:
                     "Return JSON for scene direction with keys text and proposal. "
                     "proposal may contain events and state_changes only. "
                     "Allowed state_changes are set_agent_narrative_state and add_memory. "
-                    "Do not include agent actions."
+                    "Do not include agent actions. Tie narration to concrete map items in observation.items "
+                    "or recent item interaction events whenever they exist. Use item names exactly."
                 ),
             )
         )
@@ -150,4 +156,3 @@ def _parse_json_object(content: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
-

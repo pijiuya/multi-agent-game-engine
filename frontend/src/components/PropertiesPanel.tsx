@@ -314,6 +314,7 @@ function AffordanceEditor({
           <Editable label="名称" value={affordance.label ?? ""} onCommit={(label) => updateAffordance(index, { label })} />
           <EditableNumber label="范围" value={affordance.range ?? 120} onCommit={(range) => updateAffordance(index, { range })} />
           <Editable label="成功文案" value={affordance.event_message ?? ""} onCommit={(event_message) => updateAffordance(index, { event_message })} />
+          <Editable label="随机文案" value={(affordance.event_messages ?? []).join(" / ")} onCommit={(value) => updateAffordance(index, { event_messages: parseMessages(value) })} />
           <JsonObjectEditor label="前置状态 JSON" value={affordance.required_item_state ?? {}} onCommit={(required_item_state) => updateAffordance(index, { required_item_state })} />
           <JsonObjectEditor label="状态变更 JSON" value={affordance.set_item_state ?? {}} onCommit={(set_item_state) => updateAffordance(index, { set_item_state })} />
           <button className="panel-action-button" onClick={() => removeAffordance(index)} type="button">
@@ -433,6 +434,14 @@ function parseTags(value: string) {
     .split(",")
     .map((tag) => tag.trim())
     .filter(Boolean);
+}
+
+function parseMessages(value: string) {
+  return value
+    .split("/")
+    .map((message) => message.trim())
+    .filter(Boolean)
+    .slice(0, 12);
 }
 
 function cleanAffordance(affordance: WorldItemAffordance): WorldItemAffordance {

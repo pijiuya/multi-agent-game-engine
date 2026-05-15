@@ -103,7 +103,7 @@ def test_rule_engine_stop_social_and_movable_item_actions():
     stopped = rules.apply(world, AgentAction(agent_id="agent_mira", type="stop"))
     assert stopped.ok
     assert mira.target is None
-    assert mira.status == "idle"
+    assert mira.status == "stopped"
 
     social = rules.apply(
         world,
@@ -115,6 +115,11 @@ def test_rule_engine_stop_social_and_movable_item_actions():
     )
     assert social.ok
     assert world.events[-1].type == "dialogue"
+    assert mira.status == "social"
+
+    waited = rules.apply(world, AgentAction(agent_id="agent_mira", type="wait"))
+    assert waited.ok
+    assert mira.status == "waiting"
 
     cooldown_social = rules.apply(
         world,
@@ -191,7 +196,7 @@ def test_item_affordance_conditions_and_state_changes_are_applied():
                     "range": 120,
                     "required_item_state": {"enabled": True},
                     "set_item_state": {"enabled": False},
-                    "event_message": "The switch clicks off.",
+                    "event_messages": ["The switch clicks once.", "The switch clicks twice."],
                     "status": "use",
                 }
             ],
@@ -209,7 +214,7 @@ def test_item_affordance_conditions_and_state_changes_are_applied():
 
     assert used.ok
     assert world.map.items[-1].state["enabled"] is False
-    assert world.events[-2].message == "The switch clicks off."
+    assert world.events[-2].message in {"The switch clicks once.", "The switch clicks twice."}
     assert not rejected.ok
 
 

@@ -216,6 +216,11 @@ def normalize_item_affordances(data: Any) -> list[dict[str, Any]]:
             value = raw.get(key)
             if isinstance(value, str) and value.strip():
                 affordance[key] = value.strip()
+        messages = raw.get("event_messages")
+        if isinstance(messages, list):
+            clean_messages = [str(message).strip() for message in messages if str(message).strip()]
+            if clean_messages:
+                affordance["event_messages"] = clean_messages[:12]
         if "range" in raw:
             try:
                 affordance["range"] = max(1.0, float(raw["range"]))
@@ -464,7 +469,7 @@ DEFAULT_ACTION_SPACE = [
     "drop_item",
     "move_item",
 ]
-DEFAULT_DIALOGUE_POLICY = {"enabled": True, "distance": 180.0, "cooldown_ticks": 20, "language": "auto"}
+DEFAULT_DIALOGUE_POLICY = {"enabled": True, "distance": 180.0, "cooldown_ticks": 10, "language": "auto"}
 DEFAULT_NARRATIVE_CONFIG = {
     "enabled": False,
     "premise": "",

@@ -14,6 +14,7 @@ import type {
   MapRegionFunction,
   Point,
   SelectionState,
+  WorldEvent,
   WorldItem,
   WorldSnapshot
 } from "../types";
@@ -75,6 +76,7 @@ type ImageLayerTransform = {
 
 const MIN_ZOOM = 0.125;
 const MAX_ZOOM = 8;
+const BUBBLE_TTL_SECONDS = 5;
 
 export function SceneViewport({
   world,
@@ -111,6 +113,7 @@ export function SceneViewport({
   const gridCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [isPanning, setIsPanning] = useState(false);
   const [itemImageAspects, setItemImageAspects] = useState<Record<string, number>>({});
+  const [bubbleNow, setBubbleNow] = useState(() => Date.now() / 1000);
   const gridStyle = getGridStyle(canvasView);
   const density = getGridDensity(canvasView.zoom);
   const worldLayerStyle = {
@@ -130,8 +133,30 @@ export function SceneViewport({
       })
     : [];
   const dialogueEvents = world.events
-    .filter((event) => (event.type === "speech" || event.type === "dialogue") && event.agent_id && world.agent_states[event.agent_id])
+    .filter((event) => (
+      (event.type === "speech" || event.type === "dialogue")
+      && event.agent_id
+      && world.agent_states[event.agent_id]
+      && eventIsFresh(event, bubbleNow)
+    ))
     .slice(-4);
+  const itemFeedbackEvents = world.events
+    .filter((event) => (
+      event.type === "interaction"
+      && eventIsFresh(event, bubbleNow)
+      && ["interact", "use"].includes(interactionActionType(event))
+    ))
+    .map((event) => ({
+      event,
+      item: visibleItems.find((item) => item.id === interactionItemId(event))
+    }))
+    .filter((entry): entry is { event: WorldEvent; item: WorldItem } => Boolean(entry.item))
+    .slice(-4);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setBubbleNow(Date.now() / 1000), 500);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     const canvas = gridCanvasRef.current;
@@ -728,6 +753,16 @@ export function SceneViewport({
               </div>
             );
           })}
+          {itemFeedbackEvents.map(({ event, item }) => (
+            <div
+              className="world-item-feedback-bubble"
+              data-testid={`world-item-feedback-${event.id}`}
+              key={event.id}
+              style={screenPointStyle(item.position, canvasView)}
+            >
+              {itemFeedbackText(event.message)}
+            </div>
+          ))}
           {selectedItem ? (
             <div
               className="item-transform-box"
@@ -824,6 +859,34 @@ function agentSpriteStyle(clip: AgentAnimationClip, zoom: number) {
 function dialogueText(message: string) {
   const [, text] = message.split(": ");
   return (text || message).slice(0, 90);
+}
+
+function itemFeedbackText(message: string) {
+  return String(message || "").slice(0, 90);
+}
+
+function eventIsFresh(event: WorldEvent, nowSeconds: number) {
+  return Number.isFinite(event.timestamp) && nowSeconds - event.timestamp <= BUBBLE_TTL_SECONDS;
+}
+
+function interactionActionType(event: WorldEvent) {
+  const action = event.payload?.action;
+  return isRecord(action) ? String(action.type || "") : "";
+}
+
+function interactionItemId(event: WorldEvent) {
+  const direct = event.payload?.item_id ?? event.payload?.target_id;
+  if (typeof direct === "string" && direct.trim()) {
+    return direct;
+  }
+  const action = event.payload?.action;
+  const payload = isRecord(action) && isRecord(action.payload) ? action.payload : null;
+  const nested = payload?.item_id ?? payload?.target_id;
+  return typeof nested === "string" ? nested : "";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function screenItemTransformStyle(item: WorldItem, view: CanvasViewState, aspect: number | null | undefined) {

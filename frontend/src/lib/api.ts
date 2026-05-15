@@ -772,6 +772,12 @@ function normalizeItemAffordances(value: WorldItem["affordances"] | unknown): Wo
       if (typeof item.event_message === "string" && item.event_message.trim()) {
         affordance.event_message = item.event_message.trim();
       }
+      if (Array.isArray(item.event_messages)) {
+        const messages = item.event_messages.map((message) => String(message).trim()).filter(Boolean);
+        if (messages.length) {
+          affordance.event_messages = messages.slice(0, 12);
+        }
+      }
       if (typeof item.status === "string" && item.status.trim()) {
         affordance.status = item.status.trim();
       }
@@ -878,7 +884,7 @@ function normalizeDialoguePolicy(value: unknown) {
   return {
     enabled: raw.enabled !== false,
     distance: Math.max(1, Number(raw.distance ?? 180)),
-    cooldown_ticks: Math.max(1, Math.round(Number(raw.cooldown_ticks ?? 20))),
+    cooldown_ticks: Math.max(1, Math.round(Number(raw.cooldown_ticks ?? 10))),
     language: typeof raw.language === "string" && raw.language.trim() ? raw.language : "auto"
   };
 }
@@ -1250,6 +1256,7 @@ function runtimeStatusFromApi(data: Record<string, unknown>): RuntimeStatus {
   const recentImageGenerationTasks = Array.isArray(simulation.recent_image_generation_tasks)
     ? simulation.recent_image_generation_tasks.map(runtimePendingTaskFromApi)
     : [];
+  const providerRecovery = providerRecoveryFromApi(simulation.provider_recovery ?? simulation.providerRecovery);
   return {
     timestamp: Number(data.timestamp ?? Date.now() / 1000),
     simulation: {
@@ -1259,7 +1266,8 @@ function runtimeStatusFromApi(data: Record<string, unknown>): RuntimeStatus {
       pendingModelTaskCount: Number(simulation.pending_model_task_count ?? simulation.pendingModelTaskCount ?? 0),
       pendingModelTasks,
       pendingImageGenerationTasks,
-      recentImageGenerationTasks
+      recentImageGenerationTasks,
+      providerRecovery
     },
     models: Array.isArray(data.models)
       ? data.models.map((item) => {
@@ -1310,6 +1318,7 @@ function runtimePendingTaskFromApi(item: unknown) {
     model: String(task.model ?? ""),
     startedTick: Number(task.started_tick ?? task.startedTick ?? 0),
     ageTicks: Number(task.age_ticks ?? task.ageTicks ?? 0),
+    watchdogAgeTicks: nullableNumber(task.watchdog_age_ticks ?? task.watchdogAgeTicks) ?? undefined,
     ageSeconds: nullableNumber(task.age_seconds ?? task.ageSeconds),
     elapsedMs: nullableNumber(task.elapsed_ms ?? task.elapsedMs),
     operation: String(task.operation ?? ""),
@@ -1331,8 +1340,10 @@ function runtimeStatusFromWorld(world: WorldSnapshot, models: ModelConfig[]): Ru
       provider: String(task.provider ?? ""),
       model: String(task.model ?? ""),
       startedTick: Number(task.started_tick ?? 0),
-      ageTicks: Number(task.age_ticks ?? 0)
+      ageTicks: Number(task.age_ticks ?? 0),
+      watchdogAgeTicks: Number(task.watchdog_age_ticks ?? 0)
     }));
+  const providerRecovery = providerRecoveryFromApi(world.recovery?.provider_recovery);
   const recentEvents = world.decision_events.slice(-80);
   return {
     timestamp: Date.now() / 1000,
@@ -1343,7 +1354,8 @@ function runtimeStatusFromWorld(world: WorldSnapshot, models: ModelConfig[]): Ru
       pendingModelTaskCount: modelTasks.length,
       pendingModelTasks: modelTasks,
       pendingImageGenerationTasks: [],
-      recentImageGenerationTasks: []
+      recentImageGenerationTasks: [],
+      providerRecovery
     },
     models: models.map((model) => {
       const matchingEvents = recentEvents.filter(
@@ -1368,6 +1380,24 @@ function runtimeStatusFromWorld(world: WorldSnapshot, models: ModelConfig[]): Ru
     }),
     hardware: browserHardwareStatus()
   };
+}
+
+function providerRecoveryFromApi(value: unknown): Record<string, { untilTick: number; remainingTicks: number }> {
+  const recovery = objectValue(value);
+  return Object.fromEntries(
+    Object.entries(recovery)
+      .map(([provider, raw]) => {
+        const entry = objectValue(raw);
+        return [
+          provider,
+          {
+            untilTick: Number(entry.until_tick ?? entry.untilTick ?? 0),
+            remainingTicks: Number(entry.remaining_ticks ?? entry.remainingTicks ?? 0)
+          }
+        ] as const;
+      })
+      .filter(([, entry]) => entry.remainingTicks > 0)
+  );
 }
 
 function browserHardwareStatus(): RuntimeStatus["hardware"] {

@@ -180,7 +180,7 @@ class RuleEngine:
 
         if action.type == "stop":
             state.target = None
-            state.status = "idle"
+            state.status = "stopped"
             event = world.add_event(
                 "action",
                 f"{profile.name} stops.",
@@ -230,7 +230,7 @@ class RuleEngine:
             text = str(action.payload.get("text", "")).strip()
             if not text:
                 text = f"{profile.name} starts a conversation with {target_profile.name}."
-            state.status = "speaking"
+            state.status = "social"
             cooldown = int(profile.dialogue_policy.get("cooldown_ticks", 20))
             state.cooldowns["social_until"] = world.tick + max(1, cooldown)
             target_state = world.agent_states.get(target_id)
@@ -269,7 +269,7 @@ class RuleEngine:
             return ActionResult(True, "observe applied", event.to_dict())
 
         if action.type == "wait":
-            state.status = "idle"
+            state.status = "waiting"
             event = world.add_event(
                 "action",
                 f"{profile.name} waits.",
@@ -287,9 +287,10 @@ class RuleEngine:
                 if affordance is not None:
                     item.state.update(dict(affordance.get("set_item_state") or {}))
                     state.status = str(affordance.get("status") or action.type)
-                message = str(affordance.get("event_message") or "") if affordance is not None else ""
+                message = self._affordance_event_message(world, affordance) if affordance is not None else ""
                 if not message:
                     message = f"{profile.name} {action.type}s {item.name}."
+                state.cooldowns["item_interaction_until"] = world.tick + 45
                 event = world.add_event(
                     "interaction",
                     message,
@@ -316,6 +317,7 @@ class RuleEngine:
             state.held_item_id = item.id
             item.position = Point(state.position.x, state.position.y)
             state.status = "interact"
+            state.cooldowns["item_interaction_until"] = world.tick + 45
             event = world.add_event(
                 "interaction",
                 f"{profile.name} picks up {item.name}.",
@@ -333,6 +335,7 @@ class RuleEngine:
             item.position = target
             state.held_item_id = None
             state.status = "idle"
+            state.cooldowns["item_interaction_until"] = world.tick + 45
             event = world.add_event(
                 "interaction",
                 f"{profile.name} drops {item.name}.",
@@ -352,6 +355,7 @@ class RuleEngine:
             if "scale" in action.payload:
                 item.scale = max(0.25, min(5.0, float(action.payload["scale"])))
             state.status = "interact"
+            state.cooldowns["item_interaction_until"] = world.tick + 45
             event = world.add_event(
                 "interaction",
                 f"{profile.name} moves {item.name}.",
@@ -500,6 +504,25 @@ class RuleEngine:
         world.relationships.append(relationship)
         return relationship
 
+    def drop_held_item_at_agent(self, world: GameWorld, agent_id: str, reason: str = "arrived") -> dict[str, Any] | None:
+        profile = world.agent_profiles.get(agent_id)
+        state = world.agent_states.get(agent_id)
+        if profile is None or state is None or not state.held_item_id:
+            return None
+        item = world.map.item_by_id(state.held_item_id)
+        if item is None or item.hidden or not item.movable:
+            return None
+        item.position = Point(state.position.x, state.position.y)
+        state.held_item_id = None
+        state.status = "idle"
+        event = world.add_event(
+            "interaction",
+            f"{profile.name} sets down {item.name}.",
+            agent_id=profile.id,
+            payload={"item_id": item.id, "position": item.position.to_dict(), "reason": reason},
+        )
+        return event.to_dict()
+
     def social_range_bonus(self, world: GameWorld, position: Point) -> float:
         if any(zone.contains(position) for zone in world.map.interaction_zones):
             return self.social_region_dialogue_bonus
@@ -619,3 +642,12 @@ class RuleEngine:
                 if item.state.get(str(key)) != value:
                     return False
         return True
+
+    def _affordance_event_message(self, world: GameWorld, affordance: dict[str, Any]) -> str:
+        messages = affordance.get("event_messages")
+        if isinstance(messages, list):
+            clean_messages = [str(message).strip() for message in messages if str(message).strip()]
+            if clean_messages:
+                index = (world.tick + len(world.events)) % len(clean_messages)
+                return clean_messages[index]
+        return str(affordance.get("event_message") or "").strip()

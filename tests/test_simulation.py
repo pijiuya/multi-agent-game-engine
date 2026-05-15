@@ -20,6 +20,14 @@ class SlowProvider(ModelProvider):
         return ModelResponse(text="slow thought", actions=[{"type": "wait", "payload": {}}])
 
 
+class HangingProvider(ModelProvider):
+    name = "hanging"
+
+    async def generate(self, request: ModelRequest) -> ModelResponse:
+        await asyncio.sleep(999)
+        return ModelResponse(text="late thought", actions=[{"type": "wait", "payload": {}}])
+
+
 class SlowSceneDirector:
     name = "slow-scene-director"
 
@@ -57,6 +65,7 @@ async def test_slow_model_does_not_block_tick():
     world = GameWorld.default()
     world.agent_profiles["agent_mira"].model_provider = "slow"
     runtime = SimulationRuntime(world, providers={"mock": SlowProvider(), "slow": SlowProvider()})
+    runtime.action_prefilter_enabled = False
     runtime.start()
 
     started = perf_counter()
@@ -94,6 +103,7 @@ async def test_non_mock_provider_schedules_two_requests_by_default():
     for profile in world.agent_profiles.values():
         profile.model_provider = "slow"
     runtime = SimulationRuntime(world, providers={"mock": SlowProvider(), "slow": SlowProvider()})
+    runtime.action_prefilter_enabled = False
     runtime.start()
 
     await runtime.tick(0.1)
@@ -132,6 +142,30 @@ async def test_slow_model_timeout_clears_pending_state_and_records_error():
     )
 
 
+async def test_model_watchdog_recovers_stalled_task_and_uses_local_recovery():
+    world = GameWorld.default()
+    for agent_id, profile in world.agent_profiles.items():
+        profile.model_provider = "hanging"
+        profile.hidden = agent_id != "agent_mira"
+    runtime = SimulationRuntime(world, providers={"mock": SlowProvider(), "hanging": HangingProvider()})
+    runtime.action_prefilter_enabled = False
+    runtime.model_watchdog_ticks = 1
+    runtime.provider_recovery_ticks = 5
+    runtime.agent_decision_interval_ticks = 1
+    runtime.start()
+
+    await runtime.tick(0.1)
+    assert world.agent_states["agent_mira"].pending_model
+
+    await runtime.tick(0.1)
+
+    assert not world.agent_states["agent_mira"].pending_model
+    assert not runtime.snapshot()["model_tasks"]
+    assert runtime.snapshot()["recovery"]["provider_recovery"]["hanging"]["remaining_ticks"] > 0
+    assert any(event.type == "model_recovery" and event.agent_id == "agent_mira" for event in world.events)
+    assert any(decision.provider == "recovery-prefilter" for decision in world.decision_events)
+
+
 async def test_slow_scene_director_does_not_block_tick_or_touch_agent_model_state():
     world = GameWorld.default()
     for profile in world.agent_profiles.values():
@@ -161,6 +195,26 @@ async def test_slow_scene_director_does_not_block_tick_or_touch_agent_model_stat
     assert world.memories[0].text == "The room noticed a pause."
     assert any(event.message == "Lean into quiet tension." for event in world.events)
     assert world.narrative["recent_summary"] == "scene direction ready"
+
+
+async def test_scene_director_watchdog_recovers_stalled_task():
+    world = GameWorld.default()
+    for profile in world.agent_profiles.values():
+        profile.hidden = True
+    world.narrative["enabled"] = True
+    world.narrative["cadence_ticks"] = 1
+    runtime = SimulationRuntime(world, scene_director=SlowSceneDirector(), director_interval_ticks=1)
+    runtime.scene_director_watchdog_ticks = 1
+    runtime.start()
+
+    await runtime.tick(0.1)
+    assert runtime.snapshot()["scene_director"]["pending"] is True
+
+    await runtime.tick(0.1)
+
+    snapshot = runtime.snapshot()
+    assert snapshot["scene_director"]["pending"] is False
+    assert any(event.type == "scene_director_recovery" for event in world.events)
 
 
 def test_observation_includes_llm_action_context():
@@ -196,7 +250,11 @@ def test_observation_includes_llm_action_context():
     assert observation["nearby_items"][0]["id"] == "item_lamp"
     assert observation["nearby_items"][0]["movable"] is True
     assert observation["nearby_items"][0]["interactable"] is True
+    assert observation["nearby_items"][0]["within_interaction_range"] is True
+    assert observation["nearby_items"][0]["configured_affordances"][0]["action"] == "use"
     assert observation["nearby_items"][0]["available_affordances"][0]["action"] == "use"
+    assert observation["item_context"]["nearby_named_items"][0]["name"] == "Lamp"
+    assert observation["item_context"]["instruction"]
     assert observation["movement_targets"]
     assert all("point" in target for target in observation["movement_targets"])
     assert observation["narrative_state"] == {"focus": "lamp"}
@@ -342,6 +400,188 @@ def test_model_interact_and_use_prefer_available_affordance_items():
     assert interact_action == {"type": "interact", "payload": {"target_id": "item_plain"}}
 
 
+def test_prefilter_uses_item_affordance_without_model_call():
+    runtime = SimulationRuntime(GameWorld.default())
+    observation = {
+        "nearby_items": [
+            {
+                "id": "item_switch",
+                "interactable": True,
+                "available_affordances": [{"action": "use", "label": "Switch"}],
+            }
+        ],
+        "agent_recent_events": [],
+    }
+
+    action = runtime._prefilter_action("agent_mira", ["use", "wait"], observation, provider_name="slow")
+
+    assert action == {"type": "use", "payload": {"target_id": "item_switch"}}
+
+
+def test_prefilter_keeps_social_and_movement_above_item_opportunities():
+    runtime = SimulationRuntime(GameWorld.default())
+    observation = {
+        "dialogue_candidates": [{"id": "agent_tao", "name": "Tao"}],
+        "movement_intent": True,
+        "movement_targets": [{"label": "road", "point": {"x": 360, "y": 220}}],
+        "nearby_items": [
+            {
+                "id": "item_switch",
+                "interactable": True,
+                "available_affordances": [{"action": "use", "label": "Switch"}],
+            }
+        ],
+        "agent_recent_events": [],
+    }
+
+    movement_first_action = runtime._prefilter_action("agent_mira", ["social", "use", "move_to", "wait"], observation, provider_name="slow")
+    movement_observation = {**observation, "dialogue_candidates": []}
+    movement_action = runtime._prefilter_action("agent_mira", ["use", "move_to", "wait"], movement_observation, provider_name="slow")
+    social_observation = {**observation, "movement_intent": False, "movement_targets": []}
+    social_action = runtime._prefilter_action("agent_mira", ["social", "use", "move_to", "wait"], social_observation, provider_name="slow")
+
+    assert movement_first_action == {"type": "move_to", "payload": {"target": {"x": 360, "y": 220}}}
+    assert movement_action == {"type": "move_to", "payload": {"target": {"x": 360, "y": 220}}}
+    assert social_action["type"] == "social"
+    assert social_action["payload"]["target_agent_id"] == "agent_tao"
+
+
+def test_prefilter_interacts_with_plain_interactable_item_without_model_call():
+    runtime = SimulationRuntime(GameWorld.default())
+    observation = {
+        "nearby_items": [
+            {"id": "item_marker", "interactable": True, "available_affordances": []}
+        ],
+        "agent_recent_events": [],
+    }
+
+    action = runtime._prefilter_action("agent_mira", ["interact", "wait"], observation, provider_name="slow")
+
+    assert action == {"type": "interact", "payload": {"target_id": "item_marker"}}
+
+
+def test_item_interaction_sets_prefilter_cooldown():
+    world = GameWorld.default()
+    world.map.items.append(
+        WorldItem(
+            id="item_button",
+            name="Button",
+            position=Point(242, 220),
+            movable=False,
+            affordances=[{"action": "use", "label": "Press", "event_message": "按钮亮了一下。"}],
+        )
+    )
+    runtime = SimulationRuntime(world)
+
+    result = runtime.submit_action(AgentAction(agent_id="agent_mira", type="use", payload={"target_id": "item_button"}))
+    observation = {
+        "nearby_items": [
+            {
+                "id": "item_button",
+                "interactable": True,
+                "available_affordances": [{"action": "use", "label": "Press"}],
+            }
+        ],
+        "agent_recent_events": [],
+    }
+    action = runtime._prefilter_action("agent_mira", ["use", "wait"], observation, provider_name="slow")
+
+    assert result["ok"] is True
+    assert world.agent_states["agent_mira"].cooldowns["item_interaction_until"] == world.tick + 45
+    assert action == {"type": "wait", "payload": {"duration": 1}}
+
+
+def test_prefilter_item_opportunity_applies_to_mock_provider():
+    runtime = SimulationRuntime(GameWorld.default())
+    observation = {
+        "nearby_items": [
+            {
+                "id": "item_button",
+                "interactable": True,
+                "available_affordances": [{"action": "use", "label": "Button"}],
+            }
+        ],
+        "agent_recent_events": [],
+    }
+
+    action = runtime._prefilter_action("agent_mira", ["use", "wait"], observation, provider_name="mock")
+
+    assert action == {"type": "use", "payload": {"target_id": "item_button"}}
+
+
+def test_prefilter_skips_unreachable_or_unavailable_item_interactions():
+    runtime = SimulationRuntime(GameWorld.default())
+    observation = {
+        "nearby_items": [
+            {
+                "id": "item_far",
+                "interactable": True,
+                "distance": 150,
+                "available_affordances": [],
+                "configured_affordances": [],
+            },
+            {
+                "id": "item_locked",
+                "interactable": True,
+                "distance": 80,
+                "available_affordances": [],
+                "configured_affordances": [{"action": "interact", "label": "Locked"}],
+            },
+        ],
+        "agent_recent_events": [],
+    }
+
+    action = runtime._prefilter_action("agent_mira", ["interact", "wait"], observation, provider_name="mock")
+
+    assert action is None
+
+
+def test_prefilter_moves_toward_visible_item_before_interaction_range():
+    runtime = SimulationRuntime(GameWorld.default())
+    observation = {
+        "movement_intent": True,
+        "nearby_items": [
+            {
+                "id": "item_console",
+                "name": "Console",
+                "interactable": True,
+                "movable": False,
+                "distance": 150,
+                "approach_point": {"x": 260, "y": 220},
+                "available_affordances": [],
+                "configured_affordances": [{"action": "interact", "label": "Read"}],
+            }
+        ],
+        "agent_recent_events": [],
+    }
+
+    action = runtime._prefilter_action("agent_mira", ["move_to", "interact", "wait"], observation, provider_name="mock")
+
+    assert action == {"type": "move_to", "payload": {"target": {"x": 260.0, "y": 220.0}}}
+
+
+def test_prefilter_picks_up_movable_item_then_arrival_drops_it():
+    world = GameWorld.default()
+    world.map.items.append(WorldItem(id="item_box", name="Box", position=Point(242, 220), movable=True))
+    runtime = SimulationRuntime(world)
+    observation = runtime._observation_for("agent_mira")
+    observation["movement_intent"] = True
+    observation["movement_targets"] = []
+
+    pickup_action = runtime._prefilter_action("agent_mira", ["pick_up", "move_to", "drop_item"], observation, provider_name="slow")
+    pickup = runtime.submit_action(AgentAction(agent_id="agent_mira", type=pickup_action["type"], payload=pickup_action["payload"]))
+    next_observation = runtime._observation_for("agent_mira")
+    move_action = runtime._prefilter_action("agent_mira", ["pick_up", "move_to", "drop_item"], next_observation, provider_name="slow")
+    runtime.submit_action(AgentAction(agent_id="agent_mira", type=move_action["type"], payload=move_action["payload"]))
+    runtime._move_agents(10.0)
+
+    assert pickup["ok"] is True
+    assert pickup_action == {"type": "pick_up", "payload": {"item_id": "item_box"}}
+    assert move_action["type"] == "move_to"
+    assert world.agent_states["agent_mira"].held_item_id is None
+    assert world.map.item_by_id("item_box").position == world.agent_states["agent_mira"].position
+
+
 def test_social_action_updates_relationship():
     world = GameWorld.default()
     runtime = SimulationRuntime(world)
@@ -396,7 +636,7 @@ def test_low_value_non_mock_decision_uses_rule_prefilter_without_model_call():
     assert world.decision_events[-1].results[0]["elapsed_ms"] == 0
 
 
-async def test_prefilter_defers_social_context_to_model():
+async def test_prefilter_handles_social_context_without_blocking_on_model():
     world = GameWorld.default()
     world.agent_profiles["agent_mira"].model_provider = "slow"
     world.agent_profiles["agent_tao"].hidden = False
@@ -408,9 +648,8 @@ async def test_prefilter_defers_social_context_to_model():
 
     runtime._schedule_agent_decisions()
 
-    assert world.agent_states["agent_mira"].pending_model
-    await asyncio.sleep(SLOW_CALL_SECONDS + 0.05)
-    await runtime.tick(0.1)
+    assert not world.agent_states["agent_mira"].pending_model
+    assert world.events[-1].type in {"action", "dialogue"}
 
 
 def test_bad_model_utterances_are_not_shown_as_bubbles():
@@ -477,3 +716,105 @@ def test_good_model_utterance_survives_quality_filter():
         "type": "say",
         "payload": {"text": "I'm checking which piece would carry weight before I touch anything."},
     }
+
+
+def test_model_dict_utterance_is_unwrapped():
+    runtime = SimulationRuntime(GameWorld.default())
+    request = ModelRequest(
+        agent_id="agent_ren",
+        role="observer",
+        identity="Ren notices patterns before speaking.",
+        action_space=["say", "observe", "wait"],
+        observation={"agent_name": "Ren", "recent_utterances": []},
+    )
+
+    action = runtime._coerce_model_action(
+        {"type": "say", "payload": {"text": {"utterance": "That archive changed where Mira is standing."}}},
+        "",
+        request,
+    )
+
+    assert action == {"type": "say", "payload": {"text": "That archive changed where Mira is standing."}}
+
+
+def test_say_and_social_can_be_grounded_in_preferred_named_item_at_low_frequency():
+    runtime = SimulationRuntime(GameWorld.default())
+    for index in range(9):
+        runtime.world.add_event("speech", f"普通对话 {index}", agent_id="agent_mira")
+    request = ModelRequest(
+        agent_id="agent_ren",
+        role="observer",
+        identity="Ren notices patterns before speaking.",
+        action_space=["say", "social", "observe", "wait"],
+        language="zh-CN",
+        observation={
+            "agent_name": "Ren",
+            "recent_utterances": [],
+            "dialogue_candidates": [{"id": "agent_tao", "name": "Tao"}],
+            "item_context": {
+                "nearby_named_items": [
+                    {"id": "item_generic", "name": "Item"},
+                    {"id": "item_archive", "name": "绝密档案3"},
+                ]
+            },
+        },
+    )
+
+    say_action = runtime._coerce_model_action({"type": "say", "payload": {"text": "这里刚才有点变化。"}}, "", request)
+    social_action = runtime._coerce_model_action(
+        {"type": "social", "payload": {"target_agent_id": "agent_tao", "text": "你也看到刚才的变化了吗？"}},
+        "",
+        request,
+    )
+
+    assert "绝密档案3" in say_action["payload"]["text"]
+    assert "绝密档案3" in social_action["payload"]["text"]
+
+
+def test_say_and_social_do_not_force_item_name_on_every_utterance():
+    runtime = SimulationRuntime(GameWorld.default())
+    request = ModelRequest(
+        agent_id="agent_ren",
+        role="observer",
+        identity="Ren notices patterns before speaking.",
+        action_space=["say", "social", "observe", "wait"],
+        language="zh-CN",
+        observation={
+            "agent_name": "Ren",
+            "recent_utterances": [],
+            "dialogue_candidates": [{"id": "agent_tao", "name": "Tao"}],
+            "item_context": {
+                "nearby_named_items": [
+                    {"id": "item_generic", "name": "Item"},
+                    {"id": "item_archive", "name": "绝密档案3"},
+                ]
+            },
+        },
+    )
+
+    say_action = runtime._coerce_model_action({"type": "say", "payload": {"text": "这里刚才有点变化。"}}, "", request)
+    social_action = runtime._coerce_model_action(
+        {"type": "social", "payload": {"target_agent_id": "agent_tao", "text": "你也看到刚才的变化了吗？"}},
+        "",
+        request,
+    )
+
+    assert "绝密档案3" not in say_action["payload"]["text"]
+    assert "绝密档案3" not in social_action["payload"]["text"]
+
+
+def test_runtime_defaults_favor_more_frequent_dialogue():
+    runtime = SimulationRuntime(GameWorld.default())
+
+    assert runtime.agent_decision_interval_ticks == 30
+    assert runtime.world.agent_profiles["agent_mira"].dialogue_policy["cooldown_ticks"] == 10
+
+
+def test_scene_director_text_is_grounded_in_specific_item_names():
+    world = GameWorld.default()
+    world.map.items.append(WorldItem(id="item_archive", name="绝密档案3", position=Point(242, 220)))
+    runtime = SimulationRuntime(world)
+
+    text = runtime._item_grounded_scene_text("The scene director prepares the next beat.")
+
+    assert "绝密档案3" in text

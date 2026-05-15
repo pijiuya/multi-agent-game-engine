@@ -40,7 +40,15 @@ export function addItemToMap(map: WorldMap, point: Point): WorldMap {
         hidden: false,
         movable: true,
         interactable: true,
-        affordances: []
+        affordances: [
+          {
+            action: "interact",
+            label: "查看",
+            range: 120,
+            enabled: true,
+            event_messages: ["这个元素引起了 Agent 的注意。", "Agent 停下来观察这个元素。"]
+          }
+        ]
       }
     ]
   };
@@ -88,7 +96,7 @@ export function addAgentLocal(world: WorldSnapshot, name: string, role: string, 
     action_space: ["move_to", "say", "interact", "use", "observe", "wait", "stop", "social", "pick_up", "drop_item", "move_item"],
     hidden: false,
     animation: null,
-    dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 20, language: "auto" }
+    dialogue_policy: { enabled: true, distance: 180, cooldown_ticks: 10, language: "auto" }
   };
   const state: AgentState = {
     id,

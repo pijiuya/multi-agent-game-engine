@@ -112,6 +112,7 @@ Mac 上后端会优先尝试 Homebrew；Windows 上仍保留 `winget` 分支。
 - `Failed to connect to 127.0.0.1:11434`：运行 `ollama serve`。
 - 模型面板显示可安装但不可启用：先运行 `ollama pull qwen2.5:1.5b`。
 - 场景运行很慢：把 `AGENT_ENGINE_LLM_CONCURRENCY=1`，或先使用 `qwen2.5:1.5b`。
+- 场景像停住但后台仍有压力：运行时会自动释放超过 `AGENT_ENGINE_MODEL_WATCHDOG_SECONDS` 的 agent 决策任务，并让该模型 provider 进入 `AGENT_ENGINE_PROVIDER_RECOVERY_SECONDS` 的恢复窗口；这段时间 agent 会暂用本地轻量规则继续行动。运行监控面板会显示“模型拥堵自愈中”。
 - 对话上下文越来越大：确认 `/api/world` 中 `scene_context.context_budget.trimmed` 或 `context_budget.trimmed` 是否出现，并检查 `narrative.recent_summary` 是否持续更新。
 
 ## 推荐环境变量
@@ -120,6 +121,9 @@ Mac 上后端会优先尝试 Homebrew；Windows 上仍保留 `winget` 分支。
 export AGENT_ENGINE_LLM_CONCURRENCY=1
 export AGENT_ENGINE_AGENT_DECISION_SECONDS=6
 export AGENT_ENGINE_LLM_TIMEOUT_SECONDS=45
+export AGENT_ENGINE_MODEL_WATCHDOG_SECONDS=18
+export AGENT_ENGINE_SCENE_WATCHDOG_SECONDS=20
+export AGENT_ENGINE_PROVIDER_RECOVERY_SECONDS=30
 export AGENT_ENGINE_CONTEXT_BUDGET_CHARS=6000
 export AGENT_ENGINE_ACTION_PREFILTER=1
 ```

@@ -359,14 +359,16 @@ function AgentDetail({
         </label>
         <input
           aria-label="对话距离"
+          key={`${agent.id}-dialogue-distance-${agent.dialogue_policy.distance}`}
           defaultValue={agent.dialogue_policy.distance}
           onBlur={(event) => onUpdatePolicy({ distance: Number(event.currentTarget.value) || 180 })}
           type="number"
         />
         <input
           aria-label="对话冷却"
+          key={`${agent.id}-dialogue-cooldown-${agent.dialogue_policy.cooldown_ticks}`}
           defaultValue={agent.dialogue_policy.cooldown_ticks}
-          onBlur={(event) => onUpdatePolicy({ cooldown_ticks: Number(event.currentTarget.value) || 20 })}
+          onBlur={(event) => onUpdatePolicy({ cooldown_ticks: Number(event.currentTarget.value) || 10 })}
           type="number"
         />
       </div>

@@ -42,6 +42,31 @@ async def test_mock_provider_uses_zh_cn_language():
     assert "我" in response.actions[0]["payload"]["text"]
 
 
+async def test_mock_provider_mentions_preferred_item_name():
+    provider = MockProvider()
+    response = await provider.generate(
+        ModelRequest(
+            agent_id="agent_mira",
+            role="mediator",
+            identity="test identity",
+            observation={
+                "tick": 24,
+                "agent_name": "Mira",
+                "item_context": {
+                    "nearby_named_items": [
+                        {"id": "item_generic", "name": "Item"},
+                        {"id": "item_archive", "name": "绝密档案3"},
+                    ]
+                },
+            },
+            action_space=["say", "wait"],
+            language="zh-CN",
+        )
+    )
+
+    assert "绝密档案3" in response.actions[0]["payload"]["text"]
+
+
 async def test_mock_provider_uses_movement_targets():
     provider = MockProvider()
     response = await provider.generate(
