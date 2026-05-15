@@ -147,6 +147,16 @@ export function ModelManagerPanel({
     setRemoteStatus((current) => ({ ...current, [capability]: { loading: true, message: "正在测试 API 响应", ok: null } }));
     try {
       const result = await onTestRemote(capability, draft);
+      if (result.ok && capability === "image_generation" && result.message.includes("已保存")) {
+        setRemoteDrafts((current) => ({
+          ...current,
+          [capability]: {
+            ...current[capability],
+            apiKey: "",
+            apiKeySet: true
+          }
+        }));
+      }
       setRemoteStatus((current) => ({
         ...current,
         [capability]: {

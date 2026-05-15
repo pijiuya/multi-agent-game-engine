@@ -1092,6 +1092,24 @@ export default function App() {
     draft: { baseUrl: string; apiKey: string; model: string }
   ): Promise<RemoteModelTestResult> {
     const result = await testRemoteCapability(capability, draft);
+    if (result.ok && capability === "image_generation") {
+      const configured = await configureRemoteCapability(capability, draft);
+      if (configured) {
+        setModels(configured.models);
+        setModelCapabilityStatuses((current) => mergeCapabilityStatus(current, configured.capability));
+        setStatus("图片生成 API 测试成功，已保存为当前模型");
+        return {
+          ...result,
+          message: "API 测试成功，已保存为当前图片生成模型"
+        };
+      }
+      setStatus("图片生成 API 测试成功，但保存失败");
+      return {
+        ...result,
+        ok: false,
+        message: "API 测试成功，但保存到本机设置失败"
+      };
+    }
     setStatus(result.ok ? "远程 API 测试成功" : "远程 API 测试失败");
     return result;
   }
@@ -1289,7 +1307,14 @@ export default function App() {
   function openImageGeneration(mode: ImageGenerationMode = imageGenerationMode) {
     setImageGenerationMode(mode);
     setEditTool("imageGenerate");
+    if (mode === "extension" && imageSelectionMode === "polygon") {
+      setImageSelectionMode("rect");
+    }
+    if (mode === "extension" && !world?.map.background_image) {
+      setImageReferenceBackground(false);
+    }
     setImageGenerationError(null);
+    setImageDraftPoints([]);
     setPanels((current) => {
       const nextZ = maxPanelZ(current) + 1;
       setZCursor(nextZ);
@@ -1513,17 +1538,20 @@ export default function App() {
               onOpenModels={openModelsPanel}
               onMode={(mode) => {
                 setImageGenerationMode(mode);
+                setEditTool("imageGenerate");
                 setImageGenerationError(null);
+                setImageDraftPoints([]);
                 if (mode === "extension" && imageSelectionMode === "polygon") {
                   setImageSelectionMode("rect");
-                  setImageDraftPoints([]);
                 }
                 if (mode === "extension") {
                   setImageReferenceBackground(Boolean(world.map.background_image));
                 }
               }}
               onSelectionMode={(mode) => {
+                setEditTool("imageGenerate");
                 setImageSelectionMode(mode);
+                setImageGenerationError(null);
                 setImageDraftPoints([]);
               }}
               onAspectPreset={setImageAspectPreset}

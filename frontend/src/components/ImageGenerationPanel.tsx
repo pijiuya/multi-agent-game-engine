@@ -101,19 +101,19 @@ export function ImageGenerationPanel({
 
       <div className="ratio-row" data-testid="image-selection-mode">
         {availableSelectionModes.includes("rect") ? (
-          <button className={selectionMode === "rect" ? "active" : ""} onClick={() => onSelectionMode("rect")} type="button">
+          <button className={selectionMode === "rect" ? "active" : ""} data-testid="image-selection-rect" onClick={() => onSelectionMode("rect")} type="button">
             <Crop size={14} />
             拖拽矩形
           </button>
         ) : null}
         {availableSelectionModes.includes("ratioRect") ? (
-          <button className={selectionMode === "ratioRect" ? "active" : ""} onClick={() => onSelectionMode("ratioRect")} type="button">
+          <button className={selectionMode === "ratioRect" ? "active" : ""} data-testid="image-selection-ratioRect" onClick={() => onSelectionMode("ratioRect")} type="button">
             <Crop size={14} />
             等比矩形
           </button>
         ) : null}
         {availableSelectionModes.includes("polygon") ? (
-          <button className={selectionMode === "polygon" ? "active" : ""} onClick={() => onSelectionMode("polygon")} type="button">
+          <button className={selectionMode === "polygon" ? "active" : ""} data-testid="image-selection-polygon" onClick={() => onSelectionMode("polygon")} type="button">
             <Sparkles size={14} />
             手绘区域
           </button>
@@ -161,20 +161,22 @@ export function ImageGenerationPanel({
 
       {error ? <div className="segmentation-status error">{error}</div> : null}
 
-      <div className="tool-strip">
-        <button className="panel-action-button" data-testid="image-generate-submit" disabled={!canGenerate} onClick={onGenerate} type="button">
+      <div className="image-action-area">
+        <button className="panel-action-button image-primary-action" data-testid="image-generate-submit" disabled={!canGenerate} onClick={onGenerate} type="button">
           <Check size={15} />
           {busy ? "生成中" : actionLabel(mode)}
         </button>
-        <button disabled={!draftPoints.length || busy} onClick={onClearSelection} type="button">
-          <X size={15} />
-          清空选区
-        </button>
-        {selectionMode === "polygon" ? (
-          <button disabled={!draftPoints.length || busy} onClick={onUndoPoint} type="button">
-            撤销一点
+        <div className="image-secondary-actions">
+          <button data-testid="image-clear-selection" disabled={!draftPoints.length || busy} onClick={onClearSelection} type="button">
+            <X size={14} />
+            清空选区
           </button>
-        ) : null}
+          {selectionMode === "polygon" ? (
+            <button data-testid="image-undo-point" disabled={!draftPoints.length || busy} onClick={onUndoPoint} type="button">
+              撤销一点
+            </button>
+          ) : null}
+        </div>
       </div>
       <div className="segmentation-status">{workflowHint(selectionMode, mode, draftPoints.length)}</div>
     </div>
@@ -183,7 +185,7 @@ export function ImageGenerationPanel({
 
 function ModeButton({ active, description, icon, label, onClick }: { active: boolean; description: string; icon: ReactNode; label: string; onClick: () => void }) {
   return (
-    <button className={active ? "active" : ""} onClick={onClick} type="button">
+    <button className={active ? "active" : ""} data-testid={`image-mode-${label}`} onClick={onClick} type="button">
       {icon}
       <span>
         <strong>{label}</strong>

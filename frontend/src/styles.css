@@ -2571,6 +2571,40 @@ textarea:focus {
   color: var(--soft-muted);
 }
 
+.image-action-area {
+  display: grid;
+  gap: 6px;
+}
+
+.image-primary-action {
+  min-height: 36px;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.image-secondary-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.image-secondary-actions button {
+  display: inline-flex;
+  min-width: 0;
+  min-height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 5px 7px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.image-secondary-actions button:only-child {
+  grid-column: 1 / -1;
+}
+
 .image-config-empty {
   display: grid;
   gap: 8px;
