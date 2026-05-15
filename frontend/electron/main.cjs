@@ -13,6 +13,7 @@ const backendExecutableName = process.platform === "win32"
   ? "agent-engine-backend.exe"
   : "agent-engine-backend";
 let backendProcess = null;
+let backendEnsureInFlight = null;
 
 app.setName("Multi-Agent Engine");
 
@@ -34,7 +35,7 @@ function backendUrl(pathname) {
   return `http://${backendHost}:${backendPort}${pathname}`;
 }
 
-function createWindow(startupError = "") {
+function createWindow() {
   const { workArea } = screen.getPrimaryDisplay();
   const width = Math.max(1100, Math.floor(workArea.width * 0.88));
   const height = Math.max(720, Math.floor(workArea.height * 0.86));
@@ -67,39 +68,59 @@ function createWindow(startupError = "") {
   });
   win.webContents.on("did-fail-load", (_event, code, description, validatedURL) => {
     log("renderer did-fail-load", `${code} ${description} ${validatedURL}`);
-    showStartupError(win, `界面加载失败：${description || code}`);
+    if (code === -3 || win.__enginePage === "startup" || String(validatedURL).includes("/startup/index.html")) {
+      return;
+    }
+    showStartupPage(win, {
+      title: "界面正在重新加载",
+      message: "工作台界面刚才没有成功显示，程序会自动重试。",
+      detail: description || String(code),
+      variant: "warning"
+    });
+    scheduleRendererRetry(win);
   });
   win.webContents.on("render-process-gone", (_event, details) => {
     log("renderer process gone", JSON.stringify(details));
-    showStartupError(win, "渲染进程已退出，请重启主程序。");
+    showStartupPage(win, {
+      title: "界面正在恢复",
+      message: "工作台界面进程已退出，程序正在重新加载主界面。",
+      detail: details.reason || "renderer exited",
+      variant: "warning"
+    });
+    scheduleRendererRetry(win, 1600);
   });
   win.on("unresponsive", () => log("window unresponsive"));
 
-  if (startupError) {
-    log("showing startup error", startupError);
-    showStartupError(win, startupError);
-  } else if (isDev) {
-    log("loading dev renderer", process.env.ELECTRON_START_URL);
-    win.loadURL(process.env.ELECTRON_START_URL).catch((error) => {
-      log("loadURL failed", error.message);
-      showStartupError(win, `开发界面加载失败：${error.message}`);
-    });
-  } else {
-    log("loading renderer file", path.join(__dirname, "..", "dist", "index.html"));
-    win.loadFile(path.join(__dirname, "..", "dist", "index.html")).catch((error) => {
-      log("loadFile failed", error.message);
-      showStartupError(win, `界面文件加载失败：${error.message}`);
-    });
-  }
+  showStartupPage(win, {
+    title: "正在启动工作台",
+    message: "正在连接本机引擎，准备好后会自动进入主界面。",
+    detail: backendUrl("/healthz")
+  });
 
   return win;
 }
 
-function showStartupError(win, message) {
+function startupPagePath() {
+  const dir = path.join(app.getPath("userData"), "startup");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, "index.html");
+}
+
+function showStartupPage(win, options = {}) {
+  if (!win || win.isDestroyed()) {
+    return;
+  }
+  const title = options.title || "正在启动工作台";
+  const message = options.message || "正在连接本机引擎，准备好后会自动进入主界面。";
+  const detail = options.detail || backendUrl("/healthz");
+  const variant = options.variant || "info";
+  const escapedTitle = escapeHtml(title);
   const escapedMessage = escapeHtml(message);
+  const escapedDetail = escapeHtml(detail);
   const escapedBackend = escapeHtml(backendUrl("/healthz"));
-  win.loadURL(
-    `data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html>
+  const escapedLogPath = escapeHtml(path.join(app.getPath("userData"), "logs", "electron-main.log"));
+  const accent = variant === "warning" ? "#f0b429" : "#74c0fc";
+  const html = `<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
@@ -110,7 +131,7 @@ function showStartupError(win, message) {
       min-height: 100vh;
       display: grid;
       place-items: center;
-      background: #101820;
+      background: linear-gradient(145deg, #111820, #17212b);
       color: #f5f7fb;
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
@@ -118,29 +139,181 @@ function showStartupError(win, message) {
       width: min(680px, calc(100vw - 48px));
       border: 1px solid rgba(255,255,255,0.14);
       border-radius: 8px;
-      padding: 28px;
+      padding: 30px;
       background: rgba(255,255,255,0.06);
       box-shadow: 0 24px 80px rgba(0,0,0,0.35);
     }
-    h1 { margin: 0 0 12px; font-size: 22px; }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+      color: ${accent};
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .spinner {
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(255,255,255,0.18);
+      border-top-color: ${accent};
+      border-radius: 50%;
+      animation: spin 900ms linear infinite;
+    }
+    h1 { margin: 0 0 12px; font-size: 22px; letter-spacing: 0; }
     p { margin: 8px 0; color: #d7dde8; line-height: 1.6; }
-    code { color: #8be9fd; }
+    .detail {
+      margin-top: 18px;
+      padding-top: 16px;
+      border-top: 1px solid rgba(255,255,255,0.12);
+      font-size: 13px;
+      color: #aeb8c8;
+    }
+    code {
+      color: #9bd7ff;
+      word-break: break-all;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
   </style>
 </head>
 <body>
   <main>
-    <h1>主程序暂时无法显示</h1>
+    <div class="status"><span class="spinner"></span><span>Electron</span></div>
+    <h1>${escapedTitle}</h1>
     <p>${escapedMessage}</p>
-    <p>后端检查地址：<code>${escapedBackend}</code></p>
-    <p>日志已写入应用数据目录的 <code>logs/electron-main.log</code>。</p>
+    <p class="detail">当前状态：<code>${escapedDetail}</code></p>
+    <p class="detail">本机引擎：<code>${escapedBackend}</code><br>日志：<code>${escapedLogPath}</code></p>
   </main>
 </body>
-</html>`)}`,
-  ).finally(() => {
+</html>`;
+  const filePath = startupPagePath();
+  try {
+    fs.writeFileSync(filePath, html, "utf8");
+  } catch (error) {
+    log("write startup page failed", error instanceof Error ? error.message : String(error));
+  }
+  win.__enginePage = "startup";
+  win.loadFile(filePath).catch((error) => {
+    log("startup page loadFile failed", error.message);
+  }).finally(() => {
     if (!win.isVisible()) {
       win.show();
     }
   });
+}
+
+function loadRenderer(win) {
+  if (!win || win.isDestroyed()) {
+    return Promise.resolve(false);
+  }
+  clearWindowTimer(win, "__engineRendererRetryTimer");
+  win.__enginePage = "renderer";
+  const loaded = isDev
+    ? (log("loading dev renderer", process.env.ELECTRON_START_URL), win.loadURL(process.env.ELECTRON_START_URL))
+    : (log("loading renderer file", path.join(__dirname, "..", "dist", "index.html")), win.loadFile(path.join(__dirname, "..", "dist", "index.html")));
+
+  return loaded.then(() => true).catch((error) => {
+    log(isDev ? "loadURL failed" : "loadFile failed", error.message);
+    showStartupPage(win, {
+      title: "界面正在重新加载",
+      message: "工作台界面暂时没有加载成功，程序会继续自动重试。",
+      detail: error.message,
+      variant: "warning"
+    });
+    scheduleRendererRetry(win);
+    return false;
+  });
+}
+
+function scheduleRendererRetry(win, delayMs = 2500) {
+  if (!win || win.isDestroyed()) {
+    return;
+  }
+  clearWindowTimer(win, "__engineRendererRetryTimer");
+  win.__engineRendererRetryTimer = setTimeout(async () => {
+    if (win.isDestroyed()) {
+      return;
+    }
+    if (await backendHealthy()) {
+      process.env.AGENT_ENGINE_HOST = backendHost;
+      process.env.AGENT_ENGINE_PORT = String(backendPort);
+      await loadRenderer(win);
+      return;
+    }
+    showStartupPage(win, {
+      title: "正在等待本机引擎",
+      message: "本机引擎还没有准备好，主界面会在连接恢复后自动打开。",
+      detail: backendUrl("/healthz"),
+      variant: "warning"
+    });
+    scheduleBackendRetry(win);
+  }, delayMs);
+}
+
+function clearWindowTimer(win, property) {
+  if (win && win[property]) {
+    clearTimeout(win[property]);
+    win[property] = null;
+  }
+}
+
+async function bootstrapWindow(win) {
+  const backendReady = await ensureBackendOnce();
+  process.env.AGENT_ENGINE_HOST = backendHost;
+  process.env.AGENT_ENGINE_PORT = String(backendPort);
+  if (!win || win.isDestroyed()) {
+    return;
+  }
+  if (backendReady) {
+    await loadRenderer(win);
+    return;
+  }
+  log("backend unavailable; waiting with recovery page", backendUrl("/healthz"));
+  showStartupPage(win, {
+    title: "正在等待本机引擎",
+    message: "本机引擎暂时没有连接成功，程序会继续重试，不需要手动重启主程序。",
+    detail: backendUrl("/healthz"),
+    variant: "warning"
+  });
+  scheduleBackendRetry(win);
+}
+
+function scheduleBackendRetry(win, delayMs = 5000) {
+  if (!win || win.isDestroyed()) {
+    return;
+  }
+  clearWindowTimer(win, "__engineBackendRetryTimer");
+  win.__engineBackendRetryTimer = setTimeout(async () => {
+    if (win.isDestroyed()) {
+      return;
+    }
+    const backendReady = await ensureBackendOnce();
+    process.env.AGENT_ENGINE_HOST = backendHost;
+    process.env.AGENT_ENGINE_PORT = String(backendPort);
+    if (backendReady) {
+      log("backend recovered; loading renderer", backendUrl("/healthz"));
+      await loadRenderer(win);
+      return;
+    }
+    showStartupPage(win, {
+      title: "正在等待本机引擎",
+      message: "还没有连接到本机引擎，程序正在继续重试。",
+      detail: backendUrl("/healthz"),
+      variant: "warning"
+    });
+    scheduleBackendRetry(win);
+  }, delayMs);
+}
+
+function ensureBackendOnce() {
+  if (!backendEnsureInFlight) {
+    backendEnsureInFlight = ensureBackend().finally(() => {
+      backendEnsureInFlight = null;
+    });
+  }
+  return backendEnsureInFlight;
 }
 
 function escapeHtml(value) {
@@ -172,14 +345,33 @@ app.whenReady().then(async () => {
     BrowserWindow.fromWebContents(event.sender)?.close();
   });
 
-  const backendReady = await ensureBackend();
   process.env.AGENT_ENGINE_HOST = backendHost;
   process.env.AGENT_ENGINE_PORT = String(backendPort);
-  createWindow(backendReady ? "" : `后端未能启动或连接：${backendUrl("/healthz")}`);
+  const win = createWindow();
+  bootstrapWindow(win).catch((error) => {
+    log("bootstrap window failed", error instanceof Error ? error.stack || error.message : String(error));
+    showStartupPage(win, {
+      title: "正在等待本机引擎",
+      message: "启动流程遇到问题，程序会继续等待本机引擎恢复。",
+      detail: error instanceof Error ? error.message : String(error),
+      variant: "warning"
+    });
+    scheduleBackendRetry(win);
+  });
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+      const activatedWindow = createWindow();
+      bootstrapWindow(activatedWindow).catch((error) => {
+        log("activate bootstrap failed", error instanceof Error ? error.stack || error.message : String(error));
+        showStartupPage(activatedWindow, {
+          title: "正在等待本机引擎",
+          message: "启动流程遇到问题，程序会继续等待本机引擎恢复。",
+          detail: error instanceof Error ? error.message : String(error),
+          variant: "warning"
+        });
+        scheduleBackendRetry(activatedWindow);
+      });
     }
   });
 });
