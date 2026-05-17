@@ -48,7 +48,9 @@
 - `frontend/download-success.html`：下载后安装指引。
 - `frontend/sponsor.html`：赞助入口占位页。
 
-安装包不提交进源码仓库，建议通过 GitHub Releases 分发。当前 release 附件包含 Mac install kit、Mac DMG 和 Windows x64 installer。
+安装包不提交进源码仓库，建议通过 GitHub Releases 分发。当前 release 附件包含 Mac install kit、Mac DMG 和 Windows x64 installer：
+
+[Multi-Agent Engine 0.1.0](https://github.com/pijiuya/multi-agent-game-engine/releases/tag/v0.1.0)
 
 ### 1. 安装后端依赖
 

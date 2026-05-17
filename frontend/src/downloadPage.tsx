@@ -4,9 +4,10 @@ import { Apple, Download, FileText, HardDriveDownload, Laptop, MonitorDown, Shie
 import { PageHero, SiteChrome } from "./siteChrome";
 import "./official.css";
 
-const macKitHref = "./release/Multi-Agent-Engine-0.1.0-mac-install-kit.zip";
-const macDmgHref = "./release/Multi-Agent%20Engine-0.1.0-mac-arm64.dmg";
-const windowsInstallerHref = "./release/Multi-Agent%20Engine-0.1.0-win-installer-x64.exe";
+const releaseBaseHref = "https://github.com/pijiuya/multi-agent-game-engine/releases/download/v0.1.0";
+const macKitHref = `${releaseBaseHref}/Multi-Agent-Engine-0.1.0-mac-install-kit.zip`;
+const macDmgHref = `${releaseBaseHref}/Multi-Agent%20Engine-0.1.0-mac-arm64.dmg`;
+const windowsInstallerHref = `${releaseBaseHref}/Multi-Agent%20Engine-0.1.0-win-installer-x64.exe`;
 
 type Platform = "mac" | "windows";
 
@@ -163,7 +164,7 @@ function DownloadPage() {
         <div className="section-heading">
           <p className="eyebrow">Verification</p>
           <h2 id="verify-title">下载后建议</h2>
-          <p>安装包来自当前仓库本地 release。发布到公网时，需要把 `frontend/release/` 一起部署到静态站点的 `release/` 路径。</p>
+          <p>安装包通过 GitHub Releases 分发。源码仓库只保存项目代码、文档和官网页面，不直接提交大体积安装包。</p>
         </div>
         <div className="stack-panel">
           {[
