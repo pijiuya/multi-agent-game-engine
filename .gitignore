@@ -1,8 +1,12 @@
 .venv/
 __pycache__/
 .pytest_cache/
+.DS_Store
+.playwright-cli/
 *.pyc
 runtime_project/
+tmp/
+output/
 *.out.log
 *.err.log
 *-dev.out.log
@@ -10,6 +14,7 @@ runtime_project/
 packaging/backend-build/
 packaging/backend-dist/
 packaging/*-runtime/
+packaging/smoke-runtime-*/
 packaging/__pycache__/
 
 frontend/node_modules/

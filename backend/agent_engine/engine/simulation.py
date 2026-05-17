@@ -788,6 +788,8 @@ class SimulationRuntime:
             target = self._first_movement_target(observation)
             if target:
                 return {"type": "move_to", "payload": {"target": target}}
+        if observation.get("dialogue_candidates") and ({"social", "say"} & allowed):
+            return None
         local_social_action = self._local_social_opportunity_action(agent_id, observation, allowed)
         if local_social_action is not None:
             return local_social_action
@@ -799,8 +801,6 @@ class SimulationRuntime:
                 return {"type": "observe", "payload": {}}
             if "wait" in allowed:
                 return {"type": "wait", "payload": {"duration": 1}}
-        if self._needs_llm_decision(observation, allowed):
-            return None
         if "observe" in allowed:
             return {"type": "observe", "payload": {}}
         if "wait" in allowed:

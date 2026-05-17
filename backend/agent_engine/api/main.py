@@ -760,6 +760,8 @@ def patch_map(payload: WorldMapPatch) -> dict[str, Any]:
 
 @app.get("/api/models")
 def get_models() -> dict[str, Any]:
+    _ensure_autodetected_local_llm_config()
+    _sync_runtime_model_providers()
     return {"models": [_public_model_config(config) for config in store.load_model_configs()]}
 
 
@@ -767,7 +769,7 @@ def get_models() -> dict[str, Any]:
 def replace_models(payload: ModelsPatch) -> dict[str, Any]:
     configs = [_model_config_dict(config) for config in payload.models]
     store.save_model_configs(configs)
-    _sync_runtime_model_providers()
+    _sync_runtime_model_providers(auto_detect=False)
     return {"models": [_public_model_config(config) for config in configs]}
 
 
@@ -780,7 +782,7 @@ def create_model(payload: ModelConfigPayload) -> dict[str, Any]:
     configs = [item for item in configs if item["id"] != config["id"]]
     configs.append(config)
     store.save_model_configs(configs)
-    _sync_runtime_model_providers()
+    _sync_runtime_model_providers(auto_detect=False)
     return {"models": [_public_model_config(item) for item in configs], "model": _public_model_config(config)}
 
 
@@ -792,7 +794,7 @@ def patch_model(model_id: str, payload: ModelConfigPatch) -> dict[str, Any]:
             next_config = {**config, **_payload_data(payload), "id": model_id}
             configs[index] = next_config
             store.save_model_configs(configs)
-            _sync_runtime_model_providers()
+            _sync_runtime_model_providers(auto_detect=False)
             return {"models": [_public_model_config(item) for item in configs], "model": _public_model_config(next_config)}
     raise HTTPException(status_code=404, detail="Model config not found")
 
@@ -804,14 +806,15 @@ def delete_model(model_id: str) -> dict[str, Any]:
     if len(next_configs) == len(configs):
         raise HTTPException(status_code=404, detail="Model config not found")
     store.save_model_configs(next_configs)
-    _sync_runtime_model_providers()
+    _sync_runtime_model_providers(auto_detect=False)
     return {"models": [_public_model_config(config) for config in next_configs]}
 
 
 @app.get("/api/model-capabilities/status")
 def model_capabilities_status() -> dict[str, Any]:
-    configs = store.load_model_configs()
     ollama_models = _detect_ollama_models()
+    configs = _ensure_autodetected_local_llm_config(ollama_models=ollama_models)
+    _sync_runtime_model_providers()
     local_services = _detect_local_model_services()
     local_environment = _local_runtime_environment()
     return {
@@ -1600,7 +1603,7 @@ def _public_model_config(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _sync_runtime_model_providers() -> None:
+def _sync_runtime_model_providers(*, auto_detect: bool = True) -> None:
     providers = {"mock": MockProvider()}
     remote_director = RemoteNarrativeDirector(
         _narrative_service_url(),
@@ -1614,8 +1617,12 @@ def _sync_runtime_model_providers() -> None:
     }
     default_provider_id = "mock"
     first_llm_provider = None
-    for config in store.load_model_configs():
+    configs = _ensure_autodetected_local_llm_config() if auto_detect else store.load_model_configs()
+    ollama_models = _detect_ollama_models()
+    for config in configs:
         if not config.get("enabled", True) or "llm" not in set(config.get("capabilities", [])):
+            continue
+        if not _configured_llm_available(config, ollama_models):
             continue
         provider = _runtime_provider_from_model_config(config, providers["mock"])
         if provider is None:
@@ -1634,6 +1641,50 @@ def _sync_runtime_model_providers() -> None:
     runtime.default_provider_id = default_provider_id
     runtime.scene_directors = scene_directors
     runtime.scene_director = _scene_director_for_local_chain(first_llm_provider)
+    if auto_detect and default_provider_id != "mock":
+        _prefer_default_provider_for_mock_agents(default_provider_id)
+
+
+def _ensure_autodetected_local_llm_config(ollama_models: list[str] | None = None) -> list[dict[str, Any]]:
+    configs = store.load_model_configs()
+    models = ollama_models if ollama_models is not None else _detect_ollama_models()
+    has_enabled_real_llm = any(
+        config.get("enabled", True)
+        and "llm" in set(config.get("capabilities", []))
+        and str(config.get("provider") or "mock") != "mock"
+        and _configured_llm_available(config, models)
+        for config in configs
+    )
+    if has_enabled_real_llm:
+        return configs
+
+    model = _recommended_installed_llm_model(models)
+    if not model:
+        return configs
+
+    next_configs = _upsert_model_config(configs, _local_llm_config(model))
+    store.save_model_configs(next_configs)
+    return next_configs
+
+
+def _prefer_default_provider_for_mock_agents(provider_id: str) -> None:
+    changed = False
+    for profile in runtime.world.agent_profiles.values():
+        if str(getattr(profile, "model_provider", "") or "mock") == "mock":
+            profile.model_provider = provider_id
+            changed = True
+    if changed:
+        store.save_world(runtime.world)
+
+
+def _configured_llm_available(config: dict[str, Any], ollama_models: list[str]) -> bool:
+    if "llm" not in set(config.get("capabilities", [])):
+        return True
+    provider = str(config.get("provider") or "mock")
+    if provider != "ollama":
+        return True
+    model = str(config.get("model") or "")
+    return bool(model and model in set(ollama_models))
 
 
 def _start_image_generation_task(
@@ -1941,6 +1992,8 @@ def _capability_status(
 ) -> dict[str, Any]:
     local_environment = local_environment or _local_runtime_environment()
     configured = _configured_model_for_capability(configs, capability)
+    if configured and capability == "llm" and not _configured_llm_available(configured, ollama_models):
+        configured = None
     mock_config = _mock_model_for_capability(configs, capability)
     recommendation = _recommended_local_config(capability, ollama_models, local_services)
     default_local_model = str(recommendation.get("model") or "") if recommendation else None

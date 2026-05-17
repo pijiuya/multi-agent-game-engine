@@ -619,8 +619,7 @@ def test_prefilter_keeps_social_and_movement_above_item_opportunities():
 
     assert movement_first_action == {"type": "move_to", "payload": {"target": {"x": 360, "y": 220}}}
     assert movement_action == {"type": "move_to", "payload": {"target": {"x": 360, "y": 220}}}
-    assert social_action["type"] == "social"
-    assert social_action["payload"]["target_agent_id"] == "agent_tao"
+    assert social_action is None
 
 
 def test_prefilter_interacts_with_plain_interactable_item_without_model_call():
@@ -819,20 +818,25 @@ def test_low_value_non_mock_decision_uses_rule_prefilter_without_model_call():
     assert world.decision_events[-1].results[0]["elapsed_ms"] == 0
 
 
-async def test_prefilter_handles_social_context_without_blocking_on_model():
+async def test_non_mock_social_context_uses_model_instead_of_rule_template():
     world = GameWorld.default()
     world.agent_profiles["agent_mira"].model_provider = "slow"
+    world.agent_profiles["agent_mira"].action_space = ["social", "say", "wait"]
     world.agent_profiles["agent_tao"].hidden = False
     world.agent_profiles["agent_ren"].hidden = True
     world.agent_states["agent_mira"].position = Point(240, 220)
+    world.agent_states["agent_mira"].status = "idle"
+    world.agent_states["agent_mira"].target = None
     world.agent_states["agent_tao"].position = Point(260, 220)
+    world.agent_states["agent_tao"].status = "idle"
+    world.agent_states["agent_tao"].target = None
     runtime = SimulationRuntime(world, providers={"mock": SlowProvider(), "slow": SlowProvider()})
     runtime.start()
 
     runtime._schedule_agent_decisions()
 
-    assert not world.agent_states["agent_mira"].pending_model
-    assert world.events[-1].type in {"action", "dialogue"}
+    assert world.agent_states["agent_mira"].pending_model
+    assert "agent_mira" in runtime._model_tasks
 
 
 def test_bad_model_utterances_are_not_shown_as_bubbles():

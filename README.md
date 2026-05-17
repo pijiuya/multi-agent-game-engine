@@ -38,6 +38,18 @@
 
 以下命令默认在 PowerShell 中执行，工作目录为仓库根目录。
 
+## 官方页面和发布包
+
+前端包含一套独立官方页面，可作为 GitHub 项目展示或静态站点部署：
+
+- `frontend/official.html`：项目首页。
+- `frontend/docs.html`：开发者文档入口。
+- `frontend/download.html`：按 Mac / Windows 自动切换的下载页。
+- `frontend/download-success.html`：下载后安装指引。
+- `frontend/sponsor.html`：赞助入口占位页。
+
+安装包不提交进源码仓库，建议通过 GitHub Releases 分发。当前 release 附件包含 Mac install kit、Mac DMG 和 Windows x64 installer。
+
 ### 1. 安装后端依赖
 
 建议使用 Python 3.11。

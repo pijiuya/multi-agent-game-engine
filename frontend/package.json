@@ -7,12 +7,14 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
+    "build:runtime:win": "cd .. && .\\.venv\\Scripts\\python packaging\\windows\\make_blank_runtime.py packaging\\windows-blank-runtime",
     "build:backend:win": "cd .. && .\\.venv\\Scripts\\python -m PyInstaller --noconfirm --clean --distpath packaging\\backend-dist --workpath packaging\\backend-build packaging\\agent-engine-backend.spec",
     "build:backend:mac": "cd .. && ./.venv/bin/python -m PyInstaller --noconfirm --clean --distpath packaging/backend-dist --workpath packaging/backend-build packaging/agent-engine-backend.spec",
     "electron:dev": "concurrently -k \"npm run dev -- --port 5173\" \"wait-on http://127.0.0.1:5173 && cross-env ELECTRON_START_URL=http://127.0.0.1:5173 electron electron/main.cjs\"",
     "electron:preview": "npm run build && electron electron/main.cjs",
-    "pack:win": "npm run build && npm run build:backend:win && electron-builder --win --dir",
-    "dist:win": "npm run build && npm run build:backend:win && electron-builder --win",
+    "pack:win": "npm run build && npm run build:runtime:win && npm run build:backend:win && electron-builder --win --dir",
+    "dist:win": "npm run build && npm run build:runtime:win && npm run build:backend:win && electron-builder --win",
+    "dist:win:kit": "npm run dist:win && node ../packaging/windows/make-release-kit.cjs",
     "pack:mac": "npm run build && npm run build:backend:mac && electron-builder --mac --dir",
     "dist:mac": "npm run build && npm run build:backend:mac && electron-builder --mac",
     "dist:mac:kit": "npm run dist:mac && node ../packaging/mac/make-release-kit.cjs",
@@ -83,6 +85,18 @@
         {
           "from": "../packaging/backend-dist/agent-engine-backend.exe",
           "to": "backend/agent-engine-backend.exe"
+        },
+        {
+          "from": "../packaging/windows-blank-runtime",
+          "to": "runtime_project"
+        },
+        {
+          "from": "../docs/windows-installation.zh-CN.md",
+          "to": "docs/windows-installation.zh-CN.md"
+        },
+        {
+          "from": "../docs/user-manual.zh-CN.md",
+          "to": "docs/user-manual.zh-CN.md"
         }
       ]
     },
@@ -105,6 +119,10 @@
         {
           "from": "../packaging/mac/install-multi-agent-engine.command",
           "to": "install-multi-agent-engine.command"
+        },
+        {
+          "from": "../packaging/mac/setup-ollama.command",
+          "to": "setup-ollama.command"
         },
         {
           "from": "../packaging/backend-dist/agent-engine-backend",

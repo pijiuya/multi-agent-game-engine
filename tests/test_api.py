@@ -811,7 +811,8 @@ def test_api_model_capability_status_and_one_click_config(monkeypatch):
     assert status.status_code == 200
     llm = next(item for item in status.json()["capabilities"] if item["id"] == "llm")
     sam = next(item for item in status.json()["capabilities"] if item["id"] == "segmentation")
-    assert llm["status"] == "local_available"
+    assert llm["status"] == "ready"
+    assert llm["configured_model"]["model"] == "qwen2.5:7b"
     assert llm["recommended_local"]["model"] == "qwen2.5:7b"
     assert [option["model"] for option in llm["local_options"]]
     assert next(option for option in llm["local_options"] if option["model"] == "qwen2.5:7b")["recommended"] is True
@@ -845,6 +846,22 @@ def test_api_model_capability_status_and_one_click_config(monkeypatch):
     assert sam_model["base_url"] == "http://localhost:8001/segment"
     stored_sam = next(model for model in api_main.store.load_model_configs() if model["id"] == "model_remote_sam")
     assert stored_sam["api_key"] == "local-dev-key"
+
+
+def test_api_autodetected_llm_replaces_mock_agent_profiles(monkeypatch):
+    client = TestClient(app)
+    api_main.runtime.world = api_main.GameWorld.default()
+    api_main.store.save_world(api_main.runtime.world)
+
+    assert client.patch("/api/models", json={"models": default_model_configs()}).status_code == 200
+    monkeypatch.setattr(api_main, "_detect_ollama_models", lambda: ["qwen2.5:3b"])
+    monkeypatch.setattr(api_main, "_recommended_llm_model_for_device", lambda local_environment=None: "qwen2.5:3b")
+
+    response = client.get("/api/models")
+
+    assert response.status_code == 200
+    assert api_main.runtime.default_provider_id == "model_local_llm"
+    assert {profile.model_provider for profile in api_main.runtime.world.agent_profiles.values()} == {"model_local_llm"}
 
 
 def test_api_llm_capability_is_installable_without_pulled_model(monkeypatch):
@@ -1679,7 +1696,8 @@ def test_api_llm_recommends_existing_gemma_when_qwen_missing(monkeypatch):
 
     status = client.get("/api/model-capabilities/status")
     llm = next(item for item in status.json()["capabilities"] if item["id"] == "llm")
-    assert llm["status"] == "local_available"
+    assert llm["status"] == "ready"
+    assert llm["configured_model"]["model"] == "gemma3:1b"
     assert llm["recommended_local"]["model"] == "gemma3:1b"
 
     configured = client.post("/api/model-capabilities/llm/configure-local")

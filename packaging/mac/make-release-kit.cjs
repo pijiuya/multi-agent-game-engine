@@ -29,6 +29,11 @@ const helperTarget = path.join(kitDir, "install-multi-agent-engine.command");
 fs.copyFileSync(helperSource, helperTarget);
 fs.chmodSync(helperTarget, 0o755);
 
+const ollamaHelperSource = path.join(repoRoot, "packaging", "mac", "setup-ollama.command");
+const ollamaHelperTarget = path.join(kitDir, "setup-ollama.command");
+fs.copyFileSync(ollamaHelperSource, ollamaHelperTarget);
+fs.chmodSync(ollamaHelperTarget, 0o755);
+
 const docs = [
   ["docs/mac-installation.zh-CN.md", "README-mac-installation.zh-CN.md"],
   ["docs/user-manual.zh-CN.md", "user-manual.zh-CN.md"]
@@ -37,9 +42,16 @@ for (const [source, target] of docs) {
   fs.copyFileSync(path.join(repoRoot, source), path.join(kitDir, target));
 }
 
+const checksumFiles = fs
+  .readdirSync(kitDir)
+  .filter((name) => name !== "SHA256SUMS.txt")
+  .sort();
 const checksumLines = [];
-for (const artifact of artifacts) {
+for (const artifact of checksumFiles) {
   const filePath = path.join(kitDir, artifact);
+  if (!fs.statSync(filePath).isFile()) {
+    continue;
+  }
   const digest = crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
   checksumLines.push(`${digest}  ${artifact}`);
 }

@@ -145,11 +145,34 @@ class ContextCompressor:
         trimmed["recent_utterances"] = _last_items(trimmed.get("recent_utterances"), 4)
         trimmed["relationships"] = _last_items(trimmed.get("relationships"), 4)
         trimmed["movement_targets"] = _last_items(trimmed.get("movement_targets"), 5)
+        trimmed["agent_recent_events"] = _compact_events(trimmed.get("agent_recent_events"), 4)
+        trimmed["recent_events"] = _compact_events(trimmed.get("recent_events"), 4)
+        trimmed["recent_utterances"] = _compact_utterances(trimmed.get("recent_utterances"), 4)
+        trimmed["scene_memories"] = _compact_memories(trimmed.get("scene_memories"), 1)
+        trimmed["scene_context"] = _compact_scene_context(trimmed.get("scene_context"), self.scene_memory_window)
+        trimmed["region_context"] = _compact_region_context(trimmed.get("region_context"))
+        trimmed["conversation_focus"] = _compact_conversation_focus(trimmed.get("conversation_focus"))
+        trimmed["item_context"] = _compact_item_context(trimmed.get("item_context"))
+        trimmed["movement_targets"] = _compact_movement_targets(trimmed.get("movement_targets"), 5)
         trimmed["context_budget"] = {
             "input_chars": len(json.dumps(trimmed, ensure_ascii=False, default=str)),
             "budget_chars": self.context_budget_chars,
             "trimmed": True,
         }
+        if trimmed["context_budget"]["input_chars"] > self.context_budget_chars:
+            trimmed["scene_memories"] = []
+            scene_context = trimmed.get("scene_context")
+            if isinstance(scene_context, dict):
+                scene_context.pop("cues", None)
+            trimmed["region_context"] = _compact_region_context(trimmed.get("region_context"), nearby_limit=1)
+            trimmed["agent_recent_events"] = _compact_events(trimmed.get("agent_recent_events"), 4)
+            trimmed["recent_events"] = _compact_events(trimmed.get("recent_events"), 4)
+            trimmed["recent_utterances"] = _compact_utterances(trimmed.get("recent_utterances"), 4)
+            trimmed["context_budget"] = {
+                "input_chars": len(json.dumps(trimmed, ensure_ascii=False, default=str)),
+                "budget_chars": self.context_budget_chars,
+                "trimmed": True,
+            }
         return trimmed
 
 
@@ -157,3 +180,160 @@ def _last_items(value: Any, limit: int) -> list[Any]:
     if not isinstance(value, list):
         return []
     return value[-max(0, limit) :]
+
+
+def _short_text(value: Any, limit: int = 220) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _compact_events(value: Any, limit: int) -> list[dict[str, Any]]:
+    events = _last_items(value, limit)
+    compact: list[dict[str, Any]] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        compact.append(
+            {
+                "type": event.get("type"),
+                "agent_id": event.get("agent_id"),
+                "tick": event.get("tick"),
+                "message": _short_text(event.get("message"), 180),
+            }
+        )
+    return compact
+
+
+def _compact_utterances(value: Any, limit: int) -> list[dict[str, Any]]:
+    utterances = _last_items(value, limit)
+    compact: list[dict[str, Any]] = []
+    for utterance in utterances:
+        if not isinstance(utterance, dict):
+            continue
+        compact.append(
+            {
+                "agent_id": utterance.get("agent_id"),
+                "target_agent_id": utterance.get("target_agent_id"),
+                "tick": utterance.get("tick"),
+                "text": _short_text(utterance.get("text"), 140),
+            }
+        )
+    return compact
+
+
+def _compact_memories(value: Any, limit: int) -> list[dict[str, Any]]:
+    memories = _last_items(value, limit)
+    compact: list[dict[str, Any]] = []
+    for memory in memories:
+        if not isinstance(memory, dict):
+            continue
+        compact.append(
+            {
+                "agent_id": memory.get("agent_id"),
+                "kind": memory.get("kind"),
+                "text": _short_text(memory.get("text"), 220),
+            }
+        )
+    return compact
+
+
+def _compact_scene_context(value: Any, memory_limit: int = 1) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "recent_summary": _short_text(value.get("recent_summary"), 220),
+        "agent_narrative_state": value.get("agent_narrative_state", {}),
+        "cues": _compact_events(value.get("cues"), 2),
+        "memories": _compact_memories(value.get("memories"), memory_limit),
+    }
+
+
+def _compact_region_context(value: Any, nearby_limit: int = 2) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "current": [_compact_region(region) for region in _last_items(value.get("current"), 1)],
+        "nearby": [_compact_region(region) for region in _last_items(value.get("nearby"), nearby_limit)],
+        "movement_priority": value.get("movement_priority", []),
+    }
+
+
+def _compact_region(region: Any) -> dict[str, Any]:
+    if not isinstance(region, dict):
+        return {}
+    return {
+        "id": region.get("id"),
+        "name": region.get("name"),
+        "function": region.get("function"),
+        "distance": region.get("distance"),
+        "center": region.get("center"),
+    }
+
+
+def _compact_conversation_focus(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "nearby_agents": [
+            {
+                "id": agent.get("id"),
+                "name": agent.get("name"),
+                "status": agent.get("status"),
+                "distance": agent.get("distance"),
+            }
+            for agent in _last_items(value.get("nearby_agents"), 3)
+            if isinstance(agent, dict)
+        ],
+        "nearby_items": [
+            {
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "distance": item.get("distance"),
+                "interactable": item.get("interactable"),
+                "movable": item.get("movable"),
+            }
+            for item in _last_items(value.get("nearby_items"), 3)
+            if isinstance(item, dict)
+        ],
+        "recent_utterances": _compact_utterances(value.get("recent_utterances"), 3),
+    }
+
+
+def _compact_item_context(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "nearby_named_items": [
+            {
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "distance": item.get("distance"),
+                "within_interaction_range": item.get("within_interaction_range"),
+                "movable": item.get("movable"),
+                "interactable": item.get("interactable"),
+                "available_affordances": item.get("available_affordances", []),
+            }
+            for item in _last_items(value.get("nearby_named_items"), 3)
+            if isinstance(item, dict)
+        ],
+        "recent_item_events": _compact_events(value.get("recent_item_events"), 2),
+        "item_policy": value.get("item_policy", {}),
+    }
+
+
+def _compact_movement_targets(value: Any, limit: int) -> list[dict[str, Any]]:
+    targets = _last_items(value, limit)
+    compact: list[dict[str, Any]] = []
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        compact.append(
+            {
+                "label": target.get("label"),
+                "function": target.get("function"),
+                "point": target.get("point"),
+            }
+        )
+    return compact

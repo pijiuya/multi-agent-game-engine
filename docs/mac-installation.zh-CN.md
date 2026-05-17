@@ -8,6 +8,7 @@
 
 - `Multi-Agent Engine-0.1.0-mac-arm64.dmg`：应用安装包。
 - `install-multi-agent-engine.command`：安装辅助脚本。
+- `setup-ollama.command`：Ollama 本地模型配置助手，可选运行。
 - `README-mac-installation.zh-CN.md`：本文。
 - `user-manual.zh-CN.md`：用户手册。
 - `SHA256SUMS.txt`：安装包校验值。
@@ -109,6 +110,14 @@ open "/Applications/Multi-Agent Engine.app"
 ## 7. 可选：本地 LLM
 
 Agent 对话可以使用本地 Ollama，但安装应用本身不要求 Ollama。
+
+如果用户不会使用终端，可以双击 install kit 里的：
+
+```text
+setup-ollama.command
+```
+
+它会自动检测 Ollama、调用 Ollama 官方安装脚本、启动本地服务，并可选下载推荐模型 `qwen2.5:1.5b`。如果 macOS 拦截这个脚本，请在 Finder 中右键它，选择「打开」，再确认运行。
 
 如果你希望使用本地模型：
 
