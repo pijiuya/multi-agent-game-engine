@@ -6,8 +6,8 @@ import "./official.css";
 
 const releaseBaseHref = "https://github.com/pijiuya/multi-agent-game-engine/releases/download/v0.1.0";
 const macKitHref = `${releaseBaseHref}/Multi-Agent-Engine-0.1.0-mac-install-kit.zip`;
-const macDmgHref = `${releaseBaseHref}/Multi-Agent%20Engine-0.1.0-mac-arm64.dmg`;
-const windowsInstallerHref = `${releaseBaseHref}/Multi-Agent%20Engine-0.1.0-win-installer-x64.exe`;
+const macDmgHref = `${releaseBaseHref}/Multi-Agent.Engine-0.1.0-mac-arm64.dmg`;
+const windowsInstallerHref = `${releaseBaseHref}/Multi-Agent.Engine-0.1.0-win-installer-x64.exe`;
 
 type Platform = "mac" | "windows";
 
